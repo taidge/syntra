@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <title>Contrix Office</title>
+        <meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta charset="UTF-8">
+        <meta name="theme-color" content="#1e293b">
+        <link rel="manifest" href="/manifest.webmanifest">
+        <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+        <link rel="stylesheet" href="/assets/main.css">
+        <link rel="preload" as="script" href="/assets/contrix-frontend-dxh447e419cecfc2a47.js" crossorigin>
+        <script>
+            try {
+                var t = localStorage.getItem('theme');
+                if (t === 'dark' || t === 'light') {
+                    document.documentElement.dataset.theme = t;
+                }
+            } catch (e) {}
+        </script>
+    </head>
+    <body>
+        <div id="main"></div>
+        <script type="module" async src="/assets/contrix-frontend-dxh447e419cecfc2a47.js"></script>
+        <script>
+            if ('serviceWorker' in navigator) {
+                window.addEventListener('load', function () {
+                    navigator.serviceWorker.register('/service-worker.js').catch(function (err) {
+                        console.warn('SW registration failed:', err);
+                    });
+                });
+            }
+        </script>
+    </body>
+</html>

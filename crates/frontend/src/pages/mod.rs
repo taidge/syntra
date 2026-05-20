@@ -1,0 +1,23 @@
+pub mod admin;
+pub mod calc;
+pub mod dashboard;
+pub mod document_editor;
+pub mod file_manager;
+pub mod home;
+pub mod login;
+pub mod register;
+pub mod slides;
+pub mod whiteboard;
+pub mod writer;
+
+pub use admin::Admin;
+pub use calc::Calc;
+pub use dashboard::Dashboard;
+pub use document_editor::DocumentEditor;
+pub use file_manager::FileManager;
+pub use home::Home;
+pub use login::Login;
+pub use register::Register;
+pub use slides::Slides;
+pub use whiteboard::Whiteboard;
+pub use writer::Writer;

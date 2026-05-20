@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: contrix-server
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: contrix-server.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: contrix-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target ${{ matrix.target }} -p contrix-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contrix-server-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+  create-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            contrix-server-x86_64-unknown-linux-gnu/contrix-server
+            contrix-server-x86_64-pc-windows-msvc/contrix-server.exe
+            contrix-server-x86_64-apple-darwin/contrix-server
+          generate_release_notes: true

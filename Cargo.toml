@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/server",
+    "crates/frontend",
+    "crates/doc-engine",
+    "crates/collab",
+    "crates/export",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Contrix Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/contrix-org/office"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Database
+diesel = { version = "2.3", features = ["sqlite", "r2d2", "chrono", "uuid"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+
+# Web
+salvo = { version = "0.89", features = ["cors", "jwt-auth", "logging", "websocket", "serve-static", "cookie", "compression"] }
+
+# Auth
+jsonwebtoken = { version = "10", features = ["hmac"] }
+argon2 = "0.5"
+
+# Utils
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+thiserror = "2"
+toml = "0.8"
+figment = { version = "0.10", features = ["toml", "env"] }
+rand = "0.10"
+base64 = "0.22"
+sha2 = "0.10"
+
+# Search
+tantivy = "0.25"
+
+# Email
+lettre = "0.11"
+
+# Image processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
+
+# Frontend
+dioxus = { version = "0.7", features = ["web", "router"] }
+
+# HTTP client
+reqwest = { version = "0.13", features = ["json"] }
+
+# Archive
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Office format parsing
+quick-xml = "0.36"
+calamine = "0.26"

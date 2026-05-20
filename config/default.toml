@@ -1,0 +1,42 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+cors_origins = ["http://localhost:8080", "http://localhost:3000"]
+
+[database]
+url = "sqlite://data/contrix.db?mode=rwc"
+max_connections = 5
+
+[auth]
+jwt_secret = "change-me-in-production-use-a-long-random-string"
+jwt_expiry_hours = 24
+refresh_expiry_days = 30
+
+[storage]
+base_path = "data/files"
+max_upload_size_mb = 100
+default_quota_mb = 5120
+# backend = "s3"
+# s3_bucket = "contrix-files"
+# s3_region = "us-east-1"
+# s3_access_key = ""
+# s3_secret_key = ""
+# s3_endpoint = ""
+
+[search]
+index_path = "data/search_index"
+
+[rate_limit]
+max_requests = 100
+window_seconds = 60
+enabled = true
+
+[oauth]
+# google_client_id = ""
+# google_client_secret = ""
+# github_client_id = ""
+# github_client_secret = ""
+
+[trash]
+auto_delete_days = 30
+auto_delete_enabled = false

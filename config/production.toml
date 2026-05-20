@@ -1,0 +1,21 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+cors_origins = []
+
+[database]
+url = "postgres://contrix:contrix@localhost:5432/contrix_office"
+max_connections = 20
+
+[auth]
+jwt_secret = "${JWT_SECRET}"
+jwt_expiry_hours = 8
+refresh_expiry_days = 7
+
+[storage]
+base_path = "/data/files"
+max_upload_size_mb = 500
+default_quota_mb = 10240
+
+[search]
+index_path = "/data/search_index"
