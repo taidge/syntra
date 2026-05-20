@@ -181,4 +181,21 @@ test.describe('Calc page UI @ui', () => {
         // And the cell should still display nothing.
         await expect(cellAt(page, 0, 0)).toHaveText('');
     });
+
+    test('clicking f(x) prepends = and focuses the formula bar', async ({ page }) => {
+        await cellAt(page, 0, 0).click();
+        await page.locator('.formula-icon').click();
+
+        await expect(page.locator('#calc-formula-input')).toHaveValue('=');
+        const focusedId = await page.evaluate(() => document.activeElement?.id);
+        expect(focusedId).toBe('calc-formula-input');
+    });
+
+    test('clicking f(x) when formula already starts with = leaves value unchanged', async ({ page }) => {
+        await cellAt(page, 0, 0).dblclick();
+        await page.keyboard.type('=SUM(A1:A3)');
+        await page.locator('.formula-icon').click();
+
+        await expect(page.locator('#calc-formula-input')).toHaveValue('=SUM(A1:A3)');
+    });
 });

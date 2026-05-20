@@ -353,7 +353,20 @@ pub fn Calc(id: String) -> Element {
             // ── Formula bar ──────────────────────────────────────────────
             div { class: "formula-bar",
                 span { class: "cell-ref", "{cell_ref(active_row, active_col)}" }
-                span { class: "formula-icon", "f(x)" }
+                button {
+                    class: "formula-icon",
+                    r#type: "button",
+                    title: "Insert formula",
+                    onclick: move |_| {
+                        let current = formula_bar.read().clone();
+                        if !current.starts_with('=') {
+                            formula_bar.set(format!("={current}"));
+                        }
+                        is_editing.set(true);
+                        focus_formula_input();
+                    },
+                    "f(x)"
+                }
                 input {
                     class: "formula-input",
                     id: FORMULA_INPUT_ID,
