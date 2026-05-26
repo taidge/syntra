@@ -1,8 +1,12 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use dioxus::prelude::*;
+use gloo_timers::callback::Timeout;
 use serde::Deserialize;
 
 use crate::components::navbar::Navbar;
-use crate::state::{AuthState, api_get};
+use crate::state::{AuthState, api_get, api_put};
 
 #[derive(Clone, Deserialize)]
 struct DocumentResponse {
@@ -70,6 +74,62 @@ pub fn Whiteboard(id: String) -> Element {
         }
     });
 
+    let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
+
+    let serialize_whiteboard = move || -> serde_json::Value {
+        serde_json::json!({ "elements": elements.read().clone() })
+    };
+
+    let perform_save = {
+        let id = id.clone();
+        move |body: serde_json::Value, mut status: Signal<String>, token: String| {
+            let id = id.clone();
+            status.set("Saving…".to_string());
+            wasm_bindgen_futures::spawn_local(async move {
+                let req = serde_json::json!({ "content": body });
+                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
+                    Ok(_) => status.set("All changes saved".to_string()),
+                    Err(e) => status.set(format!("Save failed: {e}")),
+                }
+            });
+        }
+    };
+
+    let schedule_save = {
+        let save_timer = save_timer.clone();
+        let perform_save = perform_save.clone();
+        let serialize_whiteboard = serialize_whiteboard.clone();
+        move || {
+            if !*loaded.read() {
+                return;
+            }
+            saved_status.set("Unsaved changes".to_string());
+            let body = serialize_whiteboard();
+            let token = auth.read().token.clone().unwrap_or_default();
+            let status = saved_status;
+            let perform_save = perform_save.clone();
+            let new_timer = Timeout::new(1500, move || {
+                perform_save(body, status, token);
+            });
+            *save_timer.borrow_mut() = Some(new_timer);
+        }
+    };
+
+    let flush_save = {
+        let save_timer = save_timer.clone();
+        let perform_save = perform_save.clone();
+        let serialize_whiteboard = serialize_whiteboard.clone();
+        move || {
+            if !*loaded.read() {
+                return;
+            }
+            save_timer.borrow_mut().take();
+            let body = serialize_whiteboard();
+            let token = auth.read().token.clone().unwrap_or_default();
+            perform_save(body, saved_status, token);
+        }
+    };
+
     /// List of available drawing tools.
     let tools: Vec<(&str, &str)> = vec![
         ("pen", "Pen"),
@@ -84,13 +144,32 @@ pub fn Whiteboard(id: String) -> Element {
 
     rsx! {
         Navbar {}
-        div { class: "editor-container",
+        div {
+            class: "editor-container",
+            tabindex: "0",
+            onkeydown: {
+                let mut flush_save = flush_save.clone();
+                move |evt: KeyboardEvent| {
+                    if evt.modifiers().contains(Modifiers::CONTROL) {
+                        if evt.key() == Key::Character("s".to_string()) {
+                            evt.prevent_default();
+                            flush_save();
+                        }
+                    }
+                }
+            },
             // Title bar
             div { class: "doc-title-bar",
                 input {
                     class: "doc-title-input",
                     value: "{doc_title}",
-                    oninput: move |e| doc_title.set(e.value()),
+                    oninput: {
+                        let mut schedule_save = schedule_save.clone();
+                        move |e: FormEvent| {
+                            doc_title.set(e.value());
+                            schedule_save();
+                        }
+                    },
                     placeholder: "Untitled Whiteboard",
                 }
                 span { class: "save-status", "{saved_status}" }
@@ -151,12 +230,15 @@ pub fn Whiteboard(id: String) -> Element {
                     button {
                         class: "tool-btn",
                         title: "Undo (Ctrl+Z)",
-                        onclick: move |_| {
-                            let current = elements.read().clone();
-                            if !current.is_empty() {
-                                undo_stack.write().push(current.clone());
-                                elements.write().pop();
-                                saved_status.set("Unsaved changes".to_string());
+                        onclick: {
+                            let mut schedule_save = schedule_save.clone();
+                            move |_| {
+                                let current = elements.read().clone();
+                                if !current.is_empty() {
+                                    undo_stack.write().push(current.clone());
+                                    elements.write().pop();
+                                    schedule_save();
+                                }
                             }
                         },
                         "Undo"
@@ -164,10 +246,13 @@ pub fn Whiteboard(id: String) -> Element {
                     button {
                         class: "tool-btn",
                         title: "Redo (Ctrl+Y)",
-                        onclick: move |_| {
-                            if let Some(state) = undo_stack.write().pop() {
-                                *elements.write() = state;
-                                saved_status.set("Unsaved changes".to_string());
+                        onclick: {
+                            let mut schedule_save = schedule_save.clone();
+                            move |_| {
+                                if let Some(state) = undo_stack.write().pop() {
+                                    *elements.write() = state;
+                                    schedule_save();
+                                }
                             }
                         },
                         "Redo"
@@ -175,13 +260,16 @@ pub fn Whiteboard(id: String) -> Element {
                     button {
                         class: "tool-btn danger",
                         title: "Clear canvas",
-                        onclick: move |_| {
-                            let current = elements.read().clone();
-                            if !current.is_empty() {
-                                undo_stack.write().push(current);
+                        onclick: {
+                            let mut schedule_save = schedule_save.clone();
+                            move |_| {
+                                let current = elements.read().clone();
+                                if !current.is_empty() {
+                                    undo_stack.write().push(current);
+                                }
+                                elements.write().clear();
+                                schedule_save();
                             }
-                            elements.write().clear();
-                            saved_status.set("Unsaved changes".to_string());
                         },
                         "Clear"
                     }

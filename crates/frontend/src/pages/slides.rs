@@ -1,9 +1,13 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use dioxus::prelude::*;
+use gloo_timers::callback::Timeout;
 use serde::Deserialize;
 
 use crate::components::navbar::Navbar;
 use crate::components::toolbar::Toolbar;
-use crate::state::{AuthState, api_get};
+use crate::state::{AuthState, api_get, api_put};
 
 #[derive(Clone, Deserialize)]
 struct DocumentResponse {
@@ -54,15 +58,98 @@ pub fn Slides(id: String) -> Element {
         }
     });
 
+    let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
+
+    let serialize_slides = move || -> serde_json::Value {
+        let count = *slide_count.read();
+        let slides: Vec<serde_json::Value> = (0..count)
+            .map(|i| serde_json::json!({
+                "id": i,
+                "elements": [],
+                "notes": ""
+            }))
+            .collect();
+        serde_json::json!({ "slides": slides })
+    };
+
+    let perform_save = {
+        let id = id.clone();
+        move |body: serde_json::Value, mut status: Signal<String>, token: String| {
+            let id = id.clone();
+            status.set("Saving…".to_string());
+            wasm_bindgen_futures::spawn_local(async move {
+                let req = serde_json::json!({ "content": body });
+                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
+                    Ok(_) => status.set("All changes saved".to_string()),
+                    Err(e) => status.set(format!("Save failed: {e}")),
+                }
+            });
+        }
+    };
+
+    let schedule_save = {
+        let save_timer = save_timer.clone();
+        let perform_save = perform_save.clone();
+        let serialize_slides = serialize_slides.clone();
+        move || {
+            if !*loaded.read() {
+                return;
+            }
+            saved_status.set("Unsaved changes".to_string());
+            let body = serialize_slides();
+            let token = auth.read().token.clone().unwrap_or_default();
+            let status = saved_status;
+            let perform_save = perform_save.clone();
+            let new_timer = Timeout::new(1500, move || {
+                perform_save(body, status, token);
+            });
+            *save_timer.borrow_mut() = Some(new_timer);
+        }
+    };
+
+    let flush_save = {
+        let save_timer = save_timer.clone();
+        let perform_save = perform_save.clone();
+        let serialize_slides = serialize_slides.clone();
+        move || {
+            if !*loaded.read() {
+                return;
+            }
+            save_timer.borrow_mut().take();
+            let body = serialize_slides();
+            let token = auth.read().token.clone().unwrap_or_default();
+            perform_save(body, saved_status, token);
+        }
+    };
+
     rsx! {
         Navbar {}
-        div { class: "editor-container",
+        div {
+            class: "editor-container",
+            tabindex: "0",
+            onkeydown: {
+                let mut flush_save = flush_save.clone();
+                move |evt: KeyboardEvent| {
+                    if evt.modifiers().contains(Modifiers::CONTROL) {
+                        if evt.key() == Key::Character("s".to_string()) {
+                            evt.prevent_default();
+                            flush_save();
+                        }
+                    }
+                }
+            },
             // Title bar
             div { class: "doc-title-bar",
                 input {
                     class: "doc-title-input",
                     value: "{doc_title}",
-                    oninput: move |e| doc_title.set(e.value()),
+                    oninput: {
+                        let mut schedule_save = schedule_save.clone();
+                        move |e: FormEvent| {
+                            doc_title.set(e.value());
+                            schedule_save();
+                        }
+                    },
                     placeholder: "Untitled Presentation",
                 }
                 span { class: "save-status", "{saved_status}" }
@@ -105,11 +192,14 @@ pub fn Slides(id: String) -> Element {
                     }
                     button {
                         class: "add-slide",
-                        onclick: move |_| {
-                            let count = *slide_count.read();
-                            slide_count.set(count + 1);
-                            current_slide.set(count);
-                            saved_status.set("Unsaved changes".to_string());
+                        onclick: {
+                            let mut schedule_save = schedule_save.clone();
+                            move |_| {
+                                let count = *slide_count.read();
+                                slide_count.set(count + 1);
+                                current_slide.set(count);
+                                schedule_save();
+                            }
                         },
                         "+ Add Slide"
                     }
@@ -127,13 +217,19 @@ pub fn Slides(id: String) -> Element {
                                 h2 {
                                     contenteditable: "true",
                                     class: "slide-title-text",
-                                    oninput: move |_| saved_status.set("Unsaved changes".to_string()),
+                                    oninput: {
+                                        let mut schedule_save = schedule_save.clone();
+                                        move |_| schedule_save()
+                                    },
                                     "Click to add title"
                                 }
                                 p {
                                     contenteditable: "true",
                                     class: "slide-subtitle-text",
-                                    oninput: move |_| saved_status.set("Unsaved changes".to_string()),
+                                    oninput: {
+                                        let mut schedule_save = schedule_save.clone();
+                                        move |_| schedule_save()
+                                    },
                                     "Click to add subtitle"
                                 }
                             }
@@ -143,13 +239,19 @@ pub fn Slides(id: String) -> Element {
                                 h3 {
                                     contenteditable: "true",
                                     class: "slide-heading-text",
-                                    oninput: move |_| saved_status.set("Unsaved changes".to_string()),
+                                    oninput: {
+                                        let mut schedule_save = schedule_save.clone();
+                                        move |_| schedule_save()
+                                    },
                                     "Click to add heading"
                                 }
                                 div {
                                     contenteditable: "true",
                                     class: "slide-body-text",
-                                    oninput: move |_| saved_status.set("Unsaved changes".to_string()),
+                                    oninput: {
+                                        let mut schedule_save = schedule_save.clone();
+                                        move |_| schedule_save()
+                                    },
                                     "Click to add content"
                                 }
                             }
@@ -200,7 +302,10 @@ pub fn Slides(id: String) -> Element {
                         textarea {
                             class: "speaker-notes",
                             placeholder: "Add notes for this slide...",
-                            oninput: move |_| saved_status.set("Unsaved changes".to_string()),
+                            oninput: {
+                                let mut schedule_save = schedule_save.clone();
+                                move |_| schedule_save()
+                            },
                         }
                     }
                 }

@@ -1370,6 +1370,9 @@ button:disabled {
     outline: 1px dashed var(--success);
     outline-offset: -2px;
 }
+.cell-bold { font-weight: 700; }
+.cell-italic { font-style: italic; }
+.cell-underline { text-decoration: underline; }
 
 .cell:focus {
     outline: 2px solid var(--primary);

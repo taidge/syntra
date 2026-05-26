@@ -792,6 +792,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dioxus",
+ "gloo-timers",
  "js-sys",
  "serde",
  "serde_json",

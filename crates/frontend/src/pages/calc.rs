@@ -1,12 +1,14 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use dioxus::prelude::*;
+use gloo_timers::callback::Timeout;
 use serde::Deserialize;
 use wasm_bindgen::JsCast;
 
 use crate::components::navbar::Navbar;
-use crate::components::toolbar::Toolbar;
-use crate::state::{AuthState, api_get};
+use crate::state::{AuthState, api_get, api_put};
 
 #[derive(Clone, Deserialize)]
 struct DocumentResponse {
@@ -26,6 +28,85 @@ struct SheetLite {
     name: String,
     #[serde(default)]
     cells: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CellStyle {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    number_format: String,
+}
+
+fn current_selection_cells(
+    active: (u32, u32),
+    sel_start: Option<(u32, u32)>,
+    sel_end: Option<(u32, u32)>,
+    extra: &[(u32, u32)],
+) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    if let (Some(a), Some(b)) = (sel_start, sel_end) {
+        let (r1, r2) = (a.0.min(b.0), a.0.max(b.0));
+        let (c1, c2) = (a.1.min(b.1), a.1.max(b.1));
+        for r in r1..=r2 {
+            for c in c1..=c2 {
+                out.push((r, c));
+            }
+        }
+    } else {
+        out.push(active);
+    }
+    for &c in extra {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn format_number(value: &str, fmt: &str) -> String {
+    match fmt {
+        "currency" => value
+            .parse::<f64>()
+            .map(|n| format!("${:.2}", n))
+            .unwrap_or_else(|_| value.to_string()),
+        "percent" => value
+            .parse::<f64>()
+            .map(|n| format!("{:.0}%", n * 100.0))
+            .unwrap_or_else(|_| value.to_string()),
+        "decimal0" => value
+            .parse::<f64>()
+            .map(|n| format!("{:.0}", n))
+            .unwrap_or_else(|_| value.to_string()),
+        "decimal2" => value
+            .parse::<f64>()
+            .map(|n| format!("{:.2}", n))
+            .unwrap_or_else(|_| value.to_string()),
+        _ => value.to_string(),
+    }
+}
+
+fn style_to_json(style: &CellStyle) -> Option<serde_json::Value> {
+    if style == &CellStyle::default() {
+        return None;
+    }
+    let mut obj = serde_json::Map::new();
+    if style.bold {
+        obj.insert("bold".to_string(), serde_json::Value::Bool(true));
+    }
+    if style.italic {
+        obj.insert("italic".to_string(), serde_json::Value::Bool(true));
+    }
+    if style.underline {
+        obj.insert("underline".to_string(), serde_json::Value::Bool(true));
+    }
+    if !style.number_format.is_empty() && style.number_format != "general" {
+        obj.insert(
+            "number_format".to_string(),
+            serde_json::Value::String(style.number_format.clone()),
+        );
+    }
+    Some(serde_json::Value::Object(obj))
 }
 
 fn cell_value_to_string(v: &serde_json::Value) -> String {
@@ -51,15 +132,33 @@ fn cell_value_to_string(v: &serde_json::Value) -> String {
     }
 }
 
+fn style_from_json(v: &serde_json::Value) -> CellStyle {
+    CellStyle {
+        bold: v.get("bold").and_then(|b| b.as_bool()).unwrap_or(false),
+        italic: v.get("italic").and_then(|b| b.as_bool()).unwrap_or(false),
+        underline: v.get("underline").and_then(|b| b.as_bool()).unwrap_or(false),
+        number_format: v
+            .get("number_format")
+            .and_then(|s| s.as_str())
+            .unwrap_or("general")
+            .to_string(),
+    }
+}
+
 fn hydrate_workbook(
     content: &serde_json::Value,
-) -> (Vec<String>, HashMap<(usize, u32, u32), String>) {
+) -> (
+    Vec<String>,
+    HashMap<(usize, u32, u32), String>,
+    HashMap<(usize, u32, u32), CellStyle>,
+) {
     let wb: WorkbookLite = match serde_json::from_value(content.clone()) {
         Ok(w) => w,
-        Err(_) => return (Vec::new(), HashMap::new()),
+        Err(_) => return (Vec::new(), HashMap::new(), HashMap::new()),
     };
     let mut names = Vec::new();
     let mut cells = HashMap::new();
+    let mut styles = HashMap::new();
     for (sheet_idx, sheet) in wb.sheets.iter().enumerate() {
         names.push(sheet.name.clone());
         // `cells` may be either a HashMap object {"row,col": Cell} OR
@@ -89,6 +188,12 @@ fn hydrate_workbook(
                 if !display.is_empty() {
                     cells.insert((sheet_idx, row, col), display);
                 }
+                if let Some(style_json) = cell.get("style") {
+                    let style = style_from_json(style_json);
+                    if style != CellStyle::default() {
+                        styles.insert((sheet_idx, row, col), style);
+                    }
+                }
             }
         } else if let Some(obj) = sheet.cells.as_object() {
             for (k, cell) in obj {
@@ -115,10 +220,16 @@ fn hydrate_workbook(
                 if !display.is_empty() {
                     cells.insert((sheet_idx, row, col), display);
                 }
+                if let Some(style_json) = cell.get("style") {
+                    let style = style_from_json(style_json);
+                    if style != CellStyle::default() {
+                        styles.insert((sheet_idx, row, col), style);
+                    }
+                }
             }
         }
     }
-    (names, cells)
+    (names, cells, styles)
 }
 
 const FORMULA_INPUT_ID: &str = "calc-formula-input";
@@ -192,6 +303,7 @@ pub fn Calc(id: String) -> Element {
     // ── Cell data ────────────────────────────────────────────────────────
     // Key: (sheet_index, row, col)  Value: raw text / formula
     let mut cells = use_signal(|| HashMap::<(usize, u32, u32), String>::new());
+    let mut cell_styles = use_signal(|| HashMap::<(usize, u32, u32), CellStyle>::new());
 
     // ── Active cell & editing ────────────────────────────────────────────
     let mut active_cell = use_signal(|| (0u32, 0u32));
@@ -238,22 +350,139 @@ pub fn Calc(id: String) -> Element {
         }
         if let Some(Ok(doc)) = doc_resource.read().as_ref() {
             doc_title.set(doc.name.clone());
-            let (names, hydrated) = hydrate_workbook(&doc.content);
+            let (names, hydrated, styles) = hydrate_workbook(&doc.content);
             if !names.is_empty() {
                 sheets.set(names);
             }
             cells.set(hydrated);
+            cell_styles.set(styles);
             active_sheet.set(0);
             loaded.set(true);
         }
     });
+
+    let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
+
+    let serialize_workbook = move || -> serde_json::Value {
+        let names = sheets.read().clone();
+        let cells_ref = cells.read();
+        let styles_ref = cell_styles.read();
+        let mut per_sheet: Vec<Vec<serde_json::Value>> = names.iter().map(|_| Vec::new()).collect();
+        let mut emitted: std::collections::HashSet<(usize, u32, u32)> =
+            std::collections::HashSet::new();
+        for ((si, r, c), value) in cells_ref.iter() {
+            if *si >= per_sheet.len() {
+                continue;
+            }
+            let cref = serde_json::json!({ "row": r, "col": c });
+            let is_formula = value.starts_with('=');
+            let mut cell = if is_formula {
+                serde_json::json!({
+                    "formula": value,
+                    "value": { "type": "Empty" }
+                })
+            } else if let Ok(n) = value.parse::<f64>() {
+                serde_json::json!({
+                    "formula": serde_json::Value::Null,
+                    "value": { "type": "Number", "value": n }
+                })
+            } else {
+                serde_json::json!({
+                    "formula": serde_json::Value::Null,
+                    "value": { "type": "Text", "value": value }
+                })
+            };
+            if let Some(style) = styles_ref.get(&(*si, *r, *c)) {
+                if let Some(style_json) = style_to_json(style) {
+                    if let Some(obj) = cell.as_object_mut() {
+                        obj.insert("style".to_string(), style_json);
+                    }
+                }
+            }
+            per_sheet[*si].push(serde_json::json!([cref, cell]));
+            emitted.insert((*si, *r, *c));
+        }
+        for ((si, r, c), style) in styles_ref.iter() {
+            if *si >= per_sheet.len() {
+                continue;
+            }
+            if emitted.contains(&(*si, *r, *c)) {
+                continue;
+            }
+            let Some(style_json) = style_to_json(style) else { continue };
+            let cref = serde_json::json!({ "row": r, "col": c });
+            let cell = serde_json::json!({
+                "formula": serde_json::Value::Null,
+                "value": { "type": "Empty" },
+                "style": style_json,
+            });
+            per_sheet[*si].push(serde_json::json!([cref, cell]));
+        }
+        let sheets_json: Vec<serde_json::Value> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| serde_json::json!({ "name": name, "cells": per_sheet[i] }))
+            .collect();
+        serde_json::json!({ "sheets": sheets_json })
+    };
+
+    let perform_save = {
+        let id = id.clone();
+        move |body: serde_json::Value, mut status: Signal<String>, token: String| {
+            let id = id.clone();
+            status.set("Saving…".to_string());
+            wasm_bindgen_futures::spawn_local(async move {
+                let req = serde_json::json!({ "content": body });
+                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
+                    Ok(_) => status.set("All changes saved".to_string()),
+                    Err(e) => status.set(format!("Save failed: {e}")),
+                }
+            });
+        }
+    };
+
+    let schedule_save = {
+        let save_timer = save_timer.clone();
+        let perform_save = perform_save.clone();
+        let serialize_workbook = serialize_workbook.clone();
+        move || {
+            if !*loaded.read() {
+                return;
+            }
+            saved_status.set("Unsaved changes".to_string());
+            let body = serialize_workbook();
+            let token = auth.read().token.clone().unwrap_or_default();
+            let status = saved_status;
+            let perform_save = perform_save.clone();
+            let new_timer = Timeout::new(1500, move || {
+                perform_save(body, status, token);
+            });
+            *save_timer.borrow_mut() = Some(new_timer);
+        }
+    };
+
+    let flush_save = {
+        let save_timer = save_timer.clone();
+        let perform_save = perform_save.clone();
+        let serialize_workbook = serialize_workbook.clone();
+        move || {
+            if !*loaded.read() {
+                return;
+            }
+            save_timer.borrow_mut().take();
+            let body = serialize_workbook();
+            let token = auth.read().token.clone().unwrap_or_default();
+            perform_save(body, saved_status, token);
+        }
+    };
 
     // ── Derived values ───────────────────────────────────────────────────
     let (active_row, active_col) = *active_cell.read();
     let sheet_idx = *active_sheet.read();
 
     // Helper: commit the current formula bar contents into the cell map.
-    let mut commit_formula_bar = {
+    let commit_formula_bar = {
+        let mut schedule_save = schedule_save.clone();
         move || {
             let value = formula_bar.read().clone();
             let (r, c) = *active_cell.read();
@@ -264,7 +493,7 @@ pub fn Calc(id: String) -> Element {
                 cells.write().insert((si, r, c), value);
             }
             is_editing.set(false);
-            saved_status.set("Unsaved changes".to_string());
+            schedule_save();
         }
     };
 
@@ -313,7 +542,11 @@ pub fn Calc(id: String) -> Element {
             tabindex: "0",
 
             // ── Keyboard navigation ──────────────────────────────────────
-            onkeydown: move |evt: KeyboardEvent| {
+            onkeydown: {
+                let mut schedule_save = schedule_save.clone();
+                let mut flush_save = flush_save.clone();
+                let mut commit_formula_bar = commit_formula_bar.clone();
+                move |evt: KeyboardEvent| {
                 let key = evt.key();
                 let modifiers = evt.modifiers();
                 let (mut r, mut c) = *active_cell.read();
@@ -373,13 +606,13 @@ pub fn Calc(id: String) -> Element {
                         let si = *active_sheet.read();
                         cells.write().remove(&(si, r, c));
                         formula_bar.set(String::new());
-                        saved_status.set("Unsaved changes".to_string());
+                        schedule_save();
                     }
 
-                    // Ctrl+S — save stub
+                    // Ctrl+S — force-flush save
                     Key::Character(ref ch) if ch == "s" && modifiers.contains(Modifiers::CONTROL) => {
                         evt.prevent_default();
-                        saved_status.set("All changes saved".to_string());
+                        flush_save();
                     }
 
                     // Any printable character starts an edit by seeding the formula bar
@@ -420,10 +653,13 @@ pub fn Calc(id: String) -> Element {
                     selection_start.set(Some((r, c)));
                     selection_end.set(Some((r, c)));
                 }
+                }
             },
 
             // Global mouseup to stop drag-select even outside cells
-            onmouseup: move |_| {
+            onmouseup: {
+                let mut schedule_save = schedule_save.clone();
+                move |_| {
                 is_selecting.set(false);
                 let current_fill = *fill_mode.read();
                 if let Some(state) = current_fill {
@@ -473,8 +709,9 @@ pub fn Calc(id: String) -> Element {
                     drop(writer);
                     selection_start.set(Some((min_r, min_c)));
                     selection_end.set(Some((max_r, max_c)));
-                    saved_status.set("Unsaved changes".to_string());
+                    schedule_save();
                     fill_mode.set(None);
+                }
                 }
             },
 
@@ -483,14 +720,202 @@ pub fn Calc(id: String) -> Element {
                 input {
                     class: "doc-title-input",
                     value: "{doc_title}",
-                    oninput: move |e| doc_title.set(e.value()),
+                    oninput: {
+                        let mut schedule_save = schedule_save.clone();
+                        move |e: FormEvent| {
+                            doc_title.set(e.value());
+                            schedule_save();
+                        }
+                    },
                     placeholder: "Untitled Spreadsheet",
                 }
                 span { class: "save-status", "{saved_status}" }
             }
 
             // ── Toolbar ──────────────────────────────────────────────────
-            Toolbar { doc_type: "calc".to_string() }
+            {
+                let mut schedule_save_bold = schedule_save.clone();
+                let mut schedule_save_italic = schedule_save.clone();
+                let mut schedule_save_under = schedule_save.clone();
+                let mut schedule_save_curr = schedule_save.clone();
+                let mut schedule_save_pct = schedule_save.clone();
+                let mut schedule_save_d0 = schedule_save.clone();
+                let mut schedule_save_d2 = schedule_save.clone();
+                let apply_toggle = move |which: u8| {
+                    let active = *active_cell.read();
+                    let sel_s = *selection_start.read();
+                    let sel_e = *selection_end.read();
+                    let extra = extra_selection.read().clone();
+                    let targets = current_selection_cells(active, sel_s, sel_e, &extra);
+                    let si = *active_sheet.read();
+                    let all_on = targets.iter().all(|(r, c)| {
+                        cell_styles
+                            .read()
+                            .get(&(si, *r, *c))
+                            .map(|s| match which {
+                                0 => s.bold,
+                                1 => s.italic,
+                                _ => s.underline,
+                            })
+                            .unwrap_or(false)
+                    });
+                    let mut w = cell_styles.write();
+                    for (r, c) in targets {
+                        let entry = w.entry((si, r, c)).or_default();
+                        match which {
+                            0 => entry.bold = !all_on,
+                            1 => entry.italic = !all_on,
+                            _ => entry.underline = !all_on,
+                        }
+                        if entry == &CellStyle::default() {
+                            w.remove(&(si, r, c));
+                        }
+                    }
+                };
+                let apply_format = move |fmt: &'static str| {
+                    let active = *active_cell.read();
+                    let sel_s = *selection_start.read();
+                    let sel_e = *selection_end.read();
+                    let extra = extra_selection.read().clone();
+                    let targets = current_selection_cells(active, sel_s, sel_e, &extra);
+                    let si = *active_sheet.read();
+                    let mut w = cell_styles.write();
+                    for (r, c) in targets {
+                        let entry = w.entry((si, r, c)).or_default();
+                        entry.number_format = fmt.to_string();
+                        if entry == &CellStyle::default() {
+                            w.remove(&(si, r, c));
+                        }
+                    }
+                };
+                let apply_toggle_b = apply_toggle.clone();
+                let apply_toggle_i = apply_toggle.clone();
+                let apply_toggle_u = apply_toggle.clone();
+                let apply_format_c = apply_format.clone();
+                let apply_format_p = apply_format.clone();
+                let apply_format_d0 = apply_format.clone();
+                let apply_format_d2 = apply_format.clone();
+                rsx! {
+                    div { class: "toolbar",
+                        div { class: "toolbar-group",
+                            select { class: "toolbar-select font-family",
+                                option { "Arial" }
+                                option { "Times New Roman" }
+                                option { "Courier New" }
+                            }
+                            select { class: "toolbar-select font-size",
+                                option { value: "10", "10" }
+                                option { value: "11", selected: true, "11" }
+                                option { value: "12", "12" }
+                                option { value: "14", "14" }
+                            }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button {
+                                class: "toolbar-btn",
+                                title: "Bold",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_toggle_b.clone();
+                                    f(0);
+                                    schedule_save_bold();
+                                },
+                                "B"
+                            }
+                            button {
+                                class: "toolbar-btn italic",
+                                title: "Italic",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_toggle_i.clone();
+                                    f(1);
+                                    schedule_save_italic();
+                                },
+                                "I"
+                            }
+                            button {
+                                class: "toolbar-btn underline",
+                                title: "Underline",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_toggle_u.clone();
+                                    f(2);
+                                    schedule_save_under();
+                                },
+                                "U"
+                            }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button {
+                                class: "toolbar-btn",
+                                title: "Currency",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_format_c.clone();
+                                    f("currency");
+                                    schedule_save_curr();
+                                },
+                                "$"
+                            }
+                            button {
+                                class: "toolbar-btn",
+                                title: "Percent",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_format_p.clone();
+                                    f("percent");
+                                    schedule_save_pct();
+                                },
+                                "%"
+                            }
+                            button {
+                                class: "toolbar-btn",
+                                title: "Decrease Decimal",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_format_d0.clone();
+                                    f("decimal0");
+                                    schedule_save_d0();
+                                },
+                                ".0"
+                            }
+                            button {
+                                class: "toolbar-btn",
+                                title: "Increase Decimal",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_format_d2.clone();
+                                    f("decimal2");
+                                    schedule_save_d2();
+                                },
+                                ".00"
+                            }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button { class: "toolbar-btn", title: "Merge Cells", "Merge" }
+                            button { class: "toolbar-btn", title: "Cell Borders", "Borders" }
+                            input { r#type: "color", class: "toolbar-color", title: "Fill Color", value: "#ffffff" }
+                            input { r#type: "color", class: "toolbar-color", title: "Text Color", value: "#000000" }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button { class: "toolbar-btn", title: "Align Left", "L" }
+                            button { class: "toolbar-btn", title: "Align Center", "C" }
+                            button { class: "toolbar-btn", title: "Align Right", "R" }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button { class: "toolbar-btn", title: "Sort A-Z", "Sort" }
+                            button { class: "toolbar-btn", title: "Filter", "Filter" }
+                            button { class: "toolbar-btn", title: "Insert Function", "f(x)" }
+                            button { class: "toolbar-btn", title: "Insert Chart", "Chart" }
+                        }
+                    }
+                }
+            }
 
             // ── Formula bar ──────────────────────────────────────────────
             div { class: "formula-bar",
@@ -518,24 +943,27 @@ pub fn Calc(id: String) -> Element {
                         formula_bar.set(e.value());
                         is_editing.set(true);
                     },
-                    onkeydown: move |evt: KeyboardEvent| {
-                        if evt.key() == Key::Enter {
-                            evt.prevent_default();
-                            commit_formula_bar();
-                            // Move active cell down
-                            let (r, c) = *active_cell.read();
-                            if r + 1 < NUM_ROWS {
-                                active_cell.set((r + 1, c));
+                    onkeydown: {
+                        let mut commit_formula_bar = commit_formula_bar.clone();
+                        move |evt: KeyboardEvent| {
+                            if evt.key() == Key::Enter {
+                                evt.prevent_default();
+                                commit_formula_bar();
+                                // Move active cell down
+                                let (r, c) = *active_cell.read();
+                                if r + 1 < NUM_ROWS {
+                                    active_cell.set((r + 1, c));
+                                    let si = *active_sheet.read();
+                                    let val = cells.read().get(&(si, r + 1, c)).cloned().unwrap_or_default();
+                                    formula_bar.set(val);
+                                }
+                            } else if evt.key() == Key::Escape {
+                                let (r, c) = *active_cell.read();
                                 let si = *active_sheet.read();
-                                let val = cells.read().get(&(si, r + 1, c)).cloned().unwrap_or_default();
-                                formula_bar.set(val);
+                                let orig = cells.read().get(&(si, r, c)).cloned().unwrap_or_default();
+                                formula_bar.set(orig);
+                                is_editing.set(false);
                             }
-                        } else if evt.key() == Key::Escape {
-                            let (r, c) = *active_cell.read();
-                            let si = *active_sheet.read();
-                            let orig = cells.read().get(&(si, r, c)).cloned().unwrap_or_default();
-                            formula_bar.set(orig);
-                            is_editing.set(false);
                         }
                     },
                 }
@@ -588,7 +1016,7 @@ pub fn Calc(id: String) -> Element {
                                         };
 
                                         let editing = is_active && *is_editing.read();
-                                        let class_str = match (is_active, is_selected, fill_preview, editing) {
+                                        let base_class = match (is_active, is_selected, fill_preview, editing) {
                                             (_, _, true, _) => "cell fill-preview",
                                             (_, _, _, true) => "cell active editing",
                                             (true, _, _, _) => "cell active",
@@ -598,7 +1026,18 @@ pub fn Calc(id: String) -> Element {
 
                                         let si = sheet_idx;
                                         let cell_value = cells.read().get(&(si, row, col)).cloned().unwrap_or_default();
-                                        let display = display_value(&cell_value).to_string();
+                                        let style = cell_styles.read().get(&(si, row, col)).cloned().unwrap_or_default();
+                                        let mut style_classes = String::new();
+                                        if style.bold { style_classes.push_str(" cell-bold"); }
+                                        if style.italic { style_classes.push_str(" cell-italic"); }
+                                        if style.underline { style_classes.push_str(" cell-underline"); }
+                                        let class_str = format!("{base_class}{style_classes}");
+                                        let display = if style.number_format.is_empty() || style.number_format == "general" {
+                                            display_value(&cell_value).to_string()
+                                        } else {
+                                            format_number(&cell_value, &style.number_format)
+                                        };
+                                        let mut commit_formula_bar = commit_formula_bar.clone();
 
                                         rsx! {
                                             td {
@@ -702,6 +1141,7 @@ pub fn Calc(id: String) -> Element {
                             "sheet-tab"
                         };
                         let tab_name = name.clone();
+                        let mut commit_formula_bar = commit_formula_bar.clone();
                         rsx! {
                             button {
                                 class: "{tab_class}",

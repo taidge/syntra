@@ -1,4 +1,8 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use dioxus::prelude::*;
+use gloo_timers::callback::Timeout;
 use serde::Deserialize;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -7,8 +11,31 @@ use web_sys::{MessageEvent, WebSocket};
 use crate::collab_client::{CollabMessage, RemoteCursor, connect_collab};
 use crate::components::navbar::Navbar;
 use crate::components::sidebar::Sidebar;
-use crate::components::toolbar::Toolbar;
-use crate::state::{AuthState, api_get};
+use crate::state::{AuthState, api_get, api_put};
+
+const WRITER_BODY_ID: &str = "writer-body";
+
+fn exec_cmd(name: &str, value: Option<&str>) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id(WRITER_BODY_ID) {
+            if let Some(html_el) = el.dyn_ref::<web_sys::HtmlElement>() {
+                let _ = html_el.focus();
+            }
+        }
+        if let Ok(html_doc) = doc.dyn_into::<web_sys::HtmlDocument>() {
+            let val = value.unwrap_or("");
+            let _ = html_doc.exec_command_with_show_ui_and_value(name, false, val);
+        }
+    }
+}
+
+fn editor_text() -> String {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(WRITER_BODY_ID))
+        .and_then(|el| el.dyn_ref::<web_sys::HtmlElement>().map(|h| h.inner_text()))
+        .unwrap_or_default()
+}
 
 #[derive(Clone, Deserialize)]
 struct DocumentResponse {
@@ -61,6 +88,7 @@ pub fn Writer(id: String) -> Element {
     let mut saved_status = use_signal(|| "All changes saved".to_string());
     let mut show_sidebar = use_signal(|| true);
     let mut doc_body_text = use_signal(String::new);
+    let mut initial_html = use_signal(String::new);
     let mut loaded = use_signal(|| false);
 
     let auth = use_context::<Signal<AuthState>>();
@@ -85,6 +113,21 @@ pub fn Writer(id: String) -> Element {
             let text = writer_content_to_plain(&doc.content);
             let wc = text.split_whitespace().count() as u32;
             let cc = text.len() as u32;
+            let html = text
+                .split('\n')
+                .map(|line| {
+                    let escaped = line
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    if escaped.is_empty() {
+                        "<div><br></div>".to_string()
+                    } else {
+                        format!("<div>{escaped}</div>")
+                    }
+                })
+                .collect::<String>();
+            initial_html.set(html);
             doc_body_text.set(text);
             word_count.set(wc);
             char_count.set(cc);
@@ -142,16 +185,95 @@ pub fn Writer(id: String) -> Element {
         }
     });
 
+    let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
+
+    let perform_save = {
+        let id = id.clone();
+        move |body: serde_json::Value, mut status: Signal<String>, token: String| {
+            let id = id.clone();
+            status.set("Saving…".to_string());
+            wasm_bindgen_futures::spawn_local(async move {
+                let req = serde_json::json!({ "content": body });
+                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
+                    Ok(_) => status.set("All changes saved".to_string()),
+                    Err(e) => status.set(format!("Save failed: {e}")),
+                }
+            });
+        }
+    };
+
+    let schedule_save = {
+        let save_timer = save_timer.clone();
+        let perform_save = perform_save.clone();
+        move || {
+            if !*loaded.read() {
+                return;
+            }
+            saved_status.set("Unsaved changes".to_string());
+            let body = serde_json::json!({
+                "body": [{"runs": [{"text": doc_body_text.read().clone()}]}]
+            });
+            let token = auth.read().token.clone().unwrap_or_default();
+            let status = saved_status;
+            let perform_save = perform_save.clone();
+            let new_timer = Timeout::new(1500, move || {
+                perform_save(body, status, token);
+            });
+            *save_timer.borrow_mut() = Some(new_timer);
+        }
+    };
+
+    let flush_save = {
+        let save_timer = save_timer.clone();
+        let perform_save = perform_save.clone();
+        move || {
+            if !*loaded.read() {
+                return;
+            }
+            save_timer.borrow_mut().take();
+            let body = serde_json::json!({
+                "body": [{"runs": [{"text": doc_body_text.read().clone()}]}]
+            });
+            let token = auth.read().token.clone().unwrap_or_default();
+            perform_save(body, saved_status, token);
+        }
+    };
+
     rsx! {
         Navbar {}
         div {
             class: "editor-container",
             tabindex: "0",
-            onkeydown: move |evt: KeyboardEvent| {
-                if evt.modifiers().contains(Modifiers::CONTROL) {
-                    if evt.key() == Key::Character("s".to_string()) {
-                        evt.prevent_default();
-                        saved_status.set("All changes saved".to_string());
+            onkeydown: {
+                let mut flush_save = flush_save.clone();
+                let mut schedule_save = schedule_save.clone();
+                move |evt: KeyboardEvent| {
+                    if !evt.modifiers().contains(Modifiers::CONTROL) {
+                        return;
+                    }
+                    if let Key::Character(ref ch) = evt.key() {
+                        match ch.as_str() {
+                            "s" => { evt.prevent_default(); flush_save(); }
+                            "b" => {
+                                evt.prevent_default();
+                                exec_cmd("bold", None);
+                                doc_body_text.set(editor_text());
+                                schedule_save();
+                            }
+                            "i" => {
+                                evt.prevent_default();
+                                exec_cmd("italic", None);
+                                doc_body_text.set(editor_text());
+                                schedule_save();
+                            }
+                            "u" => {
+                                evt.prevent_default();
+                                exec_cmd("underline", None);
+                                doc_body_text.set(editor_text());
+                                schedule_save();
+                            }
+                            _ => {}
+                        }
                     }
                 }
             },
@@ -160,7 +282,13 @@ pub fn Writer(id: String) -> Element {
                 input {
                     class: "doc-title-input",
                     value: "{doc_title}",
-                    oninput: move |e| doc_title.set(e.value()),
+                    oninput: {
+                        let mut schedule_save = schedule_save.clone();
+                        move |e: FormEvent| {
+                            doc_title.set(e.value());
+                            schedule_save();
+                        }
+                    },
                     placeholder: "Untitled Document",
                 }
                 span { class: "save-status", "{saved_status}" }
@@ -190,7 +318,149 @@ pub fn Writer(id: String) -> Element {
             }
 
             // Toolbar
-            Toolbar { doc_type: "writer".to_string() }
+            {
+                let run = {
+                    let mut schedule_save = schedule_save.clone();
+                    move |name: &'static str, value: Option<String>| {
+                        exec_cmd(name, value.as_deref());
+                        doc_body_text.set(editor_text());
+                        schedule_save();
+                    }
+                };
+                let run_b = run.clone(); let run_i = run.clone(); let run_u = run.clone();
+                let run_s = run.clone(); let run_jl = run.clone(); let run_jc = run.clone();
+                let run_jr = run.clone(); let run_jf = run.clone(); let run_ul = run.clone();
+                let run_ol = run.clone(); let run_in = run.clone(); let run_out = run.clone();
+                let run_font = run.clone(); let run_size = run.clone();
+                let run_fore = run.clone(); let run_hi = run.clone();
+                rsx! {
+                    div { class: "toolbar",
+                        div { class: "toolbar-group",
+                            select {
+                                class: "toolbar-select font-family",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onchange: move |e: FormEvent| { let mut r = run_font.clone(); r("fontName", Some(e.value())); },
+                                option { value: "Arial", "Arial" }
+                                option { value: "Times New Roman", "Times New Roman" }
+                                option { value: "Courier New", "Courier New" }
+                                option { value: "Georgia", "Georgia" }
+                                option { value: "Verdana", "Verdana" }
+                                option { value: "Helvetica", "Helvetica" }
+                            }
+                            select {
+                                class: "toolbar-select font-size",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onchange: move |e: FormEvent| { let mut r = run_size.clone(); r("fontSize", Some(e.value())); },
+                                option { value: "2", "10pt" }
+                                option { value: "3", selected: true, "12pt" }
+                                option { value: "4", "14pt" }
+                                option { value: "5", "18pt" }
+                                option { value: "6", "24pt" }
+                                option { value: "7", "36pt" }
+                            }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button {
+                                class: "toolbar-btn", title: "Bold (Ctrl+B)",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_b.clone(); r("bold", None); },
+                                "B"
+                            }
+                            button {
+                                class: "toolbar-btn italic", title: "Italic (Ctrl+I)",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_i.clone(); r("italic", None); },
+                                "I"
+                            }
+                            button {
+                                class: "toolbar-btn underline", title: "Underline (Ctrl+U)",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_u.clone(); r("underline", None); },
+                                "U"
+                            }
+                            button {
+                                class: "toolbar-btn strikethrough", title: "Strikethrough",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_s.clone(); r("strikeThrough", None); },
+                                "S"
+                            }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button {
+                                class: "toolbar-btn", title: "Bulleted List",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_ul.clone(); r("insertUnorderedList", None); },
+                                "* List"
+                            }
+                            button {
+                                class: "toolbar-btn", title: "Numbered List",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_ol.clone(); r("insertOrderedList", None); },
+                                "1. List"
+                            }
+                            button {
+                                class: "toolbar-btn", title: "Indent",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_in.clone(); r("indent", None); },
+                                ">>"
+                            }
+                            button {
+                                class: "toolbar-btn", title: "Outdent",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_out.clone(); r("outdent", None); },
+                                "<<"
+                            }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button {
+                                class: "toolbar-btn", title: "Align Left",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_jl.clone(); r("justifyLeft", None); },
+                                "L"
+                            }
+                            button {
+                                class: "toolbar-btn", title: "Align Center",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_jc.clone(); r("justifyCenter", None); },
+                                "C"
+                            }
+                            button {
+                                class: "toolbar-btn", title: "Align Right",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_jr.clone(); r("justifyRight", None); },
+                                "R"
+                            }
+                            button {
+                                class: "toolbar-btn", title: "Justify",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| { let mut r = run_jf.clone(); r("justifyFull", None); },
+                                "J"
+                            }
+                        }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            input {
+                                r#type: "color", class: "toolbar-color", title: "Text Color", value: "#000000",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                oninput: move |e: FormEvent| { let mut r = run_fore.clone(); r("foreColor", Some(e.value())); },
+                            }
+                            input {
+                                r#type: "color", class: "toolbar-color", title: "Highlight Color", value: "#ffff00",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                oninput: move |e: FormEvent| {
+                                    let val = e.value();
+                                    let mut r = run_hi.clone();
+                                    r("hiliteColor", Some(val.clone()));
+                                    r("backColor", Some(val));
+                                },
+                            }
+                        }
+                    }
+                }
+            }
 
             // Main editor area
             div { class: "editor-main",
@@ -205,17 +475,22 @@ pub fn Writer(id: String) -> Element {
                         Some(Ok(_)) => rsx! {
                             div { class: "page",
                                 div {
+                                    id: WRITER_BODY_ID,
                                     contenteditable: "true",
                                     class: "writer-content",
-                                    oninput: move |evt: FormEvent| {
-                                        let text = evt.value();
-                                        let wc = text.split_whitespace().count() as u32;
-                                        let cc = text.len() as u32;
-                                        word_count.set(wc);
-                                        char_count.set(cc);
-                                        saved_status.set("Unsaved changes".to_string());
+                                    dangerous_inner_html: "{initial_html}",
+                                    oninput: {
+                                        let mut schedule_save = schedule_save.clone();
+                                        move |_evt: FormEvent| {
+                                            let text = editor_text();
+                                            let wc = text.split_whitespace().count() as u32;
+                                            let cc = text.len() as u32;
+                                            word_count.set(wc);
+                                            char_count.set(cc);
+                                            doc_body_text.set(text);
+                                            schedule_save();
+                                        }
                                     },
-                                    "{doc_body_text}"
                                 }
                             }
                         },
