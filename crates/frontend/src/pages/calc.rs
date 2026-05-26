@@ -267,6 +267,497 @@ fn display_value(raw: &str) -> &str {
     raw
 }
 
+fn format_number_default(n: f64) -> String {
+    if n.is_nan() {
+        "#ERR".to_string()
+    } else if n.fract() == 0.0 && n.abs() < 1e16 {
+        format!("{n:.0}")
+    } else {
+        format!("{n}")
+    }
+}
+
+fn evaluate_cell_display(
+    raw: &str,
+    sheet_idx: usize,
+    cells: &HashMap<(usize, u32, u32), String>,
+) -> String {
+    if let Some(expr) = raw.strip_prefix('=') {
+        match eval::evaluate(expr, sheet_idx, cells) {
+            Ok(n) => format_number_default(n),
+            Err(_) => "#ERR".to_string(),
+        }
+    } else {
+        raw.to_string()
+    }
+}
+
+fn evaluated_numeric(
+    raw: &str,
+    sheet_idx: usize,
+    cells: &HashMap<(usize, u32, u32), String>,
+) -> Option<f64> {
+    if let Some(expr) = raw.strip_prefix('=') {
+        eval::evaluate(expr, sheet_idx, cells).ok()
+    } else {
+        raw.parse::<f64>().ok()
+    }
+}
+
+mod eval {
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum EvalError {
+        Parse(String),
+        BadRef,
+        DivByZero,
+        Cycle,
+        UnknownFn(String),
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Token {
+        Number(f64),
+        Ident(String),
+        CellRef(u32, u32),
+        Plus,
+        Minus,
+        Star,
+        Slash,
+        LParen,
+        RParen,
+        Comma,
+        Colon,
+    }
+
+    fn col_from_letters(s: &str) -> Option<u32> {
+        let mut v: u32 = 0;
+        for ch in s.chars() {
+            if !ch.is_ascii_alphabetic() {
+                return None;
+            }
+            v = v * 26 + (ch.to_ascii_uppercase() as u32 - 'A' as u32 + 1);
+        }
+        if v == 0 { None } else { Some(v - 1) }
+    }
+
+    fn lex(input: &str) -> Result<Vec<Token>, EvalError> {
+        let bytes = input.as_bytes();
+        let mut i = 0;
+        let mut out = Vec::new();
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+                i += 1;
+                continue;
+            }
+            match b {
+                b'+' => { out.push(Token::Plus); i += 1; continue; }
+                b'-' => { out.push(Token::Minus); i += 1; continue; }
+                b'*' => { out.push(Token::Star); i += 1; continue; }
+                b'/' => { out.push(Token::Slash); i += 1; continue; }
+                b'(' => { out.push(Token::LParen); i += 1; continue; }
+                b')' => { out.push(Token::RParen); i += 1; continue; }
+                b',' => { out.push(Token::Comma); i += 1; continue; }
+                b':' => { out.push(Token::Colon); i += 1; continue; }
+                _ => {}
+            }
+            if b.is_ascii_digit() || b == b'.' {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                    i += 1;
+                }
+                let s = &input[start..i];
+                let n: f64 = s
+                    .parse()
+                    .map_err(|_| EvalError::Parse(format!("bad number: {s}")))?;
+                out.push(Token::Number(n));
+                continue;
+            }
+            if b == b'$' || b.is_ascii_alphabetic() {
+                if b == b'$' { i += 1; }
+                let letters_start = i;
+                while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                let letters = &input[letters_start..i];
+                if letters.is_empty() {
+                    return Err(EvalError::Parse("lone $".into()));
+                }
+                if i < bytes.len() && bytes[i] == b'$' { i += 1; }
+                let digit_start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i > digit_start {
+                    let row_s = &input[digit_start..i];
+                    let row_n: u32 = row_s
+                        .parse()
+                        .map_err(|_| EvalError::Parse(format!("bad row: {row_s}")))?;
+                    let col = col_from_letters(letters).ok_or(EvalError::BadRef)?;
+                    if row_n == 0 {
+                        return Err(EvalError::BadRef);
+                    }
+                    out.push(Token::CellRef(row_n - 1, col));
+                } else {
+                    out.push(Token::Ident(letters.to_ascii_uppercase()));
+                }
+                continue;
+            }
+            return Err(EvalError::Parse(format!("unexpected char: {}", b as char)));
+        }
+        Ok(out)
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum Expr {
+        Number(f64),
+        Cell(u32, u32),
+        Range(u32, u32, u32, u32),
+        Binary(BinOp, Box<Expr>, Box<Expr>),
+        Unary(UnOp, Box<Expr>),
+        Func(String, Vec<Expr>),
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub enum BinOp { Add, Sub, Mul, Div }
+    #[derive(Debug, Clone, Copy)]
+    pub enum UnOp { Neg, Pos }
+
+    struct Parser {
+        tokens: Vec<Token>,
+        pos: usize,
+    }
+
+    impl Parser {
+        fn peek(&self) -> Option<&Token> { self.tokens.get(self.pos) }
+        fn bump(&mut self) -> Option<Token> {
+            let t = self.tokens.get(self.pos).cloned();
+            if t.is_some() { self.pos += 1; }
+            t
+        }
+
+        fn parse_expr(&mut self) -> Result<Expr, EvalError> {
+            self.parse_addsub()
+        }
+
+        fn parse_addsub(&mut self) -> Result<Expr, EvalError> {
+            let mut left = self.parse_muldiv()?;
+            loop {
+                match self.peek() {
+                    Some(Token::Plus) => { self.bump(); let r = self.parse_muldiv()?; left = Expr::Binary(BinOp::Add, Box::new(left), Box::new(r)); }
+                    Some(Token::Minus) => { self.bump(); let r = self.parse_muldiv()?; left = Expr::Binary(BinOp::Sub, Box::new(left), Box::new(r)); }
+                    _ => break,
+                }
+            }
+            Ok(left)
+        }
+
+        fn parse_muldiv(&mut self) -> Result<Expr, EvalError> {
+            let mut left = self.parse_unary()?;
+            loop {
+                match self.peek() {
+                    Some(Token::Star) => { self.bump(); let r = self.parse_unary()?; left = Expr::Binary(BinOp::Mul, Box::new(left), Box::new(r)); }
+                    Some(Token::Slash) => { self.bump(); let r = self.parse_unary()?; left = Expr::Binary(BinOp::Div, Box::new(left), Box::new(r)); }
+                    _ => break,
+                }
+            }
+            Ok(left)
+        }
+
+        fn parse_unary(&mut self) -> Result<Expr, EvalError> {
+            match self.peek() {
+                Some(Token::Minus) => { self.bump(); let e = self.parse_unary()?; Ok(Expr::Unary(UnOp::Neg, Box::new(e))) }
+                Some(Token::Plus) => { self.bump(); let e = self.parse_unary()?; Ok(Expr::Unary(UnOp::Pos, Box::new(e))) }
+                _ => self.parse_primary(),
+            }
+        }
+
+        fn parse_primary(&mut self) -> Result<Expr, EvalError> {
+            let tok = self.bump().ok_or_else(|| EvalError::Parse("unexpected end".into()))?;
+            match tok {
+                Token::Number(n) => Ok(Expr::Number(n)),
+                Token::LParen => {
+                    let e = self.parse_expr()?;
+                    match self.bump() {
+                        Some(Token::RParen) => Ok(e),
+                        _ => Err(EvalError::Parse("expected )".into())),
+                    }
+                }
+                Token::CellRef(r, c) => {
+                    if matches!(self.peek(), Some(Token::Colon)) {
+                        self.bump();
+                        match self.bump() {
+                            Some(Token::CellRef(r2, c2)) => Ok(Expr::Range(r, c, r2, c2)),
+                            _ => Err(EvalError::Parse("expected cell after :".into())),
+                        }
+                    } else {
+                        Ok(Expr::Cell(r, c))
+                    }
+                }
+                Token::Ident(name) => {
+                    if !matches!(self.peek(), Some(Token::LParen)) {
+                        return Err(EvalError::Parse(format!("expected ( after {name}")));
+                    }
+                    self.bump();
+                    let mut args = Vec::new();
+                    if !matches!(self.peek(), Some(Token::RParen)) {
+                        loop {
+                            args.push(self.parse_expr()?);
+                            match self.peek() {
+                                Some(Token::Comma) => { self.bump(); }
+                                _ => break,
+                            }
+                        }
+                    }
+                    match self.bump() {
+                        Some(Token::RParen) => Ok(Expr::Func(name, args)),
+                        _ => Err(EvalError::Parse("expected ) in func call".into())),
+                    }
+                }
+                t => Err(EvalError::Parse(format!("unexpected token: {t:?}"))),
+            }
+        }
+    }
+
+    pub fn evaluate(
+        formula: &str,
+        sheet_idx: usize,
+        cells: &HashMap<(usize, u32, u32), String>,
+    ) -> Result<f64, EvalError> {
+        let tokens = lex(formula)?;
+        let mut parser = Parser { tokens, pos: 0 };
+        let expr = parser.parse_expr()?;
+        if parser.pos != parser.tokens.len() {
+            return Err(EvalError::Parse("trailing tokens".into()));
+        }
+        let mut visit: HashSet<(usize, u32, u32)> = HashSet::new();
+        eval_expr(&expr, sheet_idx, cells, &mut visit)
+    }
+
+    fn cell_numeric(
+        sheet_idx: usize,
+        r: u32,
+        c: u32,
+        cells: &HashMap<(usize, u32, u32), String>,
+        visit: &mut HashSet<(usize, u32, u32)>,
+    ) -> Result<f64, EvalError> {
+        let key = (sheet_idx, r, c);
+        if visit.contains(&key) {
+            return Err(EvalError::Cycle);
+        }
+        let Some(raw) = cells.get(&key) else { return Ok(0.0); };
+        if raw.is_empty() {
+            return Ok(0.0);
+        }
+        if let Some(expr_src) = raw.strip_prefix('=') {
+            visit.insert(key);
+            let tokens = lex(expr_src)?;
+            let mut parser = Parser { tokens, pos: 0 };
+            let expr = parser.parse_expr()?;
+            if parser.pos != parser.tokens.len() {
+                visit.remove(&key);
+                return Err(EvalError::Parse("trailing tokens".into()));
+            }
+            let res = eval_expr(&expr, sheet_idx, cells, visit);
+            visit.remove(&key);
+            res
+        } else {
+            Ok(raw.parse::<f64>().unwrap_or(0.0))
+        }
+    }
+
+    fn expand_args(
+        args: &[Expr],
+        sheet_idx: usize,
+        cells: &HashMap<(usize, u32, u32), String>,
+        visit: &mut HashSet<(usize, u32, u32)>,
+    ) -> Result<Vec<(Option<(u32, u32)>, f64)>, EvalError> {
+        let mut out = Vec::new();
+        for a in args {
+            match a {
+                Expr::Range(r1, c1, r2, c2) => {
+                    let rmin = (*r1).min(*r2);
+                    let rmax = (*r1).max(*r2);
+                    let cmin = (*c1).min(*c2);
+                    let cmax = (*c1).max(*c2);
+                    for r in rmin..=rmax {
+                        for c in cmin..=cmax {
+                            let v = cell_numeric(sheet_idx, r, c, cells, visit)?;
+                            out.push((Some((r, c)), v));
+                        }
+                    }
+                }
+                Expr::Cell(r, c) => {
+                    let v = cell_numeric(sheet_idx, *r, *c, cells, visit)?;
+                    out.push((Some((*r, *c)), v));
+                }
+                other => {
+                    let v = eval_expr(other, sheet_idx, cells, visit)?;
+                    out.push((None, v));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn is_cell_numeric(
+        sheet_idx: usize,
+        r: u32,
+        c: u32,
+        cells: &HashMap<(usize, u32, u32), String>,
+    ) -> bool {
+        let key = (sheet_idx, r, c);
+        let Some(raw) = cells.get(&key) else { return false; };
+        if raw.is_empty() { return false; }
+        if let Some(expr_src) = raw.strip_prefix('=') {
+            let mut v: HashSet<(usize, u32, u32)> = HashSet::new();
+            v.insert(key);
+            let Ok(tokens) = lex(expr_src) else { return false; };
+            let mut parser = Parser { tokens, pos: 0 };
+            let Ok(expr) = parser.parse_expr() else { return false; };
+            if parser.pos != parser.tokens.len() { return false; }
+            eval_expr(&expr, sheet_idx, cells, &mut v).is_ok()
+        } else {
+            raw.parse::<f64>().is_ok()
+        }
+    }
+
+    fn is_cell_non_empty(
+        sheet_idx: usize,
+        r: u32,
+        c: u32,
+        cells: &HashMap<(usize, u32, u32), String>,
+    ) -> bool {
+        cells
+            .get(&(sheet_idx, r, c))
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn eval_expr(
+        e: &Expr,
+        sheet_idx: usize,
+        cells: &HashMap<(usize, u32, u32), String>,
+        visit: &mut HashSet<(usize, u32, u32)>,
+    ) -> Result<f64, EvalError> {
+        match e {
+            Expr::Number(n) => Ok(*n),
+            Expr::Cell(r, c) => cell_numeric(sheet_idx, *r, *c, cells, visit),
+            Expr::Range(_, _, _, _) => Err(EvalError::Parse("range not allowed here".into())),
+            Expr::Unary(op, x) => {
+                let v = eval_expr(x, sheet_idx, cells, visit)?;
+                Ok(match op { UnOp::Neg => -v, UnOp::Pos => v })
+            }
+            Expr::Binary(op, l, r) => {
+                let lv = eval_expr(l, sheet_idx, cells, visit)?;
+                let rv = eval_expr(r, sheet_idx, cells, visit)?;
+                Ok(match op {
+                    BinOp::Add => lv + rv,
+                    BinOp::Sub => lv - rv,
+                    BinOp::Mul => lv * rv,
+                    BinOp::Div => {
+                        if rv == 0.0 { return Err(EvalError::DivByZero); }
+                        lv / rv
+                    }
+                })
+            }
+            Expr::Func(name, args) => {
+                let up = name.to_ascii_uppercase();
+                match up.as_str() {
+                    "SUM" => {
+                        let vals = expand_args(args, sheet_idx, cells, visit)?;
+                        Ok(vals.iter().map(|(_, v)| *v).sum())
+                    }
+                    "AVG" | "AVERAGE" => {
+                        let mut sum = 0.0;
+                        let mut count = 0u32;
+                        for arg in args {
+                            match arg {
+                                Expr::Range(r1, c1, r2, c2) => {
+                                    let rmin = (*r1).min(*r2);
+                                    let rmax = (*r1).max(*r2);
+                                    let cmin = (*c1).min(*c2);
+                                    let cmax = (*c1).max(*c2);
+                                    for r in rmin..=rmax {
+                                        for c in cmin..=cmax {
+                                            if is_cell_non_empty(sheet_idx, r, c, cells) {
+                                                sum += cell_numeric(sheet_idx, r, c, cells, visit)?;
+                                                count += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                other => {
+                                    sum += eval_expr(other, sheet_idx, cells, visit)?;
+                                    count += 1;
+                                }
+                            }
+                        }
+                        if count == 0 { Err(EvalError::DivByZero) } else { Ok(sum / count as f64) }
+                    }
+                    "MIN" => {
+                        let vals = expand_args(args, sheet_idx, cells, visit)?;
+                        let mut m = f64::INFINITY;
+                        for (_, v) in &vals { if *v < m { m = *v; } }
+                        if m.is_infinite() { Ok(0.0) } else { Ok(m) }
+                    }
+                    "MAX" => {
+                        let vals = expand_args(args, sheet_idx, cells, visit)?;
+                        let mut m = f64::NEG_INFINITY;
+                        for (_, v) in &vals { if *v > m { m = *v; } }
+                        if m.is_infinite() { Ok(0.0) } else { Ok(m) }
+                    }
+                    "COUNT" => {
+                        let mut count = 0u32;
+                        for arg in args {
+                            match arg {
+                                Expr::Range(r1, c1, r2, c2) => {
+                                    let rmin = (*r1).min(*r2);
+                                    let rmax = (*r1).max(*r2);
+                                    let cmin = (*c1).min(*c2);
+                                    let cmax = (*c1).max(*c2);
+                                    for r in rmin..=rmax {
+                                        for c in cmin..=cmax {
+                                            if is_cell_numeric(sheet_idx, r, c, cells) {
+                                                count += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                Expr::Cell(r, c) => {
+                                    if is_cell_numeric(sheet_idx, *r, *c, cells) {
+                                        count += 1;
+                                    }
+                                }
+                                other => {
+                                    if eval_expr(other, sheet_idx, cells, visit).is_ok() {
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(count as f64)
+                    }
+                    "IF" => {
+                        if args.len() != 3 {
+                            return Err(EvalError::Parse("IF expects 3 args".into()));
+                        }
+                        let cond = eval_expr(&args[0], sheet_idx, cells, visit)?;
+                        if cond != 0.0 {
+                            eval_expr(&args[1], sheet_idx, cells, visit)
+                        } else {
+                            eval_expr(&args[2], sheet_idx, cells, visit)
+                        }
+                    }
+                    other => Err(EvalError::UnknownFn(other.to_string())),
+                }
+            }
+        }
+    }
+}
+
 /// Return `true` when `cell` is inside the rectangle defined by corners `a`
 /// and `b` (inclusive, order-independent).
 fn in_selection(cell: (u32, u32), a: (u32, u32), b: (u32, u32)) -> bool {
@@ -516,7 +1007,7 @@ pub fn Calc(id: String) -> Element {
                         if let Some(val) = cells_ref.get(&(sheet_idx, r, c)) {
                             if !val.is_empty() {
                                 non_empty += 1;
-                                if let Ok(n) = val.parse::<f64>() {
+                                if let Some(n) = evaluated_numeric(val, sheet_idx, &cells_ref) {
                                     sum += n;
                                     numeric_count += 1;
                                 }
@@ -1032,10 +1523,11 @@ pub fn Calc(id: String) -> Element {
                                         if style.italic { style_classes.push_str(" cell-italic"); }
                                         if style.underline { style_classes.push_str(" cell-underline"); }
                                         let class_str = format!("{base_class}{style_classes}");
+                                        let evaluated = evaluate_cell_display(&cell_value, si, &cells.read());
                                         let display = if style.number_format.is_empty() || style.number_format == "general" {
-                                            display_value(&cell_value).to_string()
+                                            evaluated
                                         } else {
-                                            format_number(&cell_value, &style.number_format)
+                                            format_number(&evaluated, &style.number_format)
                                         };
                                         let mut commit_formula_bar = commit_formula_bar.clone();
 
@@ -1186,5 +1678,87 @@ pub fn Calc(id: String) -> Element {
                 span { "Count: {stat_count}" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod eval_tests {
+    use super::eval::{evaluate, EvalError};
+    use std::collections::HashMap;
+
+    fn make(items: &[((usize, u32, u32), &str)]) -> HashMap<(usize, u32, u32), String> {
+        items.iter().map(|(k, v)| (*k, v.to_string())).collect()
+    }
+
+    #[test]
+    fn plain_arithmetic() {
+        let cells = HashMap::new();
+        assert_eq!(evaluate("1+2", 0, &cells).unwrap(), 3.0);
+    }
+
+    #[test]
+    fn precedence_and_parens() {
+        let cells = HashMap::new();
+        assert_eq!(evaluate("1+2*3", 0, &cells).unwrap(), 7.0);
+        assert_eq!(evaluate("(1+2)*3", 0, &cells).unwrap(), 9.0);
+    }
+
+    #[test]
+    fn cell_ref_addition() {
+        let cells = make(&[((0, 0, 0), "5"), ((0, 0, 1), "7")]);
+        assert_eq!(evaluate("A1+B1", 0, &cells).unwrap(), 12.0);
+    }
+
+    #[test]
+    fn sum_range() {
+        let cells = make(&[((0, 0, 0), "1"), ((0, 1, 0), "2"), ((0, 2, 0), "3")]);
+        assert_eq!(evaluate("SUM(A1:A3)", 0, &cells).unwrap(), 6.0);
+    }
+
+    #[test]
+    fn avg_range() {
+        let cells = make(&[((0, 0, 0), "10"), ((0, 1, 0), "20")]);
+        assert_eq!(evaluate("AVG(A1:A2)", 0, &cells).unwrap(), 15.0);
+    }
+
+    #[test]
+    fn if_truthy_and_falsy() {
+        let cells_t = make(&[((0, 0, 0), "1")]);
+        assert_eq!(evaluate("IF(A1, 100, 200)", 0, &cells_t).unwrap(), 100.0);
+        let cells_f = make(&[((0, 0, 0), "0")]);
+        assert_eq!(evaluate("IF(A1, 100, 200)", 0, &cells_f).unwrap(), 200.0);
+    }
+
+    #[test]
+    fn cycle_detection() {
+        let cells = make(&[((0, 0, 0), "=B1"), ((0, 0, 1), "=A1")]);
+        let res = evaluate("A1", 0, &cells);
+        assert!(matches!(res, Err(EvalError::Cycle)));
+    }
+
+    #[test]
+    fn min_max_count() {
+        let cells = make(&[
+            ((0, 0, 0), "3"),
+            ((0, 1, 0), "1"),
+            ((0, 2, 0), "9"),
+            ((0, 3, 0), "hello"),
+        ]);
+        assert_eq!(evaluate("MIN(A1:A4)", 0, &cells).unwrap(), 0.0);
+        assert_eq!(evaluate("MAX(A1:A4)", 0, &cells).unwrap(), 9.0);
+        assert_eq!(evaluate("COUNT(A1:A4)", 0, &cells).unwrap(), 3.0);
+    }
+
+    #[test]
+    fn unary_and_div_by_zero() {
+        let cells = HashMap::new();
+        assert_eq!(evaluate("-2+5", 0, &cells).unwrap(), 3.0);
+        assert!(matches!(evaluate("1/0", 0, &cells), Err(EvalError::DivByZero)));
+    }
+
+    #[test]
+    fn dollar_absolute_refs_ignored() {
+        let cells = make(&[((0, 0, 0), "5")]);
+        assert_eq!(evaluate("$A$1+1", 0, &cells).unwrap(), 6.0);
     }
 }

@@ -40,4 +40,12 @@ features = [
     "CloseEvent",
     "ErrorEvent",
     "BinaryType",
+    "Selection",
+    "Range",
+    "DomRect",
+    "Node",
+    "Text",
+    "TreeWalker",
+    "NodeFilter",
+    "Performance",
 ]

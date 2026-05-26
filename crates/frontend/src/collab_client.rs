@@ -70,4 +70,5 @@ pub struct RemoteCursor {
     pub username: String,
     pub color: String,
     pub is_active: bool,
+    pub position: Option<u32>,
 }
