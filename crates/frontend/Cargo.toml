@@ -48,4 +48,6 @@ features = [
     "TreeWalker",
     "NodeFilter",
     "Performance",
+    "ClipboardEvent",
+    "DataTransfer",
 ]

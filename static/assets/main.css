@@ -2337,3 +2337,51 @@ input:-webkit-autofill:active {
     0%, 50% { opacity: 1; }
     51%, 100% { opacity: 0.4; }
 }
+
+.ws-banner {
+    padding: 8px 16px;
+    text-align: center;
+    font-size: 0.875rem;
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+}
+.ws-reconnecting { background: #fef3c7; color: #92400e; }
+.ws-failed { background: #fee2e2; color: #991b1b; }
+
+.find-dialog {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-white);
+    border: 1px solid var(--border-dark);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    padding: 8px 12px;
+}
+.find-input {
+    width: 200px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    background: var(--bg);
+}
+.find-info {
+    font-size: 0.75rem;
+    color: var(--text-light);
+    min-width: 60px;
+}
+.find-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    color: var(--text);
+}
+.find-btn:hover { background: var(--primary-light); }

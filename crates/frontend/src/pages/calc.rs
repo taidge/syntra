@@ -7,6 +7,10 @@ use gloo_timers::callback::Timeout;
 use serde::Deserialize;
 use wasm_bindgen::JsCast;
 
+use crate::collab_client::{
+    CollabHandle, CollabMessage, ConnectionState, RemoteCursor, connect_with_reconnect,
+};
+use crate::components::find_dialog::FindDialog;
 use crate::components::navbar::Navbar;
 use crate::state::{AuthState, api_get, api_put};
 
@@ -36,6 +40,13 @@ struct CellStyle {
     italic: bool,
     underline: bool,
     number_format: String,
+}
+
+#[derive(Clone, PartialEq)]
+struct CalcSnapshot {
+    cells: HashMap<(usize, u32, u32), String>,
+    styles: HashMap<(usize, u32, u32), CellStyle>,
+    sheets: Vec<String>,
 }
 
 fn current_selection_cells(
@@ -825,6 +836,34 @@ pub fn Calc(id: String) -> Element {
     let mut saved_status = use_signal(|| "All changes saved".to_string());
     let mut loaded = use_signal(|| false);
 
+    let mut undo_stack = use_signal(|| Vec::<CalcSnapshot>::new());
+    let mut redo_stack = use_signal(|| Vec::<CalcSnapshot>::new());
+
+    let mut find_open = use_signal(|| false);
+    let mut find_matches = use_signal(|| Vec::<(usize, u32, u32)>::new());
+    let mut find_index = use_signal(|| 0usize);
+    let mut find_info = use_signal(String::new);
+
+    let presence = use_signal(Vec::<RemoteCursor>::new);
+    let mut ws_handle = use_signal(|| None::<CollabHandle>);
+    let mut conn_state = use_signal(|| ConnectionState::Connecting);
+
+    let mut push_snapshot = move || {
+        let snap = CalcSnapshot {
+            cells: cells.read().clone(),
+            styles: cell_styles.read().clone(),
+            sheets: sheets.read().clone(),
+        };
+        {
+            let mut s = undo_stack.write();
+            s.push(snap);
+            if s.len() > 100 {
+                s.remove(0);
+            }
+        }
+        redo_stack.write().clear();
+    };
+
     let auth = use_context::<Signal<AuthState>>();
     let id_for_resource = id.clone();
     let doc_resource = use_resource(move || {
@@ -849,6 +888,45 @@ pub fn Calc(id: String) -> Element {
             cell_styles.set(styles);
             active_sheet.set(0);
             loaded.set(true);
+        }
+    });
+
+    let doc_id_for_ws = id.clone();
+    use_effect(move || {
+        let token = auth.read().token.clone().unwrap_or_default();
+        let doc_id = doc_id_for_ws.clone();
+        let mut presence_for_msg = presence;
+        let on_message = move |msg: CollabMessage| match msg {
+            CollabMessage::UserJoined { user_id, username, color } => {
+                let mut list = presence_for_msg.write();
+                if !list.iter().any(|c| c.user_id == user_id) {
+                    list.push(RemoteCursor {
+                        user_id,
+                        username,
+                        color,
+                        is_active: true,
+                        position: None,
+                    });
+                }
+            }
+            CollabMessage::UserLeft { user_id } => {
+                let mut list = presence_for_msg.write();
+                list.retain(|c| c.user_id != user_id);
+            }
+            _ => {}
+        };
+        let on_state = move |s: ConnectionState| {
+            conn_state.set(s);
+        };
+        let handle = connect_with_reconnect(doc_id, token, on_message, on_state);
+        ws_handle.set(Some(handle));
+    });
+
+    use_drop(move || {
+        if let Some(handle) = ws_handle.write().take() {
+            if let Some(ws) = handle.current_ws() {
+                let _ = ws.close();
+            }
         }
     });
 
@@ -974,10 +1052,19 @@ pub fn Calc(id: String) -> Element {
     // Helper: commit the current formula bar contents into the cell map.
     let commit_formula_bar = {
         let mut schedule_save = schedule_save.clone();
+        let mut push_snapshot = push_snapshot.clone();
         move || {
             let value = formula_bar.read().clone();
             let (r, c) = *active_cell.read();
             let si = *active_sheet.read();
+            let prev = cells.read().get(&(si, r, c)).cloned().unwrap_or_default();
+            if prev == value {
+                is_editing.set(false);
+                return;
+            }
+            if *loaded.read() {
+                push_snapshot();
+            }
             if value.is_empty() {
                 cells.write().remove(&(si, r, c));
             } else {
@@ -1028,6 +1115,22 @@ pub fn Calc(id: String) -> Element {
 
     rsx! {
         Navbar {}
+        {
+            let state = *conn_state.read();
+            match state {
+                ConnectionState::Reconnecting(n) => rsx! {
+                    div { class: "ws-banner ws-reconnecting",
+                        "Connection lost — reconnecting (attempt {n})…"
+                    }
+                },
+                ConnectionState::Failed => rsx! {
+                    div { class: "ws-banner ws-failed",
+                        "Could not reconnect. Refresh the page."
+                    }
+                },
+                _ => rsx! {},
+            }
+        }
         div {
             class: "editor-container",
             tabindex: "0",
@@ -1037,6 +1140,7 @@ pub fn Calc(id: String) -> Element {
                 let mut schedule_save = schedule_save.clone();
                 let mut flush_save = flush_save.clone();
                 let mut commit_formula_bar = commit_formula_bar.clone();
+                let mut push_snapshot = push_snapshot.clone();
                 move |evt: KeyboardEvent| {
                 let key = evt.key();
                 let modifiers = evt.modifiers();
@@ -1095,15 +1199,75 @@ pub fn Calc(id: String) -> Element {
                     Key::Delete | Key::Backspace if !*is_editing.read() => {
                         evt.prevent_default();
                         let si = *active_sheet.read();
-                        cells.write().remove(&(si, r, c));
-                        formula_bar.set(String::new());
-                        schedule_save();
+                        if cells.read().contains_key(&(si, r, c)) {
+                            if *loaded.read() {
+                                push_snapshot();
+                            }
+                            cells.write().remove(&(si, r, c));
+                            formula_bar.set(String::new());
+                            schedule_save();
+                        } else {
+                            formula_bar.set(String::new());
+                        }
                     }
 
                     // Ctrl+S — force-flush save
                     Key::Character(ref ch) if ch == "s" && modifiers.contains(Modifiers::CONTROL) => {
                         evt.prevent_default();
                         flush_save();
+                    }
+
+                    // Ctrl+F — open find dialog
+                    Key::Character(ref ch) if ch == "f" && modifiers.contains(Modifiers::CONTROL) => {
+                        evt.prevent_default();
+                        find_open.set(true);
+                    }
+
+                    // Ctrl+Z — undo
+                    Key::Character(ref ch)
+                        if ch == "z"
+                            && modifiers.contains(Modifiers::CONTROL)
+                            && !modifiers.contains(Modifiers::SHIFT) =>
+                    {
+                        evt.prevent_default();
+                        let snap_opt = undo_stack.write().pop();
+                        if let Some(snap) = snap_opt {
+                            let current = CalcSnapshot {
+                                cells: cells.read().clone(),
+                                styles: cell_styles.read().clone(),
+                                sheets: sheets.read().clone(),
+                            };
+                            redo_stack.write().push(current);
+                            cells.set(snap.cells);
+                            cell_styles.set(snap.styles);
+                            sheets.set(snap.sheets);
+                            saved_status.set("Unsaved changes".to_string());
+                            schedule_save();
+                        }
+                    }
+
+                    // Ctrl+Y / Ctrl+Shift+Z — redo
+                    Key::Character(ref ch)
+                        if (ch == "y" && modifiers.contains(Modifiers::CONTROL))
+                            || (ch == "z"
+                                && modifiers.contains(Modifiers::CONTROL)
+                                && modifiers.contains(Modifiers::SHIFT)) =>
+                    {
+                        evt.prevent_default();
+                        let snap_opt = redo_stack.write().pop();
+                        if let Some(snap) = snap_opt {
+                            let current = CalcSnapshot {
+                                cells: cells.read().clone(),
+                                styles: cell_styles.read().clone(),
+                                sheets: sheets.read().clone(),
+                            };
+                            undo_stack.write().push(current);
+                            cells.set(snap.cells);
+                            cell_styles.set(snap.styles);
+                            sheets.set(snap.sheets);
+                            saved_status.set("Unsaved changes".to_string());
+                            schedule_save();
+                        }
                     }
 
                     // Any printable character starts an edit by seeding the formula bar
@@ -1147,9 +1311,45 @@ pub fn Calc(id: String) -> Element {
                 }
             },
 
+            onpaste: {
+                let mut schedule_save = schedule_save.clone();
+                let mut push_snapshot = push_snapshot.clone();
+                move |evt: Event<ClipboardData>| {
+                    use dioxus::web::WebEventExt;
+                    let Some(web_evt) = evt.try_as_web_event() else { return; };
+                    let Ok(clip_evt) = web_evt.dyn_into::<web_sys::ClipboardEvent>() else { return; };
+                    let Some(dt) = clip_evt.clipboard_data() else { return; };
+                    let Ok(data) = dt.get_data("text/plain") else { return; };
+                    if data.is_empty() { return; }
+                    clip_evt.prevent_default();
+                    let (start_r, start_c) = *active_cell.read();
+                    let si = *active_sheet.read();
+                    if *loaded.read() { push_snapshot(); }
+                    {
+                        let mut writer = cells.write();
+                        for (i, line) in data.lines().enumerate() {
+                            let r = start_r + i as u32;
+                            if r >= NUM_ROWS { break; }
+                            for (j, field) in line.split('\t').enumerate() {
+                                let c = start_c + j as u32;
+                                if c >= NUM_COLS { break; }
+                                if field.is_empty() {
+                                    writer.remove(&(si, r, c));
+                                } else {
+                                    writer.insert((si, r, c), field.to_string());
+                                }
+                            }
+                        }
+                    }
+                    saved_status.set("Unsaved changes".to_string());
+                    schedule_save();
+                }
+            },
+
             // Global mouseup to stop drag-select even outside cells
             onmouseup: {
                 let mut schedule_save = schedule_save.clone();
+                let mut push_snapshot = push_snapshot.clone();
                 move |_| {
                 is_selecting.set(false);
                 let current_fill = *fill_mode.read();
@@ -1171,6 +1371,9 @@ pub fn Calc(id: String) -> Element {
                         .collect();
                     let src_rows = (o_max_r - o_min_r + 1) as usize;
                     let src_cols = (o_max_c - o_min_c + 1) as usize;
+                    if *loaded.read() {
+                        push_snapshot();
+                    }
                     let mut writer = cells.write();
                     for r in min_r..=max_r {
                         for c in min_c..=max_c {
@@ -1221,6 +1424,21 @@ pub fn Calc(id: String) -> Element {
                     placeholder: "Untitled Spreadsheet",
                 }
                 span { class: "save-status", "{saved_status}" }
+                if !presence.read().is_empty() {
+                    div {
+                        class: "presence-list",
+                        style: "display: inline-flex; gap: 4px; margin-left: 12px; align-items: center;",
+                        for cursor in presence.read().iter() {
+                            span {
+                                key: "{cursor.user_id}",
+                                class: "presence-pill",
+                                title: "{cursor.username}",
+                                style: "background: {cursor.color}; color: #fff; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 600; line-height: 1;",
+                                {cursor.username.chars().take(2).collect::<String>().to_uppercase()}
+                            }
+                        }
+                    }
+                }
             }
 
             // ── Toolbar ──────────────────────────────────────────────────
@@ -1232,7 +1450,11 @@ pub fn Calc(id: String) -> Element {
                 let mut schedule_save_pct = schedule_save.clone();
                 let mut schedule_save_d0 = schedule_save.clone();
                 let mut schedule_save_d2 = schedule_save.clone();
+                let mut push_snapshot_tg = push_snapshot.clone();
                 let apply_toggle = move |which: u8| {
+                    if *loaded.read() {
+                        push_snapshot_tg();
+                    }
                     let active = *active_cell.read();
                     let sel_s = *selection_start.read();
                     let sel_e = *selection_end.read();
@@ -1263,7 +1485,11 @@ pub fn Calc(id: String) -> Element {
                         }
                     }
                 };
+                let mut push_snapshot_fmt = push_snapshot.clone();
                 let apply_format = move |fmt: &'static str| {
+                    if *loaded.read() {
+                        push_snapshot_fmt();
+                    }
                     let active = *active_cell.read();
                     let sel_s = *selection_start.read();
                     let sel_e = *selection_end.read();
@@ -1676,6 +1902,72 @@ pub fn Calc(id: String) -> Element {
                 span { "Sum: {stat_sum:.4}" }
                 span { "Average: {stat_avg:.4}" }
                 span { "Count: {stat_count}" }
+            }
+
+            FindDialog {
+                open: find_open,
+                match_info: find_info.read().clone(),
+                on_search: move |q: String| {
+                    if q.is_empty() {
+                        find_matches.set(Vec::new());
+                        find_index.set(0);
+                        find_info.set(String::new());
+                        return;
+                    }
+                    let needle = q.to_lowercase();
+                    let mut matches: Vec<(usize, u32, u32)> = cells
+                        .read()
+                        .iter()
+                        .filter(|(_, v)| v.to_lowercase().contains(&needle))
+                        .map(|(k, _)| *k)
+                        .collect();
+                    matches.sort_by_key(|(s, r, c)| (*s, *r, *c));
+                    let n = matches.len();
+                    if n == 0 {
+                        find_matches.set(Vec::new());
+                        find_index.set(0);
+                        find_info.set("No matches".to_string());
+                    } else {
+                        let (si, r, c) = matches[0];
+                        find_matches.set(matches);
+                        find_index.set(0);
+                        find_info.set(format!("1 of {n}"));
+                        active_sheet.set(si);
+                        active_cell.set((r, c));
+                        formula_bar.set(cells.read().get(&(si, r, c)).cloned().unwrap_or_default());
+                        selection_start.set(Some((r, c)));
+                        selection_end.set(Some((r, c)));
+                    }
+                },
+                on_next: move |_| {
+                    let matches = find_matches.read().clone();
+                    let n = matches.len();
+                    if n == 0 { return; }
+                    let next = (*find_index.read() + 1) % n;
+                    find_index.set(next);
+                    let (si, r, c) = matches[next];
+                    active_sheet.set(si);
+                    active_cell.set((r, c));
+                    formula_bar.set(cells.read().get(&(si, r, c)).cloned().unwrap_or_default());
+                    selection_start.set(Some((r, c)));
+                    selection_end.set(Some((r, c)));
+                    find_info.set(format!("{} of {}", next + 1, n));
+                },
+                on_prev: move |_| {
+                    let matches = find_matches.read().clone();
+                    let n = matches.len();
+                    if n == 0 { return; }
+                    let cur = *find_index.read();
+                    let prev = if cur == 0 { n - 1 } else { cur - 1 };
+                    find_index.set(prev);
+                    let (si, r, c) = matches[prev];
+                    active_sheet.set(si);
+                    active_cell.set((r, c));
+                    formula_bar.set(cells.read().get(&(si, r, c)).cloned().unwrap_or_default());
+                    selection_start.set(Some((r, c)));
+                    selection_end.set(Some((r, c)));
+                    find_info.set(format!("{} of {}", prev + 1, n));
+                },
             }
         }
     }

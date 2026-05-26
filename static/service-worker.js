@@ -1,4 +1,4 @@
-const CACHE_NAME = 'contrix-v9-calc-eval';
+const CACHE_NAME = 'contrix-v12-find';
 const PRECACHE_URLS = ['/', '/index.html', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {

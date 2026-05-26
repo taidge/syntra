@@ -6,12 +6,41 @@ use gloo_timers::callback::Timeout;
 use serde::Deserialize;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{MessageEvent, WebSocket};
+use web_sys::WebSocket;
 
-use crate::collab_client::{CollabMessage, RemoteCursor, connect_collab};
+use crate::collab_client::{CollabHandle, CollabMessage, ConnectionState, RemoteCursor, connect_with_reconnect};
+use crate::components::find_dialog::FindDialog;
 use crate::components::navbar::Navbar;
 use crate::components::sidebar::Sidebar;
 use crate::state::{AuthState, api_get, api_put};
+
+fn window_find(query: &str, backward: bool) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return false,
+    };
+    let func = match js_sys::Reflect::get(&window, &"find".into()) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let func: js_sys::Function = match func.dyn_into() {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let args = js_sys::Array::new();
+    args.push(&query.into());
+    args.push(&wasm_bindgen::JsValue::FALSE);
+    args.push(&wasm_bindgen::JsValue::from_bool(backward));
+    args.push(&wasm_bindgen::JsValue::TRUE);
+    let this: wasm_bindgen::JsValue = window.into();
+    match func.apply(&this, &args) {
+        Ok(v) => v.as_bool().unwrap_or(false),
+        Err(_) => false,
+    }
+}
 
 #[derive(Deserialize)]
 struct CursorPosLite {
@@ -189,9 +218,14 @@ pub fn Writer(id: String) -> Element {
     let mut initial_html = use_signal(String::new);
     let mut loaded = use_signal(|| false);
 
+    let mut find_open = use_signal(|| false);
+    let mut find_query = use_signal(String::new);
+    let mut find_info = use_signal(String::new);
+
     let auth = use_context::<Signal<AuthState>>();
     let presence = use_signal(Vec::<RemoteCursor>::new);
-    let mut ws_handle = use_signal(|| None::<WebSocket>);
+    let mut ws_handle = use_signal(|| None::<CollabHandle>);
+    let mut conn_state = use_signal(|| ConnectionState::Connecting);
 
     let id_for_resource = id.clone();
     let doc_resource = use_resource(move || {
@@ -246,70 +280,56 @@ pub fn Writer(id: String) -> Element {
         let token = auth.read().token.clone().unwrap_or_default();
         let doc_id = doc_id_for_effect.clone();
         let self_id = local_user_id_for_effect.clone();
-        match connect_collab(&doc_id, &token) {
-            Ok(ws) => {
-                let mut presence_for_msg = presence;
-                let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(
-                    move |evt: MessageEvent| {
-                        if let Some(text) = evt.data().as_string() {
-                            if let Ok(msg) = serde_json::from_str::<CollabMessage>(&text) {
-                                match msg {
-                                    CollabMessage::UserJoined { user_id, username, color } => {
-                                        let mut list = presence_for_msg.write();
-                                        if !list.iter().any(|c| c.user_id == user_id) {
-                                            list.push(RemoteCursor {
-                                                user_id,
-                                                username,
-                                                color,
-                                                is_active: true,
-                                                position: None,
-                                            });
-                                        }
-                                    }
-                                    CollabMessage::UserLeft { user_id } => {
-                                        let mut list = presence_for_msg.write();
-                                        list.retain(|c| c.user_id != user_id);
-                                    }
-                                    CollabMessage::CursorUpdate(payload) => {
-                                        if let Ok(parsed) = serde_json::from_value::<CursorPosLite>(payload) {
-                                            let Some(uid) = cursor_user_id(&parsed.user_id) else { return; };
-                                            if uid == self_id {
-                                                return;
-                                            }
-                                            let off = parsed
-                                                .position
-                                                .as_ref()
-                                                .and_then(cursor_offset);
-                                            let mut list = presence_for_msg.write();
-                                            if let Some(existing) = list.iter_mut().find(|c| c.user_id == uid) {
-                                                if off.is_some() { existing.position = off; }
-                                                if let Some(u) = parsed.username { if existing.username.is_empty() { existing.username = u; } }
-                                                if let Some(c) = parsed.color { if existing.color.is_empty() { existing.color = c; } }
-                                            } else {
-                                                list.push(RemoteCursor {
-                                                    user_id: uid,
-                                                    username: parsed.username.unwrap_or_default(),
-                                                    color: parsed.color.unwrap_or_else(|| "#888".into()),
-                                                    is_active: true,
-                                                    position: off,
-                                                });
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
+        let mut presence_for_msg = presence;
+        let on_message = move |msg: CollabMessage| {
+            match msg {
+                CollabMessage::UserJoined { user_id, username, color } => {
+                    let mut list = presence_for_msg.write();
+                    if !list.iter().any(|c| c.user_id == user_id) {
+                        list.push(RemoteCursor {
+                            user_id,
+                            username,
+                            color,
+                            is_active: true,
+                            position: None,
+                        });
+                    }
+                }
+                CollabMessage::UserLeft { user_id } => {
+                    let mut list = presence_for_msg.write();
+                    list.retain(|c| c.user_id != user_id);
+                }
+                CollabMessage::CursorUpdate(payload) => {
+                    if let Ok(parsed) = serde_json::from_value::<CursorPosLite>(payload) {
+                        let Some(uid) = cursor_user_id(&parsed.user_id) else { return; };
+                        if uid == self_id {
+                            return;
                         }
-                    },
-                );
-                ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-                onmessage.forget();
-                ws_handle.set(Some(ws));
+                        let off = parsed.position.as_ref().and_then(cursor_offset);
+                        let mut list = presence_for_msg.write();
+                        if let Some(existing) = list.iter_mut().find(|c| c.user_id == uid) {
+                            if off.is_some() { existing.position = off; }
+                            if let Some(u) = parsed.username { if existing.username.is_empty() { existing.username = u; } }
+                            if let Some(c) = parsed.color { if existing.color.is_empty() { existing.color = c; } }
+                        } else {
+                            list.push(RemoteCursor {
+                                user_id: uid,
+                                username: parsed.username.unwrap_or_default(),
+                                color: parsed.color.unwrap_or_else(|| "#888".into()),
+                                is_active: true,
+                                position: off,
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
-            Err(_) => {
-                ws_handle.set(None);
-            }
-        }
+        };
+        let on_state = move |s: ConnectionState| {
+            conn_state.set(s);
+        };
+        let handle = connect_with_reconnect(doc_id, token, on_message, on_state);
+        ws_handle.set(Some(handle));
     });
 
     let ws_for_selection = ws_handle;
@@ -322,7 +342,8 @@ pub fn Writer(id: String) -> Element {
         let self_id = user_id_for_selection.clone();
         let ws_signal = ws_for_selection;
         let cb = Closure::<dyn FnMut()>::new(move || {
-            let Some(ws) = ws_signal.read().clone() else { return; };
+            let Some(handle) = ws_signal.read().clone() else { return; };
+            let Some(ws) = handle.current_ws() else { return; };
             if ws.ready_state() != WebSocket::OPEN {
                 return;
             }
@@ -353,8 +374,10 @@ pub fn Writer(id: String) -> Element {
     });
 
     use_drop(move || {
-        if let Some(ws) = ws_handle.write().take() {
-            let _ = ws.close();
+        if let Some(handle) = ws_handle.write().take() {
+            if let Some(ws) = handle.current_ws() {
+                let _ = ws.close();
+            }
         }
     });
 
@@ -414,6 +437,22 @@ pub fn Writer(id: String) -> Element {
 
     rsx! {
         Navbar {}
+        {
+            let state = *conn_state.read();
+            match state {
+                ConnectionState::Reconnecting(n) => rsx! {
+                    div { class: "ws-banner ws-reconnecting",
+                        "Connection lost — reconnecting (attempt {n})…"
+                    }
+                },
+                ConnectionState::Failed => rsx! {
+                    div { class: "ws-banner ws-failed",
+                        "Could not reconnect. Refresh the page."
+                    }
+                },
+                _ => rsx! {},
+            }
+        }
         div {
             class: "editor-container",
             tabindex: "0",
@@ -421,11 +460,16 @@ pub fn Writer(id: String) -> Element {
                 let mut flush_save = flush_save.clone();
                 let mut schedule_save = schedule_save.clone();
                 move |evt: KeyboardEvent| {
-                    if !evt.modifiers().contains(Modifiers::CONTROL) {
+                    let modifiers = evt.modifiers();
+                    if !modifiers.contains(Modifiers::CONTROL) {
                         return;
                     }
                     if let Key::Character(ref ch) = evt.key() {
                         match ch.as_str() {
+                            "f" => {
+                                evt.prevent_default();
+                                find_open.set(true);
+                            }
                             "s" => { evt.prevent_default(); flush_save(); }
                             "b" => {
                                 evt.prevent_default();
@@ -442,6 +486,24 @@ pub fn Writer(id: String) -> Element {
                             "u" => {
                                 evt.prevent_default();
                                 exec_cmd("underline", None);
+                                doc_body_text.set(editor_text());
+                                schedule_save();
+                            }
+                            "z" if !modifiers.contains(Modifiers::SHIFT) => {
+                                evt.prevent_default();
+                                exec_cmd("undo", None);
+                                doc_body_text.set(editor_text());
+                                schedule_save();
+                            }
+                            "z" if modifiers.contains(Modifiers::SHIFT) => {
+                                evt.prevent_default();
+                                exec_cmd("redo", None);
+                                doc_body_text.set(editor_text());
+                                schedule_save();
+                            }
+                            "y" => {
+                                evt.prevent_default();
+                                exec_cmd("redo", None);
                                 doc_body_text.set(editor_text());
                                 schedule_save();
                             }
@@ -701,6 +763,32 @@ pub fn Writer(id: String) -> Element {
                 span { "Words: {word_count}" }
                 span { "Characters: {char_count}" }
                 span { "Document ID: {id}" }
+            }
+
+            FindDialog {
+                open: find_open,
+                match_info: find_info.read().clone(),
+                on_search: move |q: String| {
+                    find_query.set(q.clone());
+                    if q.is_empty() {
+                        find_info.set(String::new());
+                    } else {
+                        let ok = window_find(&q, false);
+                        find_info.set(if ok { "Match".to_string() } else { "No matches".to_string() });
+                    }
+                },
+                on_next: move |_| {
+                    let q = find_query.read().clone();
+                    if q.is_empty() { return; }
+                    let ok = window_find(&q, false);
+                    find_info.set(if ok { "Match".to_string() } else { "No matches".to_string() });
+                },
+                on_prev: move |_| {
+                    let q = find_query.read().clone();
+                    if q.is_empty() { return; }
+                    let ok = window_find(&q, true);
+                    find_info.set(if ok { "Match".to_string() } else { "No matches".to_string() });
+                },
             }
         }
     }
