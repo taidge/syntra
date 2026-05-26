@@ -4,8 +4,11 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use gloo_timers::callback::Timeout;
 use serde::Deserialize;
+use crate::Route;
+use crate::components::menubar::Menubar;
 use crate::components::navbar::Navbar;
-use crate::state::{AuthState, api_get, api_put};
+use crate::components::toast::{Toast, ToastKind, push_toast};
+use crate::state::{AuthState, api_get, api_put, export_document};
 
 const VIEW_W: f64 = 1920.0;
 const VIEW_H: f64 = 1080.0;
@@ -151,6 +154,8 @@ pub fn Whiteboard(id: String) -> Element {
     let mut text_input = use_signal(|| None::<((f64, f64), String)>);
 
     let auth = use_context::<Signal<AuthState>>();
+    let toast_bus = use_context::<Signal<Vec<Toast>>>();
+    let nav = use_navigator();
     let id_for_resource = id.clone();
     let doc_resource = use_resource(move || {
         let id = id_for_resource.clone();
@@ -292,6 +297,64 @@ pub fn Whiteboard(id: String) -> Element {
                     placeholder: "Untitled Whiteboard",
                 }
                 span { class: "save-status", "{saved_status}" }
+            }
+
+            {
+                let mut flush_for_menu = flush_save.clone();
+                let mut schedule_for_menu = schedule_save.clone();
+                let id_for_menu = id.clone();
+                let mut bus_for_menu = toast_bus;
+                let nav_for_menu = nav;
+                rsx! {
+                    Menubar {
+                        doc_type: "whiteboard".to_string(),
+                        on_command: move |cmd: String| {
+                            let mut bus = bus_for_menu;
+                            match cmd.as_str() {
+                                "save" => flush_for_menu(),
+                                "back" => { nav_for_menu.push(Route::Dashboard {}); }
+                                "undo" => {
+                                    if let Some(state) = undo_stack.write().pop() {
+                                        *elements.write() = state;
+                                        schedule_for_menu();
+                                    }
+                                }
+                                "toggle-theme" => {
+                                    if let Some(window) = web_sys::window() {
+                                        if let Some(el) = window.document().and_then(|d| d.document_element()) {
+                                            let cur = el.get_attribute("data-theme").unwrap_or_default();
+                                            let next = if cur == "dark" { "light" } else { "dark" };
+                                            let _ = el.set_attribute("data-theme", next);
+                                            if let Ok(Some(storage)) = window.local_storage() {
+                                                let _ = storage.set_item("theme", next);
+                                            }
+                                        }
+                                    }
+                                }
+                                "print" => {
+                                    if let Some(w) = web_sys::window() { let _ = w.print(); }
+                                }
+                                "export-pdf" | "export-html" => {
+                                    let format = match cmd.as_str() {
+                                        "export-pdf" => "pdf",
+                                        _ => "html",
+                                    };
+                                    let id = id_for_menu.clone();
+                                    let token = auth.read().token.clone().unwrap_or_default();
+                                    let mut bus2 = bus;
+                                    let fmt_owned = format.to_string();
+                                    wasm_bindgen_futures::spawn_local(async move {
+                                        match export_document(&id, &fmt_owned, &token).await {
+                                            Ok(_) => push_toast(bus2, ToastKind::Success, format!("Exported as {}", fmt_owned.to_uppercase())),
+                                            Err(e) => push_toast(bus2, ToastKind::Error, format!("Export failed: {e}")),
+                                        }
+                                    });
+                                }
+                                other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                            }
+                        },
+                    }
+                }
             }
 
             div { class: "whiteboard-toolbar",

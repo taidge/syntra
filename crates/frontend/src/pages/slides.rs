@@ -5,9 +5,15 @@ use dioxus::prelude::*;
 use gloo_timers::callback::Timeout;
 use serde::Deserialize;
 
+use crate::Route;
+use crate::components::comments_pane::CommentsPane;
+use crate::components::context_menu::{ContextMenu, MenuEntry};
+use crate::components::menubar::Menubar;
 use crate::components::navbar::Navbar;
+use crate::components::toast::{Toast, ToastKind, push_toast};
 use crate::components::toolbar::Toolbar;
-use crate::state::{AuthState, api_get, api_put};
+use crate::components::version_history::VersionHistory;
+use crate::state::{AuthState, api_get, api_put, export_document};
 
 #[derive(Clone, Deserialize)]
 struct DocumentResponse {
@@ -70,8 +76,13 @@ pub fn Slides(id: String) -> Element {
     let mut loaded = use_signal(|| false);
     let mut drag_index = use_signal(|| None::<usize>);
     let mut present_mode = use_signal(|| false);
+    let mut ctx_menu = use_signal(|| None::<(f64, f64, Vec<MenuEntry>)>);
+    let mut comments_open = use_signal(|| false);
+    let mut versions_open = use_signal(|| false);
 
     let auth = use_context::<Signal<AuthState>>();
+    let toast_bus = use_context::<Signal<Vec<Toast>>>();
+    let nav = use_navigator();
     let id_for_resource = id.clone();
     let doc_resource = use_resource(move || {
         let id = id_for_resource.clone();
@@ -249,6 +260,74 @@ pub fn Slides(id: String) -> Element {
                 }
             }
 
+            {
+                let mut flush_for_menu = flush_save.clone();
+                let mut schedule_for_menu = schedule_save.clone();
+                let id_for_menu = id.clone();
+                let mut bus_for_menu = toast_bus;
+                let nav_for_menu = nav;
+                rsx! {
+                    Menubar {
+                        doc_type: "slides".to_string(),
+                        on_command: move |cmd: String| {
+                            let mut bus = bus_for_menu;
+                            match cmd.as_str() {
+                                "save" => flush_for_menu(),
+                                "back" => { nav_for_menu.push(Route::Dashboard {}); }
+                                "toggle-comments" => {
+                                    let cur = *comments_open.read();
+                                    comments_open.set(!cur);
+                                }
+                                "version-history" => {
+                                    let cur = *versions_open.read();
+                                    versions_open.set(!cur);
+                                }
+                                "insert-slide" => {
+                                    let next_id = slides.read().iter().map(|s| s.id).max().unwrap_or(0) + 1;
+                                    slides.write().push(SlideData::empty(next_id));
+                                    let new_idx = slides.read().len() - 1;
+                                    current_slide.set(new_idx);
+                                    schedule_for_menu();
+                                }
+                                "toggle-theme" => {
+                                    if let Some(window) = web_sys::window() {
+                                        if let Some(el) = window.document().and_then(|d| d.document_element()) {
+                                            let cur = el.get_attribute("data-theme").unwrap_or_default();
+                                            let next = if cur == "dark" { "light" } else { "dark" };
+                                            let _ = el.set_attribute("data-theme", next);
+                                            if let Ok(Some(storage)) = window.local_storage() {
+                                                let _ = storage.set_item("theme", next);
+                                            }
+                                        }
+                                    }
+                                }
+                                "print" => {
+                                    if let Some(w) = web_sys::window() { let _ = w.print(); }
+                                }
+                                "export-pdf" | "export-pptx" | "export-html" => {
+                                    let format = match cmd.as_str() {
+                                        "export-pdf" => "pdf",
+                                        "export-pptx" => "pptx",
+                                        _ => "html",
+                                    };
+                                    let id = id_for_menu.clone();
+                                    let token = auth.read().token.clone().unwrap_or_default();
+                                    let mut bus2 = bus;
+                                    let fmt_owned = format.to_string();
+                                    wasm_bindgen_futures::spawn_local(async move {
+                                        match export_document(&id, &fmt_owned, &token).await {
+                                            Ok(_) => push_toast(bus2, ToastKind::Success, format!("Exported as {}", fmt_owned.to_uppercase())),
+                                            Err(e) => push_toast(bus2, ToastKind::Error, format!("Export failed: {e}")),
+                                        }
+                                    });
+                                }
+                                other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                            }
+                        },
+                    }
+                }
+            }
+
             Toolbar { doc_type: "slides".to_string() }
 
             match doc_resource.read().as_ref() {
@@ -347,7 +426,23 @@ pub fn Slides(id: String) -> Element {
                     }
                 }
 
-                div { class: "slide-canvas",
+                div {
+                    class: "slide-canvas",
+                    oncontextmenu: move |evt: MouseEvent| {
+                        evt.prevent_default();
+                        let coords = evt.client_coordinates();
+                        ctx_menu.set(Some((
+                            coords.x,
+                            coords.y,
+                            vec![
+                                MenuEntry::new("Cut", "cut"),
+                                MenuEntry::new("Copy", "copy"),
+                                MenuEntry::new("Paste", "paste"),
+                                MenuEntry::new("Duplicate Slide", "duplicate-slide"),
+                                MenuEntry::new("Delete Slide", "delete-slide"),
+                            ],
+                        )));
+                    },
                     div {
                         class: "slide-content",
                         style: "background-color: {cur_bg};",
@@ -514,6 +609,46 @@ pub fn Slides(id: String) -> Element {
                 div { class: "present-slide-title", "{cur_title}" }
                 div { class: "present-slide-body", "{cur_body}" }
                 div { class: "present-counter", "{cur_idx + 1} / {slide_count}" }
+            }
+
+            CommentsPane { doc_id: id.clone(), open: comments_open }
+            VersionHistory { doc_id: id.clone(), open: versions_open }
+            ContextMenu {
+                state: ctx_menu,
+                on_command: {
+                    let mut bus = toast_bus;
+                    let mut schedule_save_ctx = schedule_save.clone();
+                    move |cmd: String| {
+                        match cmd.as_str() {
+                            "duplicate-slide" => {
+                                let cur = *current_slide.read();
+                                let snapshot = slides.read().get(cur).cloned();
+                                if let Some(mut s) = snapshot {
+                                    let next_id = slides.read().iter().map(|sd| sd.id).max().unwrap_or(0) + 1;
+                                    s.id = next_id;
+                                    slides.write().insert(cur + 1, s);
+                                    current_slide.set(cur + 1);
+                                    schedule_save_ctx();
+                                }
+                            }
+                            "delete-slide" => {
+                                let len = slides.read().len();
+                                if len <= 1 { return; }
+                                let cur = *current_slide.read();
+                                slides.write().remove(cur);
+                                let new_len = slides.read().len();
+                                if cur >= new_len {
+                                    current_slide.set(new_len - 1);
+                                }
+                                schedule_save_ctx();
+                            }
+                            "cut" => push_toast(bus, ToastKind::Info, "Use Ctrl+X to cut"),
+                            "copy" => push_toast(bus, ToastKind::Info, "Use Ctrl+C to copy"),
+                            "paste" => push_toast(bus, ToastKind::Info, "Use Ctrl+V to paste"),
+                            other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                        }
+                    }
+                },
             }
         }
     }

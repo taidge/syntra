@@ -18,9 +18,11 @@ fn main() {
 fn App() -> Element {
     // Provide global authentication state to all child components.
     use_context_provider(|| Signal::new(state::load_auth_state()));
+    use_context_provider(|| Signal::new(Vec::<crate::components::toast::Toast>::new()));
 
     rsx! {
         Router::<Route> {}
+        crate::components::ToastRack {}
     }
 }
 

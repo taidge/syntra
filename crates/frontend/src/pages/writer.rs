@@ -8,11 +8,17 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::WebSocket;
 
+use crate::Route;
 use crate::collab_client::{CollabHandle, CollabMessage, ConnectionState, RemoteCursor, connect_with_reconnect};
+use crate::components::comments_pane::CommentsPane;
+use crate::components::context_menu::{ContextMenu, MenuEntry};
 use crate::components::find_dialog::FindDialog;
+use crate::components::menubar::Menubar;
 use crate::components::navbar::Navbar;
 use crate::components::sidebar::Sidebar;
-use crate::state::{AuthState, api_get, api_put};
+use crate::components::toast::{Toast, ToastKind, push_toast};
+use crate::components::version_history::VersionHistory;
+use crate::state::{AuthState, api_get, api_put, export_document};
 
 fn window_find(query: &str, backward: bool) -> bool {
     if query.is_empty() {
@@ -222,7 +228,13 @@ pub fn Writer(id: String) -> Element {
     let mut find_query = use_signal(String::new);
     let mut find_info = use_signal(String::new);
 
+    let mut ctx_menu = use_signal(|| None::<(f64, f64, Vec<MenuEntry>)>);
+    let mut comments_open = use_signal(|| false);
+    let mut versions_open = use_signal(|| false);
+
     let auth = use_context::<Signal<AuthState>>();
+    let toast_bus = use_context::<Signal<Vec<Toast>>>();
+    let nav = use_navigator();
     let presence = use_signal(Vec::<RemoteCursor>::new);
     let mut ws_handle = use_signal(|| None::<CollabHandle>);
     let mut conn_state = use_signal(|| ConnectionState::Connecting);
@@ -512,6 +524,83 @@ pub fn Writer(id: String) -> Element {
                     }
                 }
             },
+            // Menubar
+            {
+                let mut flush_for_menu = flush_save.clone();
+                let mut schedule_for_menu = schedule_save.clone();
+                let id_for_menu = id.clone();
+                let mut bus_for_menu = toast_bus;
+                let nav_for_menu = nav;
+                let mut find_open_menu = find_open;
+                let mut show_sidebar_menu = show_sidebar;
+                rsx! {
+                    Menubar {
+                        doc_type: "writer".to_string(),
+                        on_command: move |cmd: String| {
+                            let mut bus = bus_for_menu;
+                            match cmd.as_str() {
+                                "save" => flush_for_menu(),
+                                "undo" => { exec_cmd("undo", None); schedule_for_menu(); }
+                                "redo" => { exec_cmd("redo", None); schedule_for_menu(); }
+                                "cut" => exec_cmd("cut", None),
+                                "copy" => exec_cmd("copy", None),
+                                "paste" => exec_cmd("paste", None),
+                                "find" => { find_open_menu.set(true); }
+                                "back" => { nav_for_menu.push(Route::Dashboard {}); }
+                                "toggle-sidebar" => {
+                                    let cur = *show_sidebar_menu.read();
+                                    show_sidebar_menu.set(!cur);
+                                }
+                                "toggle-comments" => {
+                                    let cur = *comments_open.read();
+                                    comments_open.set(!cur);
+                                }
+                                "version-history" => {
+                                    let cur = *versions_open.read();
+                                    versions_open.set(!cur);
+                                }
+                                "toggle-theme" => {
+                                    if let Some(window) = web_sys::window() {
+                                        if let Some(el) = window.document().and_then(|d| d.document_element()) {
+                                            let cur = el.get_attribute("data-theme").unwrap_or_default();
+                                            let next = if cur == "dark" { "light" } else { "dark" };
+                                            let _ = el.set_attribute("data-theme", next);
+                                            if let Ok(Some(storage)) = window.local_storage() {
+                                                let _ = storage.set_item("theme", next);
+                                            }
+                                        }
+                                    }
+                                }
+                                "format-bold" => { exec_cmd("bold", None); schedule_for_menu(); }
+                                "format-italic" => { exec_cmd("italic", None); schedule_for_menu(); }
+                                "format-underline" => { exec_cmd("underline", None); schedule_for_menu(); }
+                                "print" => {
+                                    if let Some(w) = web_sys::window() { let _ = w.print(); }
+                                }
+                                "export-pdf" | "export-docx" | "export-html" => {
+                                    let format = match cmd.as_str() {
+                                        "export-pdf" => "pdf",
+                                        "export-docx" => "docx",
+                                        _ => "html",
+                                    };
+                                    let id = id_for_menu.clone();
+                                    let token = auth.read().token.clone().unwrap_or_default();
+                                    let mut bus2 = bus;
+                                    let fmt_owned = format.to_string();
+                                    wasm_bindgen_futures::spawn_local(async move {
+                                        match export_document(&id, &fmt_owned, &token).await {
+                                            Ok(_) => push_toast(bus2, ToastKind::Success, format!("Exported as {}", fmt_owned.to_uppercase())),
+                                            Err(e) => push_toast(bus2, ToastKind::Error, format!("Export failed: {e}")),
+                                        }
+                                    });
+                                }
+                                other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                            }
+                        },
+                    }
+                }
+            }
+
             // Document title bar
             div { class: "doc-title-bar",
                 input {
@@ -598,24 +687,28 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-group",
                             button {
                                 class: "toolbar-btn", title: "Bold (Ctrl+B)",
+                                aria_label: "Bold (Ctrl+B)",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_b.clone(); r("bold", None); },
                                 "B"
                             }
                             button {
                                 class: "toolbar-btn italic", title: "Italic (Ctrl+I)",
+                                aria_label: "Italic (Ctrl+I)",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_i.clone(); r("italic", None); },
                                 "I"
                             }
                             button {
                                 class: "toolbar-btn underline", title: "Underline (Ctrl+U)",
+                                aria_label: "Underline (Ctrl+U)",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_u.clone(); r("underline", None); },
                                 "U"
                             }
                             button {
                                 class: "toolbar-btn strikethrough", title: "Strikethrough",
+                                aria_label: "Strikethrough",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_s.clone(); r("strikeThrough", None); },
                                 "S"
@@ -625,24 +718,28 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-group",
                             button {
                                 class: "toolbar-btn", title: "Bulleted List",
+                                aria_label: "Bulleted list",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_ul.clone(); r("insertUnorderedList", None); },
                                 "* List"
                             }
                             button {
                                 class: "toolbar-btn", title: "Numbered List",
+                                aria_label: "Numbered list",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_ol.clone(); r("insertOrderedList", None); },
                                 "1. List"
                             }
                             button {
                                 class: "toolbar-btn", title: "Indent",
+                                aria_label: "Indent",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_in.clone(); r("indent", None); },
                                 ">>"
                             }
                             button {
                                 class: "toolbar-btn", title: "Outdent",
+                                aria_label: "Outdent",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_out.clone(); r("outdent", None); },
                                 "<<"
@@ -652,24 +749,28 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-group",
                             button {
                                 class: "toolbar-btn", title: "Align Left",
+                                aria_label: "Align left",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_jl.clone(); r("justifyLeft", None); },
                                 "L"
                             }
                             button {
                                 class: "toolbar-btn", title: "Align Center",
+                                aria_label: "Align center",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_jc.clone(); r("justifyCenter", None); },
                                 "C"
                             }
                             button {
                                 class: "toolbar-btn", title: "Align Right",
+                                aria_label: "Align right",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_jr.clone(); r("justifyRight", None); },
                                 "R"
                             }
                             button {
                                 class: "toolbar-btn", title: "Justify",
+                                aria_label: "Justify",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_jf.clone(); r("justifyFull", None); },
                                 "J"
@@ -679,11 +780,13 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-group",
                             input {
                                 r#type: "color", class: "toolbar-color", title: "Text Color", value: "#000000",
+                                aria_label: "Text color",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 oninput: move |e: FormEvent| { let mut r = run_fore.clone(); r("foreColor", Some(e.value())); },
                             }
                             input {
                                 r#type: "color", class: "toolbar-color", title: "Highlight Color", value: "#ffff00",
+                                aria_label: "Highlight color",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 oninput: move |e: FormEvent| {
                                     let val = e.value();
@@ -703,7 +806,23 @@ pub fn Writer(id: String) -> Element {
                     Sidebar {}
                 }
 
-                div { class: "editor-canvas writer-canvas",
+                div {
+                    class: "editor-canvas writer-canvas",
+                    oncontextmenu: move |evt: MouseEvent| {
+                        evt.prevent_default();
+                        let coords = evt.client_coordinates();
+                        ctx_menu.set(Some((
+                            coords.x,
+                            coords.y,
+                            vec![
+                                MenuEntry::new("Cut", "cut"),
+                                MenuEntry::new("Copy", "copy"),
+                                MenuEntry::new("Paste", "paste"),
+                                MenuEntry::new("Delete", "delete"),
+                                MenuEntry::new("Insert Link", "insert-link"),
+                            ],
+                        )));
+                    },
                     match doc_resource.read().as_ref() {
                         None => rsx! { div { class: "editor-loading", "Loading document..." } },
                         Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
@@ -788,6 +907,33 @@ pub fn Writer(id: String) -> Element {
                     if q.is_empty() { return; }
                     let ok = window_find(&q, true);
                     find_info.set(if ok { "Match".to_string() } else { "No matches".to_string() });
+                },
+            }
+
+            CommentsPane { doc_id: id.clone(), open: comments_open }
+            VersionHistory { doc_id: id.clone(), open: versions_open }
+            ContextMenu {
+                state: ctx_menu,
+                on_command: {
+                    let mut bus = toast_bus;
+                    move |cmd: String| {
+                        match cmd.as_str() {
+                            "cut" => exec_cmd("cut", None),
+                            "copy" => exec_cmd("copy", None),
+                            "paste" => exec_cmd("paste", None),
+                            "delete" => exec_cmd("delete", None),
+                            "insert-link" => {
+                                if let Some(window) = web_sys::window() {
+                                    if let Ok(Some(url)) = window.prompt_with_message("Link URL:") {
+                                        if !url.is_empty() {
+                                            exec_cmd("createLink", Some(&url));
+                                        }
+                                    }
+                                }
+                            }
+                            other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                        }
+                    }
                 },
             }
         }

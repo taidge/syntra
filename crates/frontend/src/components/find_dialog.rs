@@ -51,18 +51,21 @@ pub fn FindDialog(props: FindDialogProps) -> Element {
                 class: "find-btn",
                 onclick: move |_| props.on_prev.call(()),
                 title: "Previous (Shift+Enter)",
+                aria_label: "Previous match (Shift+Enter)",
                 "↑"
             }
             button {
                 class: "find-btn",
                 onclick: move |_| props.on_next.call(()),
                 title: "Next (Enter)",
+                aria_label: "Next match (Enter)",
                 "↓"
             }
             button {
                 class: "find-btn",
                 onclick: move |_| open_sig.set(false),
                 title: "Close (Esc)",
+                aria_label: "Close find dialog (Esc)",
                 "✕"
             }
         }

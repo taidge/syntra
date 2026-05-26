@@ -2612,3 +2612,95 @@ input:-webkit-autofill:active {
     font-size: 0.875rem;
     color: var(--text-light);
 }
+
+
+.toast-rack {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+}
+.toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    background: var(--bg-white);
+    border-left: 4px solid var(--primary);
+    color: var(--text);
+    min-width: 240px;
+    max-width: 380px;
+    font-size: 0.875rem;
+    animation: toast-in 200ms ease-out;
+}
+.toast-success { border-left-color: var(--success); }
+.toast-warning { border-left-color: var(--warning); }
+.toast-error { border-left-color: var(--danger); }
+.toast-msg { flex: 1; }
+.toast-close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1rem;
+}
+@keyframes toast-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: none; }
+}
+
+.menubar {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 12px;
+    background: var(--bg-white);
+    border-bottom: 1px solid var(--border);
+    gap: 4px;
+    font-size: 0.875rem;
+    position: relative;
+    z-index: 50;
+    color: var(--text);
+}
+.menubar-item {
+    background: transparent;
+    border: none;
+    padding: 6px 12px;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    color: inherit;
+}
+.menubar-item:hover, .menubar-item.active { background: var(--primary-light); }
+.menubar-dropdown {
+    position: absolute;
+    top: 100%;
+    background: var(--bg-white);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-lg);
+    min-width: 200px;
+    padding: 4px 0;
+    z-index: 100;
+}
+.menubar-dropdown button {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    background: transparent;
+    border: none;
+    padding: 6px 14px;
+    text-align: left;
+    cursor: pointer;
+    font-size: 0.8125rem;
+    color: var(--text);
+}
+.menubar-dropdown button:hover { background: var(--primary-light); }
+.menubar-shortcut { color: var(--text-muted); font-size: 0.75rem; margin-left: 24px; }
+.menubar-sep { height: 1px; background: var(--border); margin: 4px 0; }

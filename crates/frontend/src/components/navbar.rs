@@ -71,6 +71,7 @@ pub fn Navbar() -> Element {
                     button {
                         class: "theme-toggle",
                         title: "Toggle theme",
+                        aria_label: "Toggle dark mode",
                         onclick: move |_| {
                             let next = if *theme.read() == "dark" { "light" } else { "dark" };
                             set_theme(next);
@@ -78,9 +79,10 @@ pub fn Navbar() -> Element {
                         },
                         {if *theme.read() == "dark" { "\u{2600}" } else { "\u{1F319}" }}
                     }
-                    Link { to: Route::Profile {}, class: "user-avatar", title: "Profile", "{user_initial}" }
+                    Link { to: Route::Profile {}, class: "user-avatar", title: "Profile", aria_label: "Open profile", "{user_initial}" }
                     button {
                         class: "btn btn-outline btn-sm",
+                        aria_label: "Log out",
                         onclick: move |_| {
                             state::clear_auth_state();
                             auth.set(AuthState::default());

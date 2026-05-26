@@ -284,6 +284,15 @@ pub async fn api_delete(path: &str, token: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Trigger a document export by opening the export URL in a new tab.
+pub async fn export_document(doc_id: &str, format: &str, _token: &str) -> Result<(), String> {
+    let url = format!("{API_BASE}/documents/{doc_id}/export/{format}");
+    if let Some(window) = web_sys::window() {
+        let _ = window.open_with_url(&url);
+    }
+    Ok(())
+}
+
 /// Upload a file with multipart/form-data to the backend.
 pub async fn upload_file(
     file: File,
