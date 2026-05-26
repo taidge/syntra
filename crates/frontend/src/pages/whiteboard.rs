@@ -4,9 +4,12 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use gloo_timers::callback::Timeout;
 use serde::Deserialize;
-
 use crate::components::navbar::Navbar;
 use crate::state::{AuthState, api_get, api_put};
+
+const VIEW_W: f64 = 1920.0;
+const VIEW_H: f64 = 1080.0;
+const SVG_ID: &str = "whiteboard-svg";
 
 #[derive(Clone, Deserialize)]
 struct DocumentResponse {
@@ -19,6 +22,8 @@ struct WhiteboardLite {
     #[serde(default)]
     layers: Vec<LayerLite>,
     #[serde(default)]
+    elements: Vec<serde_json::Value>,
+    #[serde(default)]
     background_color: Option<String>,
 }
 
@@ -28,7 +33,108 @@ struct LayerLite {
     elements: Vec<serde_json::Value>,
 }
 
-/// Whiteboard / freeform canvas editor with drawing tools.
+#[derive(Clone, PartialEq)]
+struct DraftStroke {
+    tool: String,
+    color: String,
+    stroke_width: f64,
+    points: Vec<(f64, f64)>,
+    start: (f64, f64),
+    end: (f64, f64),
+}
+
+fn svg_point(client_x: f64, client_y: f64) -> Option<(f64, f64)> {
+    let doc = web_sys::window()?.document()?;
+    let el = doc.get_element_by_id(SVG_ID)?;
+    let rect = el.get_bounding_client_rect();
+    let rw = rect.width();
+    let rh = rect.height();
+    if rw <= 0.0 || rh <= 0.0 {
+        return None;
+    }
+    let x = (client_x - rect.left()) * VIEW_W / rw;
+    let y = (client_y - rect.top()) * VIEW_H / rh;
+    Some((x, y))
+}
+
+fn pen_path_d(points: &[(f64, f64)]) -> String {
+    if points.is_empty() {
+        return String::new();
+    }
+    let mut s = String::new();
+    for (i, (x, y)) in points.iter().enumerate() {
+        if i == 0 {
+            s.push_str(&format!("M {x:.2} {y:.2}"));
+        } else {
+            s.push_str(&format!(" L {x:.2} {y:.2}"));
+        }
+    }
+    s
+}
+
+fn element_bbox(e: &serde_json::Value) -> Option<(f64, f64, f64, f64)> {
+    let t = e.get("type")?.as_str()?;
+    match t {
+        "rect" => {
+            let x = e.get("x")?.as_f64()?;
+            let y = e.get("y")?.as_f64()?;
+            let w = e.get("width")?.as_f64()?;
+            let h = e.get("height")?.as_f64()?;
+            Some((x, y, x + w, y + h))
+        }
+        "circle" => {
+            let cx = e.get("cx")?.as_f64()?;
+            let cy = e.get("cy")?.as_f64()?;
+            let rx = e.get("rx")?.as_f64()?;
+            let ry = e.get("ry")?.as_f64()?;
+            Some((cx - rx, cy - ry, cx + rx, cy + ry))
+        }
+        "line" => {
+            let x1 = e.get("x1")?.as_f64()?;
+            let y1 = e.get("y1")?.as_f64()?;
+            let x2 = e.get("x2")?.as_f64()?;
+            let y2 = e.get("y2")?.as_f64()?;
+            Some((x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2)))
+        }
+        "pen" => {
+            let pts = e.get("points")?.as_array()?;
+            let mut min_x = f64::INFINITY;
+            let mut min_y = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
+            let mut max_y = f64::NEG_INFINITY;
+            for p in pts {
+                if let Some(arr) = p.as_array() {
+                    if arr.len() == 2 {
+                        let x = arr[0].as_f64().unwrap_or(0.0);
+                        let y = arr[1].as_f64().unwrap_or(0.0);
+                        if x < min_x { min_x = x; }
+                        if y < min_y { min_y = y; }
+                        if x > max_x { max_x = x; }
+                        if y > max_y { max_y = y; }
+                    }
+                }
+            }
+            if min_x.is_finite() {
+                Some((min_x - 4.0, min_y - 4.0, max_x + 4.0, max_y + 4.0))
+            } else {
+                None
+            }
+        }
+        "text" => {
+            let x = e.get("x")?.as_f64()?;
+            let y = e.get("y")?.as_f64()?;
+            let s = e.get("size").and_then(|v| v.as_f64()).unwrap_or(16.0);
+            let len = e.get("content").and_then(|v| v.as_str()).map(|c| c.chars().count()).unwrap_or(1) as f64;
+            Some((x, y - s, x + s * 0.6 * len, y + 2.0))
+        }
+        _ => None,
+    }
+}
+
+fn bbox_contains(b: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
+    x >= b.0 && x <= b.2 && y >= b.1 && y <= b.3
+}
+
 #[component]
 pub fn Whiteboard(id: String) -> Element {
     let mut tool = use_signal(|| "pen".to_string());
@@ -40,6 +146,9 @@ pub fn Whiteboard(id: String) -> Element {
     let mut elements = use_signal(|| Vec::<serde_json::Value>::new());
     let mut undo_stack = use_signal(|| Vec::<Vec<serde_json::Value>>::new());
     let mut loaded = use_signal(|| false);
+    let mut draft = use_signal(|| None::<DraftStroke>);
+    let mut is_drawing = use_signal(|| false);
+    let mut text_input = use_signal(|| None::<((f64, f64), String)>);
 
     let auth = use_context::<Signal<AuthState>>();
     let id_for_resource = id.clone();
@@ -62,10 +171,9 @@ pub fn Whiteboard(id: String) -> Element {
                 for layer in wb.layers {
                     flat.extend(layer.elements);
                 }
+                flat.extend(wb.elements);
                 elements.set(flat);
                 if let Some(bg) = wb.background_color {
-                    // Background hint preserved; canvas background colour
-                    // wiring is part of a later task.
                     let _ = bg;
                 }
             }
@@ -130,17 +238,29 @@ pub fn Whiteboard(id: String) -> Element {
         }
     };
 
-    /// List of available drawing tools.
+    let push_undo_snapshot = move || {
+        let snap = elements.read().clone();
+        undo_stack.write().push(snap);
+    };
+
     let tools: Vec<(&str, &str)> = vec![
         ("pen", "Pen"),
         ("eraser", "Eraser"),
         ("rect", "Rectangle"),
         ("circle", "Circle"),
         ("line", "Line"),
-        ("arrow", "Arrow"),
         ("text", "Text"),
         ("select", "Select"),
     ];
+
+    let canvas_cursor_class = {
+        let t = tool.read().clone();
+        match t.as_str() {
+            "eraser" => "whiteboard-canvas tool-eraser",
+            "text" => "whiteboard-canvas tool-text",
+            _ => "whiteboard-canvas",
+        }
+    };
 
     rsx! {
         Navbar {}
@@ -148,7 +268,7 @@ pub fn Whiteboard(id: String) -> Element {
             class: "editor-container",
             tabindex: "0",
             onkeydown: {
-                let mut flush_save = flush_save.clone();
+                let flush_save = flush_save.clone();
                 move |evt: KeyboardEvent| {
                     if evt.modifiers().contains(Modifiers::CONTROL) {
                         if evt.key() == Key::Character("s".to_string()) {
@@ -158,7 +278,6 @@ pub fn Whiteboard(id: String) -> Element {
                     }
                 }
             },
-            // Title bar
             div { class: "doc-title-bar",
                 input {
                     class: "doc-title-input",
@@ -175,9 +294,7 @@ pub fn Whiteboard(id: String) -> Element {
                 span { class: "save-status", "{saved_status}" }
             }
 
-            // Drawing toolbar
             div { class: "whiteboard-toolbar",
-                // Tool buttons
                 div { class: "toolbar-group",
                     for (key, label) in tools.iter() {
                         {
@@ -198,7 +315,6 @@ pub fn Whiteboard(id: String) -> Element {
 
                 div { class: "toolbar-separator" }
 
-                // Color and stroke
                 div { class: "toolbar-group",
                     label { class: "toolbar-label", "Color:" }
                     input {
@@ -225,7 +341,6 @@ pub fn Whiteboard(id: String) -> Element {
 
                 div { class: "toolbar-separator" }
 
-                // Undo / Redo / Clear
                 div { class: "toolbar-group",
                     button {
                         class: "tool-btn",
@@ -277,7 +392,6 @@ pub fn Whiteboard(id: String) -> Element {
 
                 div { class: "toolbar-separator" }
 
-                // Zoom
                 div { class: "toolbar-group",
                     button {
                         class: "tool-btn",
@@ -300,7 +414,6 @@ pub fn Whiteboard(id: String) -> Element {
 
                 div { class: "toolbar-separator" }
 
-                // Export
                 div { class: "toolbar-group",
                     button {
                         class: "tool-btn",
@@ -321,21 +434,167 @@ pub fn Whiteboard(id: String) -> Element {
                 }
             }
 
-            // Loading / error overlay
             match doc_resource.read().as_ref() {
                 None => rsx! { div { class: "editor-loading", "Loading document..." } },
                 Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
                 Some(Ok(_)) => rsx! {},
             }
 
-            // Canvas container
             div { class: "whiteboard-canvas-container",
                 svg {
-                    class: "whiteboard-canvas",
+                    id: "{SVG_ID}",
+                    class: "{canvas_cursor_class}",
                     width: "100%",
                     height: "100%",
                     view_box: "0 0 1920 1080",
-                    // Grid background pattern
+                    preserve_aspect_ratio: "xMidYMid meet",
+                    onpointerdown: {
+                        let mut schedule_save = schedule_save.clone();
+                        let mut push_undo_snapshot = push_undo_snapshot;
+                        move |evt: PointerEvent| {
+                            let c = evt.client_coordinates();
+                            let Some((x, y)) = svg_point(c.x, c.y) else { return; };
+                            let t = tool.read().clone();
+                            match t.as_str() {
+                                "pen" | "rect" | "circle" | "line" => {
+                                    is_drawing.set(true);
+                                    draft.set(Some(DraftStroke {
+                                        tool: t.clone(),
+                                        color: color.read().clone(),
+                                        stroke_width: *stroke_width.read(),
+                                        points: vec![(x, y)],
+                                        start: (x, y),
+                                        end: (x, y),
+                                    }));
+                                }
+                                "eraser" => {
+                                    is_drawing.set(true);
+                                    let current = elements.read().clone();
+                                    let kept: Vec<serde_json::Value> = current.iter().filter(|e| {
+                                        match element_bbox(e) {
+                                            Some(b) => !bbox_contains(b, x, y),
+                                            None => true,
+                                        }
+                                    }).cloned().collect();
+                                    if kept.len() != current.len() {
+                                        push_undo_snapshot();
+                                        elements.set(kept);
+                                        schedule_save();
+                                    }
+                                }
+                                "text" => {
+                                    text_input.set(Some(((x, y), String::new())));
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                    onpointermove: move |evt: PointerEvent| {
+                        if !*is_drawing.read() { return; }
+                        let c = evt.client_coordinates();
+                        let Some((x, y)) = svg_point(c.x, c.y) else { return; };
+                        let t = tool.read().clone();
+                        if t == "eraser" {
+                            let current = elements.read().clone();
+                            let kept: Vec<serde_json::Value> = current.iter().filter(|e| {
+                                match element_bbox(e) {
+                                    Some(b) => !bbox_contains(b, x, y),
+                                    None => true,
+                                }
+                            }).cloned().collect();
+                            if kept.len() != current.len() {
+                                elements.set(kept);
+                            }
+                            return;
+                        }
+                        let mut d_opt = draft.write();
+                        if let Some(d) = d_opt.as_mut() {
+                            d.end = (x, y);
+                            if d.tool == "pen" {
+                                d.points.push((x, y));
+                            }
+                        }
+                    },
+                    onpointerup: {
+                        let mut schedule_save = schedule_save.clone();
+                        let mut push_undo_snapshot = push_undo_snapshot;
+                        move |_evt: PointerEvent| {
+                            if !*is_drawing.read() { return; }
+                            is_drawing.set(false);
+                            let t = tool.read().clone();
+                            if t == "eraser" {
+                                schedule_save();
+                                return;
+                            }
+                            let d_opt = draft.write().take();
+                            let Some(d) = d_opt else { return; };
+                            let element = match d.tool.as_str() {
+                                "pen" => {
+                                    if d.points.len() < 2 { return; }
+                                    let pts: Vec<serde_json::Value> = d.points.iter().map(|(x, y)| {
+                                        serde_json::json!([x, y])
+                                    }).collect();
+                                    serde_json::json!({
+                                        "type": "pen",
+                                        "stroke": d.color,
+                                        "stroke_width": d.stroke_width,
+                                        "points": pts,
+                                    })
+                                }
+                                "rect" => {
+                                    let (sx, sy) = d.start;
+                                    let (ex, ey) = d.end;
+                                    let x = sx.min(ex);
+                                    let y = sy.min(ey);
+                                    let w = (ex - sx).abs();
+                                    let h = (ey - sy).abs();
+                                    if w < 1.0 && h < 1.0 { return; }
+                                    serde_json::json!({
+                                        "type": "rect",
+                                        "stroke": d.color,
+                                        "stroke_width": d.stroke_width,
+                                        "x": x, "y": y, "width": w, "height": h,
+                                    })
+                                }
+                                "circle" => {
+                                    let (sx, sy) = d.start;
+                                    let (ex, ey) = d.end;
+                                    let cx = (sx + ex) / 2.0;
+                                    let cy = (sy + ey) / 2.0;
+                                    let rx = (ex - sx).abs() / 2.0;
+                                    let ry = (ey - sy).abs() / 2.0;
+                                    if rx < 1.0 && ry < 1.0 { return; }
+                                    serde_json::json!({
+                                        "type": "circle",
+                                        "stroke": d.color,
+                                        "stroke_width": d.stroke_width,
+                                        "cx": cx, "cy": cy, "rx": rx, "ry": ry,
+                                    })
+                                }
+                                "line" => {
+                                    let (sx, sy) = d.start;
+                                    let (ex, ey) = d.end;
+                                    if (ex - sx).abs() < 1.0 && (ey - sy).abs() < 1.0 { return; }
+                                    serde_json::json!({
+                                        "type": "line",
+                                        "stroke": d.color,
+                                        "stroke_width": d.stroke_width,
+                                        "x1": sx, "y1": sy, "x2": ex, "y2": ey,
+                                    })
+                                }
+                                _ => return,
+                            };
+                            push_undo_snapshot();
+                            elements.write().push(element);
+                            schedule_save();
+                        }
+                    },
+                    onpointerleave: move |_evt: PointerEvent| {
+                        if *is_drawing.read() {
+                            is_drawing.set(false);
+                            draft.set(None);
+                        }
+                    },
                     defs {
                         pattern {
                             id: "grid",
@@ -355,16 +614,267 @@ pub fn Whiteboard(id: String) -> Element {
                         height: "100%",
                         fill: "url(#grid)",
                     }
-                    // Drawing elements would be rendered here dynamically
+
+                    for (idx, e) in elements.read().iter().enumerate() {
+                        {
+                            let t = e.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            let stroke = e.get("stroke").and_then(|v| v.as_str()).unwrap_or("#000").to_string();
+                            let sw = e.get("stroke_width").and_then(|v| v.as_f64()).unwrap_or(2.0);
+                            let key_str = format!("el-{idx}");
+                            match t {
+                                "pen" => {
+                                    let pts: Vec<(f64, f64)> = e.get("points")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.iter().filter_map(|p| {
+                                            let arr = p.as_array()?;
+                                            Some((arr.get(0)?.as_f64()?, arr.get(1)?.as_f64()?))
+                                        }).collect())
+                                        .unwrap_or_default();
+                                    let d = pen_path_d(&pts);
+                                    rsx! {
+                                        path {
+                                            key: "{key_str}",
+                                            d: "{d}",
+                                            fill: "none",
+                                            stroke: "{stroke}",
+                                            stroke_width: "{sw}",
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                        }
+                                    }
+                                }
+                                "rect" => {
+                                    let x = e.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let y = e.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let w = e.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let h = e.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    rsx! {
+                                        rect {
+                                            key: "{key_str}",
+                                            x: "{x}",
+                                            y: "{y}",
+                                            width: "{w}",
+                                            height: "{h}",
+                                            fill: "none",
+                                            stroke: "{stroke}",
+                                            stroke_width: "{sw}",
+                                        }
+                                    }
+                                }
+                                "circle" => {
+                                    let cx = e.get("cx").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let cy = e.get("cy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let rx = e.get("rx").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let ry = e.get("ry").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    rsx! {
+                                        ellipse {
+                                            key: "{key_str}",
+                                            cx: "{cx}",
+                                            cy: "{cy}",
+                                            rx: "{rx}",
+                                            ry: "{ry}",
+                                            fill: "none",
+                                            stroke: "{stroke}",
+                                            stroke_width: "{sw}",
+                                        }
+                                    }
+                                }
+                                "line" => {
+                                    let x1 = e.get("x1").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let y1 = e.get("y1").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let x2 = e.get("x2").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let y2 = e.get("y2").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    rsx! {
+                                        line {
+                                            key: "{key_str}",
+                                            x1: "{x1}",
+                                            y1: "{y1}",
+                                            x2: "{x2}",
+                                            y2: "{y2}",
+                                            stroke: "{stroke}",
+                                            stroke_width: "{sw}",
+                                            stroke_linecap: "round",
+                                        }
+                                    }
+                                }
+                                "text" => {
+                                    let x = e.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let y = e.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    let content = e.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let col = e.get("color").and_then(|v| v.as_str()).unwrap_or("#000").to_string();
+                                    let size = e.get("size").and_then(|v| v.as_f64()).unwrap_or(16.0);
+                                    rsx! {
+                                        text {
+                                            key: "{key_str}",
+                                            x: "{x}",
+                                            y: "{y}",
+                                            fill: "{col}",
+                                            font_size: "{size}",
+                                            font_family: "sans-serif",
+                                            "{content}"
+                                        }
+                                    }
+                                }
+                                _ => rsx! {},
+                            }
+                        }
+                    }
+
+                    if let Some(d) = draft.read().as_ref() {
+                        {
+                            let stroke = d.color.clone();
+                            let sw = d.stroke_width;
+                            match d.tool.as_str() {
+                                "pen" => {
+                                    let path_d = pen_path_d(&d.points);
+                                    rsx! {
+                                        path {
+                                            d: "{path_d}",
+                                            fill: "none",
+                                            stroke: "{stroke}",
+                                            stroke_width: "{sw}",
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            opacity: "0.7",
+                                        }
+                                    }
+                                }
+                                "rect" => {
+                                    let (sx, sy) = d.start;
+                                    let (ex, ey) = d.end;
+                                    let x = sx.min(ex);
+                                    let y = sy.min(ey);
+                                    let w = (ex - sx).abs();
+                                    let h = (ey - sy).abs();
+                                    rsx! {
+                                        rect {
+                                            x: "{x}", y: "{y}",
+                                            width: "{w}", height: "{h}",
+                                            fill: "none",
+                                            stroke: "{stroke}",
+                                            stroke_width: "{sw}",
+                                            opacity: "0.7",
+                                        }
+                                    }
+                                }
+                                "circle" => {
+                                    let (sx, sy) = d.start;
+                                    let (ex, ey) = d.end;
+                                    let cx = (sx + ex) / 2.0;
+                                    let cy = (sy + ey) / 2.0;
+                                    let rx = (ex - sx).abs() / 2.0;
+                                    let ry = (ey - sy).abs() / 2.0;
+                                    rsx! {
+                                        ellipse {
+                                            cx: "{cx}", cy: "{cy}",
+                                            rx: "{rx}", ry: "{ry}",
+                                            fill: "none",
+                                            stroke: "{stroke}",
+                                            stroke_width: "{sw}",
+                                            opacity: "0.7",
+                                        }
+                                    }
+                                }
+                                "line" => {
+                                    let (sx, sy) = d.start;
+                                    let (ex, ey) = d.end;
+                                    rsx! {
+                                        line {
+                                            x1: "{sx}", y1: "{sy}",
+                                            x2: "{ex}", y2: "{ey}",
+                                            stroke: "{stroke}",
+                                            stroke_width: "{sw}",
+                                            opacity: "0.7",
+                                            stroke_linecap: "round",
+                                        }
+                                    }
+                                }
+                                _ => rsx! {},
+                            }
+                        }
+                    }
+                }
+
+                if let Some((pos, content)) = text_input.read().clone() {
+                    {
+                        let (tx, ty) = pos;
+                        let screen_pos = web_sys::window()
+                            .and_then(|w| w.document())
+                            .and_then(|d| d.get_element_by_id(SVG_ID))
+                            .map(|el| {
+                                let rect = el.get_bounding_client_rect();
+                                let sx = rect.left() + tx * rect.width() / VIEW_W;
+                                let sy = rect.top() + ty * rect.height() / VIEW_H;
+                                (sx, sy)
+                            })
+                            .unwrap_or((tx, ty));
+                        let style = format!("left:{:.0}px; top:{:.0}px;", screen_pos.0, screen_pos.1);
+                        rsx! {
+                            input {
+                                class: "whiteboard-text-input",
+                                style: "{style}",
+                                value: "{content}",
+                                autofocus: true,
+                                oninput: move |e: FormEvent| {
+                                    let snapshot = text_input.read().clone();
+                                    if let Some((p, _)) = snapshot {
+                                        text_input.set(Some((p, e.value())));
+                                    }
+                                },
+                                onkeydown: {
+                                    let mut schedule_save = schedule_save.clone();
+                                    let mut push_undo_snapshot = push_undo_snapshot;
+                                    move |evt: KeyboardEvent| {
+                                        if evt.key() == Key::Enter {
+                                            evt.prevent_default();
+                                            if let Some((p, c)) = text_input.read().clone() {
+                                                if !c.is_empty() {
+                                                    push_undo_snapshot();
+                                                    elements.write().push(serde_json::json!({
+                                                        "type": "text",
+                                                        "x": p.0,
+                                                        "y": p.1,
+                                                        "content": c,
+                                                        "color": color.read().clone(),
+                                                        "size": 16,
+                                                    }));
+                                                    schedule_save();
+                                                }
+                                            }
+                                            text_input.set(None);
+                                        } else if evt.key() == Key::Escape {
+                                            evt.prevent_default();
+                                            text_input.set(None);
+                                        }
+                                    }
+                                },
+                                onblur: move |_| {
+                                    if let Some((p, c)) = text_input.read().clone() {
+                                        if !c.is_empty() {
+                                            elements.write().push(serde_json::json!({
+                                                "type": "text",
+                                                "x": p.0,
+                                                "y": p.1,
+                                                "content": c,
+                                                "color": color.read().clone(),
+                                                "size": 16,
+                                            }));
+                                        }
+                                    }
+                                    text_input.set(None);
+                                },
+                            }
+                        }
+                    }
                 }
             }
 
-            // Status bar
             div { class: "status-bar",
                 span { "Tool: {tool}" }
                 span { "Color: {color}" }
                 span { "Stroke: {stroke_width:.0}px" }
                 span { "Zoom: {zoom}%" }
+                span { "Elements: {elements.read().len()}" }
                 span { "ID: {id}" }
             }
         }

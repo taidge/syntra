@@ -6,8 +6,8 @@ mod pages;
 mod state;
 
 use pages::{
-    Admin, Calc, Dashboard, DocumentEditor, FileManager, Home, Login, Register, Slides, Whiteboard,
-    Writer,
+    Admin, Calc, Dashboard, DocumentEditor, FileManager, Home, Login, Profile, Register, Slides,
+    Whiteboard, Writer,
 };
 
 fn main() {
@@ -48,4 +48,6 @@ pub enum Route {
     Whiteboard { id: String },
     #[route("/admin")]
     Admin {},
+    #[route("/profile")]
+    Profile {},
 }

@@ -34,6 +34,30 @@ struct SheetLite {
     cells: serde_json::Value,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HeaderMenuKind {
+    Row,
+    Col,
+}
+
+fn parse_cell_ref(s: &str) -> Option<(u32, u32)> {
+    let s = s.trim().to_uppercase();
+    let mut col = 0u32;
+    let mut row_start = 0usize;
+    for (i, ch) in s.char_indices() {
+        if ch.is_ascii_alphabetic() {
+            col = col * 26 + (ch as u32 - 'A' as u32 + 1);
+        } else {
+            row_start = i;
+            break;
+        }
+    }
+    if row_start == 0 { return None; }
+    let row: u32 = s[row_start..].parse().ok()?;
+    if row == 0 || col == 0 { return None; }
+    Some((row - 1, col - 1))
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct CellStyle {
     bold: bool,
@@ -848,6 +872,13 @@ pub fn Calc(id: String) -> Element {
     let mut ws_handle = use_signal(|| None::<CollabHandle>);
     let mut conn_state = use_signal(|| ConnectionState::Connecting);
 
+    let mut header_menu = use_signal(|| None::<(HeaderMenuKind, u32, f64, f64)>);
+    let mut sheet_menu = use_signal(|| None::<(usize, f64, f64)>);
+    let mut renaming_sheet = use_signal(|| None::<usize>);
+    let mut rename_buffer = use_signal(String::new);
+    let mut address_input = use_signal(|| cell_ref(0, 0));
+    let mut address_error = use_signal(|| false);
+
     let mut push_snapshot = move || {
         let snap = CalcSnapshot {
             cells: cells.read().clone(),
@@ -1044,6 +1075,12 @@ pub fn Calc(id: String) -> Element {
             perform_save(body, saved_status, token);
         }
     };
+
+    use_effect(move || {
+        let (r, c) = *active_cell.read();
+        address_input.set(cell_ref(r, c));
+        address_error.set(false);
+    });
 
     // ── Derived values ───────────────────────────────────────────────────
     let (active_row, active_col) = *active_cell.read();
@@ -1636,7 +1673,54 @@ pub fn Calc(id: String) -> Element {
 
             // ── Formula bar ──────────────────────────────────────────────
             div { class: "formula-bar",
-                span { class: "cell-ref", "{cell_ref(active_row, active_col)}" }
+                input {
+                    class: if *address_error.read() { "cell-ref-input cell-ref-error" } else { "cell-ref-input" },
+                    value: "{address_input}",
+                    oninput: move |e: FormEvent| {
+                        address_input.set(e.value());
+                        address_error.set(false);
+                    },
+                    onkeydown: move |evt: KeyboardEvent| {
+                        if evt.key() == Key::Enter {
+                            evt.prevent_default();
+                            let s = address_input.read().clone();
+                            match parse_cell_ref(&s) {
+                                Some((r, c)) if r < NUM_ROWS && c < NUM_COLS => {
+                                    active_cell.set((r, c));
+                                    selection_start.set(Some((r, c)));
+                                    selection_end.set(Some((r, c)));
+                                    let si = *active_sheet.read();
+                                    let val = cells.read().get(&(si, r, c)).cloned().unwrap_or_default();
+                                    formula_bar.set(val);
+                                    address_input.set(cell_ref(r, c));
+                                    address_error.set(false);
+                                    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                                        if let Some(el) = doc.query_selector(".cell.active").ok().flatten() {
+                                            if let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
+                                                html_el.scroll_into_view_with_bool(false);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    address_error.set(true);
+                                    let (r, c) = *active_cell.read();
+                                    let buf = cell_ref(r, c);
+                                    let mut input_handle = address_input;
+                                    let mut err_handle = address_error;
+                                    Timeout::new(900, move || {
+                                        input_handle.set(buf);
+                                        err_handle.set(false);
+                                    }).forget();
+                                }
+                            }
+                        } else if evt.key() == Key::Escape {
+                            let (r, c) = *active_cell.read();
+                            address_input.set(cell_ref(r, c));
+                            address_error.set(false);
+                        }
+                    },
+                }
                 button {
                     class: "formula-icon",
                     r#type: "button",
@@ -1702,6 +1786,11 @@ pub fn Calc(id: String) -> Element {
                             for col in 0..NUM_COLS {
                                 th {
                                     class: if active_col == col { "col-header active-header" } else { "col-header" },
+                                    oncontextmenu: move |evt: MouseEvent| {
+                                        evt.prevent_default();
+                                        let coords = evt.client_coordinates();
+                                        header_menu.set(Some((HeaderMenuKind::Col, col, coords.x, coords.y)));
+                                    },
                                     "{col_letter(col)}"
                                 }
                             }
@@ -1712,6 +1801,11 @@ pub fn Calc(id: String) -> Element {
                             tr {
                                 th {
                                     class: if active_row == row { "row-header active-header" } else { "row-header" },
+                                    oncontextmenu: move |evt: MouseEvent| {
+                                        evt.prevent_default();
+                                        let coords = evt.client_coordinates();
+                                        header_menu.set(Some((HeaderMenuKind::Row, row, coords.x, coords.y)));
+                                    },
                                     "{row + 1}"
                                 }
                                 for col in 0..NUM_COLS {
@@ -1853,28 +1947,69 @@ pub fn Calc(id: String) -> Element {
             div { class: "sheet-tabs",
                 for (idx, name) in sheets.read().iter().enumerate() {
                     {
-                        let tab_class = if idx == *active_sheet.read() {
-                            "sheet-tab active"
-                        } else {
-                            "sheet-tab"
+                        let is_active_tab = idx == *active_sheet.read();
+                        let is_renaming = *renaming_sheet.read() == Some(idx);
+                        let tab_class = match (is_active_tab, is_renaming) {
+                            (true, true) => "sheet-tab active rename-mode",
+                            (true, false) => "sheet-tab active",
+                            (false, true) => "sheet-tab rename-mode",
+                            (false, false) => "sheet-tab",
                         };
                         let tab_name = name.clone();
                         let mut commit_formula_bar = commit_formula_bar.clone();
+                        let mut schedule_save_tab = schedule_save.clone();
+                        let mut push_snapshot_tab = push_snapshot.clone();
                         rsx! {
-                            button {
+                            div {
                                 class: "{tab_class}",
+                                oncontextmenu: move |evt: MouseEvent| {
+                                    evt.prevent_default();
+                                    let coords = evt.client_coordinates();
+                                    sheet_menu.set(Some((idx, coords.x, coords.y)));
+                                },
+                                ondoubleclick: {
+                                    let nm = tab_name.clone();
+                                    move |_| {
+                                        rename_buffer.set(nm.clone());
+                                        renaming_sheet.set(Some(idx));
+                                    }
+                                },
                                 onclick: move |_| {
-                                    // Commit pending edit before switching sheets
+                                    if *renaming_sheet.read() == Some(idx) { return; }
                                     if *is_editing.read() {
                                         commit_formula_bar();
                                     }
                                     active_sheet.set(idx);
-                                    // Reload formula bar for active cell on new sheet
                                     let (r, c) = *active_cell.read();
                                     let val = cells.read().get(&(idx, r, c)).cloned().unwrap_or_default();
                                     formula_bar.set(val);
                                 },
-                                "{tab_name}"
+                                if is_renaming {
+                                    input {
+                                        value: "{rename_buffer}",
+                                        autofocus: true,
+                                        oninput: move |e: FormEvent| rename_buffer.set(e.value()),
+                                        onkeydown: move |evt: KeyboardEvent| {
+                                            if evt.key() == Key::Enter {
+                                                evt.prevent_default();
+                                                let new_name = rename_buffer.read().trim().to_string();
+                                                if !new_name.is_empty() {
+                                                    if *loaded.read() { push_snapshot_tab(); }
+                                                    sheets.write()[idx] = new_name;
+                                                    schedule_save_tab();
+                                                }
+                                                renaming_sheet.set(None);
+                                            } else if evt.key() == Key::Escape {
+                                                renaming_sheet.set(None);
+                                            }
+                                        },
+                                        onblur: move |_| {
+                                            renaming_sheet.set(None);
+                                        },
+                                    }
+                                } else {
+                                    "{tab_name}"
+                                }
                             }
                         }
                     }
@@ -1885,7 +2020,6 @@ pub fn Calc(id: String) -> Element {
                     onclick: move |_| {
                         let count = sheets.read().len() + 1;
                         sheets.write().push(format!("Sheet{count}"));
-                        // Switch to the newly added sheet
                         let new_idx = sheets.read().len() - 1;
                         active_sheet.set(new_idx);
                         let (r, c) = *active_cell.read();
@@ -1902,6 +2036,397 @@ pub fn Calc(id: String) -> Element {
                 span { "Sum: {stat_sum:.4}" }
                 span { "Average: {stat_avg:.4}" }
                 span { "Count: {stat_count}" }
+            }
+
+            if let Some((kind, idx, mx, my)) = *header_menu.read() {
+                {
+                    let mut schedule_save_hm = schedule_save.clone();
+                    let mut push_snapshot_hm = push_snapshot.clone();
+                    let si = *active_sheet.read();
+                    rsx! {
+                        div {
+                            class: "header-context-menu-backdrop",
+                            style: "position: fixed; inset: 0; z-index: 1999;",
+                            onclick: move |_| header_menu.set(None),
+                            oncontextmenu: move |evt: MouseEvent| {
+                                evt.prevent_default();
+                                header_menu.set(None);
+                            },
+                            div {
+                                class: "header-context-menu",
+                                style: "left: {mx}px; top: {my}px;",
+                                onclick: move |evt: MouseEvent| evt.stop_propagation(),
+                                match kind {
+                                    HeaderMenuKind::Row => rsx! {
+                                        button {
+                                            onclick: {
+                                                let mut s = schedule_save_hm.clone();
+                                                let mut p = push_snapshot_hm.clone();
+                                                move |_| {
+                                                    if *loaded.read() { p(); }
+                                                    let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cells.read().iter() {
+                                                        if *s_i == si && *r >= idx {
+                                                            if r + 1 < NUM_ROWS {
+                                                                new_cells.insert((*s_i, *r + 1, *c), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_cells.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cells.set(new_cells);
+                                                    let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                        if *s_i == si && *r >= idx {
+                                                            if r + 1 < NUM_ROWS {
+                                                                new_styles.insert((*s_i, *r + 1, *c), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_styles.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cell_styles.set(new_styles);
+                                                    header_menu.set(None);
+                                                    s();
+                                                }
+                                            },
+                                            "Insert row above"
+                                        }
+                                        button {
+                                            onclick: {
+                                                let mut s = schedule_save_hm.clone();
+                                                let mut p = push_snapshot_hm.clone();
+                                                move |_| {
+                                                    if *loaded.read() { p(); }
+                                                    let target = idx + 1;
+                                                    let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cells.read().iter() {
+                                                        if *s_i == si && *r >= target {
+                                                            if r + 1 < NUM_ROWS {
+                                                                new_cells.insert((*s_i, *r + 1, *c), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_cells.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cells.set(new_cells);
+                                                    let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                        if *s_i == si && *r >= target {
+                                                            if r + 1 < NUM_ROWS {
+                                                                new_styles.insert((*s_i, *r + 1, *c), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_styles.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cell_styles.set(new_styles);
+                                                    header_menu.set(None);
+                                                    s();
+                                                }
+                                            },
+                                            "Insert row below"
+                                        }
+                                        button {
+                                            onclick: {
+                                                let mut s = schedule_save_hm.clone();
+                                                let mut p = push_snapshot_hm.clone();
+                                                move |_| {
+                                                    if *loaded.read() { p(); }
+                                                    let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cells.read().iter() {
+                                                        if *s_i == si {
+                                                            if *r == idx { continue; }
+                                                            if *r > idx {
+                                                                new_cells.insert((*s_i, *r - 1, *c), v.clone());
+                                                            } else {
+                                                                new_cells.insert((*s_i, *r, *c), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_cells.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cells.set(new_cells);
+                                                    let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                        if *s_i == si {
+                                                            if *r == idx { continue; }
+                                                            if *r > idx {
+                                                                new_styles.insert((*s_i, *r - 1, *c), v.clone());
+                                                            } else {
+                                                                new_styles.insert((*s_i, *r, *c), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_styles.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cell_styles.set(new_styles);
+                                                    header_menu.set(None);
+                                                    s();
+                                                }
+                                            },
+                                            "Delete row"
+                                        }
+                                    },
+                                    HeaderMenuKind::Col => rsx! {
+                                        button {
+                                            onclick: {
+                                                let mut s = schedule_save_hm.clone();
+                                                let mut p = push_snapshot_hm.clone();
+                                                move |_| {
+                                                    if *loaded.read() { p(); }
+                                                    let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cells.read().iter() {
+                                                        if *s_i == si && *c >= idx {
+                                                            if c + 1 < NUM_COLS {
+                                                                new_cells.insert((*s_i, *r, *c + 1), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_cells.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cells.set(new_cells);
+                                                    let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                        if *s_i == si && *c >= idx {
+                                                            if c + 1 < NUM_COLS {
+                                                                new_styles.insert((*s_i, *r, *c + 1), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_styles.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cell_styles.set(new_styles);
+                                                    header_menu.set(None);
+                                                    s();
+                                                }
+                                            },
+                                            "Insert column left"
+                                        }
+                                        button {
+                                            onclick: {
+                                                let mut s = schedule_save_hm.clone();
+                                                let mut p = push_snapshot_hm.clone();
+                                                move |_| {
+                                                    if *loaded.read() { p(); }
+                                                    let target = idx + 1;
+                                                    let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cells.read().iter() {
+                                                        if *s_i == si && *c >= target {
+                                                            if c + 1 < NUM_COLS {
+                                                                new_cells.insert((*s_i, *r, *c + 1), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_cells.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cells.set(new_cells);
+                                                    let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                        if *s_i == si && *c >= target {
+                                                            if c + 1 < NUM_COLS {
+                                                                new_styles.insert((*s_i, *r, *c + 1), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_styles.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cell_styles.set(new_styles);
+                                                    header_menu.set(None);
+                                                    s();
+                                                }
+                                            },
+                                            "Insert column right"
+                                        }
+                                        button {
+                                            onclick: {
+                                                let mut s = schedule_save_hm.clone();
+                                                let mut p = push_snapshot_hm.clone();
+                                                move |_| {
+                                                    if *loaded.read() { p(); }
+                                                    let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cells.read().iter() {
+                                                        if *s_i == si {
+                                                            if *c == idx { continue; }
+                                                            if *c > idx {
+                                                                new_cells.insert((*s_i, *r, *c - 1), v.clone());
+                                                            } else {
+                                                                new_cells.insert((*s_i, *r, *c), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_cells.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cells.set(new_cells);
+                                                    let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                                    for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                        if *s_i == si {
+                                                            if *c == idx { continue; }
+                                                            if *c > idx {
+                                                                new_styles.insert((*s_i, *r, *c - 1), v.clone());
+                                                            } else {
+                                                                new_styles.insert((*s_i, *r, *c), v.clone());
+                                                            }
+                                                        } else {
+                                                            new_styles.insert((*s_i, *r, *c), v.clone());
+                                                        }
+                                                    }
+                                                    cell_styles.set(new_styles);
+                                                    header_menu.set(None);
+                                                    s();
+                                                }
+                                            },
+                                            "Delete column"
+                                        }
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some((sidx, mx, my)) = *sheet_menu.read() {
+                {
+                    let mut schedule_save_sm = schedule_save.clone();
+                    let mut push_snapshot_sm = push_snapshot.clone();
+                    let cur_name = sheets.read().get(sidx).cloned().unwrap_or_default();
+                    rsx! {
+                        div {
+                            class: "header-context-menu-backdrop",
+                            style: "position: fixed; inset: 0; z-index: 1999;",
+                            onclick: move |_| sheet_menu.set(None),
+                            oncontextmenu: move |evt: MouseEvent| {
+                                evt.prevent_default();
+                                sheet_menu.set(None);
+                            },
+                            div {
+                                class: "header-context-menu",
+                                style: "left: {mx}px; top: {my}px;",
+                                onclick: move |evt: MouseEvent| evt.stop_propagation(),
+                                button {
+                                    onclick: {
+                                        let nm = cur_name.clone();
+                                        move |_| {
+                                            rename_buffer.set(nm.clone());
+                                            renaming_sheet.set(Some(sidx));
+                                            sheet_menu.set(None);
+                                        }
+                                    },
+                                    "Rename"
+                                }
+                                button {
+                                    onclick: {
+                                        let mut s = schedule_save_sm.clone();
+                                        let mut p = push_snapshot_sm.clone();
+                                        move |_| {
+                                            if sheets.read().len() <= 1 {
+                                                sheet_menu.set(None);
+                                                return;
+                                            }
+                                            if *loaded.read() { p(); }
+                                            sheets.write().remove(sidx);
+                                            let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                            for ((s_i, r, c), v) in cells.read().iter() {
+                                                if *s_i == sidx { continue; }
+                                                let ns = if *s_i > sidx { *s_i - 1 } else { *s_i };
+                                                new_cells.insert((ns, *r, *c), v.clone());
+                                            }
+                                            cells.set(new_cells);
+                                            let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                            for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                if *s_i == sidx { continue; }
+                                                let ns = if *s_i > sidx { *s_i - 1 } else { *s_i };
+                                                new_styles.insert((ns, *r, *c), v.clone());
+                                            }
+                                            cell_styles.set(new_styles);
+                                            let cur = *active_sheet.read();
+                                            let new_active = if cur >= sheets.read().len() {
+                                                sheets.read().len() - 1
+                                            } else if cur > sidx {
+                                                cur - 1
+                                            } else {
+                                                cur
+                                            };
+                                            active_sheet.set(new_active);
+                                            sheet_menu.set(None);
+                                            s();
+                                        }
+                                    },
+                                    "Delete"
+                                }
+                                button {
+                                    onclick: {
+                                        let mut s = schedule_save_sm.clone();
+                                        let mut p = push_snapshot_sm.clone();
+                                        move |_| {
+                                            if sidx == 0 {
+                                                sheet_menu.set(None);
+                                                return;
+                                            }
+                                            if *loaded.read() { p(); }
+                                            sheets.write().swap(sidx, sidx - 1);
+                                            let a = sidx;
+                                            let b = sidx - 1;
+                                            let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                            for ((s_i, r, c), v) in cells.read().iter() {
+                                                let ns = if *s_i == a { b } else if *s_i == b { a } else { *s_i };
+                                                new_cells.insert((ns, *r, *c), v.clone());
+                                            }
+                                            cells.set(new_cells);
+                                            let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                            for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                let ns = if *s_i == a { b } else if *s_i == b { a } else { *s_i };
+                                                new_styles.insert((ns, *r, *c), v.clone());
+                                            }
+                                            cell_styles.set(new_styles);
+                                            let cur = *active_sheet.read();
+                                            if cur == a { active_sheet.set(b); }
+                                            else if cur == b { active_sheet.set(a); }
+                                            sheet_menu.set(None);
+                                            s();
+                                        }
+                                    },
+                                    "Move left"
+                                }
+                                button {
+                                    onclick: {
+                                        let mut s = schedule_save_sm.clone();
+                                        let mut p = push_snapshot_sm.clone();
+                                        move |_| {
+                                            if sidx + 1 >= sheets.read().len() {
+                                                sheet_menu.set(None);
+                                                return;
+                                            }
+                                            if *loaded.read() { p(); }
+                                            sheets.write().swap(sidx, sidx + 1);
+                                            let a = sidx;
+                                            let b = sidx + 1;
+                                            let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
+                                            for ((s_i, r, c), v) in cells.read().iter() {
+                                                let ns = if *s_i == a { b } else if *s_i == b { a } else { *s_i };
+                                                new_cells.insert((ns, *r, *c), v.clone());
+                                            }
+                                            cells.set(new_cells);
+                                            let mut new_styles: HashMap<(usize, u32, u32), CellStyle> = HashMap::new();
+                                            for ((s_i, r, c), v) in cell_styles.read().iter() {
+                                                let ns = if *s_i == a { b } else if *s_i == b { a } else { *s_i };
+                                                new_styles.insert((ns, *r, *c), v.clone());
+                                            }
+                                            cell_styles.set(new_styles);
+                                            let cur = *active_sheet.read();
+                                            if cur == a { active_sheet.set(b); }
+                                            else if cur == b { active_sheet.set(a); }
+                                            sheet_menu.set(None);
+                                            s();
+                                        }
+                                    },
+                                    "Move right"
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             FindDialog {

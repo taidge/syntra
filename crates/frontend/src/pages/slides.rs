@@ -15,22 +15,61 @@ struct DocumentResponse {
     content: serde_json::Value,
 }
 
+#[derive(Deserialize, Default)]
+struct SlideDto {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    notes: String,
+    #[serde(default = "default_transition")]
+    transition: String,
+    #[serde(default = "default_bg")]
+    bg_color: String,
+}
+
+fn default_transition() -> String { "none".into() }
+fn default_bg() -> String { "#ffffff".into() }
+
 #[derive(Deserialize)]
 struct PresentationLite {
     #[serde(default)]
-    slides: Vec<serde_json::Value>,
+    slides: Vec<SlideDto>,
 }
 
-/// Presentation editor with slide panel, canvas, and properties panel.
+#[derive(Clone, PartialEq)]
+struct SlideData {
+    id: usize,
+    title: String,
+    body: String,
+    notes: String,
+    transition: String,
+    bg_color: String,
+}
+
+impl SlideData {
+    fn empty(id: usize) -> Self {
+        Self {
+            id,
+            title: String::new(),
+            body: String::new(),
+            notes: String::new(),
+            transition: "none".into(),
+            bg_color: "#ffffff".into(),
+        }
+    }
+}
+
 #[component]
 pub fn Slides(id: String) -> Element {
+    let mut slides = use_signal(|| vec![SlideData::empty(0)]);
     let mut current_slide = use_signal(|| 0usize);
-    let mut slide_count = use_signal(|| 1usize);
     let mut doc_title = use_signal(|| "Untitled Presentation".to_string());
     let mut saved_status = use_signal(|| "All changes saved".to_string());
-    let mut bg_color = use_signal(|| "#ffffff".to_string());
-    let mut transition = use_signal(|| "None".to_string());
     let mut loaded = use_signal(|| false);
+    let mut drag_index = use_signal(|| None::<usize>);
+    let mut present_mode = use_signal(|| false);
 
     let auth = use_context::<Signal<AuthState>>();
     let id_for_resource = id.clone();
@@ -48,11 +87,21 @@ pub fn Slides(id: String) -> Element {
         }
         if let Some(Ok(doc)) = doc_resource.read().as_ref() {
             doc_title.set(doc.name.clone());
-            if let Ok(p) = serde_json::from_value::<PresentationLite>(doc.content.clone()) {
-                let count = p.slides.len().max(1);
-                slide_count.set(count);
-                // TODO: deep-hydrate slide elements (text, layout, etc.)
-            }
+            let parsed = serde_json::from_value::<PresentationLite>(doc.content.clone()).ok();
+            let new_slides: Vec<SlideData> = match parsed {
+                Some(p) if !p.slides.is_empty() => p.slides.into_iter().enumerate().map(|(i, s)| {
+                    SlideData {
+                        id: i,
+                        title: s.title,
+                        body: s.body,
+                        notes: s.notes,
+                        transition: s.transition,
+                        bg_color: s.bg_color,
+                    }
+                }).collect(),
+                _ => vec![SlideData::empty(0)],
+            };
+            slides.set(new_slides);
             current_slide.set(0);
             loaded.set(true);
         }
@@ -61,15 +110,19 @@ pub fn Slides(id: String) -> Element {
     let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
 
     let serialize_slides = move || -> serde_json::Value {
-        let count = *slide_count.read();
-        let slides: Vec<serde_json::Value> = (0..count)
-            .map(|i| serde_json::json!({
-                "id": i,
-                "elements": [],
-                "notes": ""
+        let payload: Vec<serde_json::Value> = slides
+            .read()
+            .iter()
+            .map(|s| serde_json::json!({
+                "id": s.id,
+                "title": s.title,
+                "body": s.body,
+                "notes": s.notes,
+                "transition": s.transition,
+                "bg_color": s.bg_color,
             }))
             .collect();
-        serde_json::json!({ "slides": slides })
+        serde_json::json!({ "slides": payload })
     };
 
     let perform_save = {
@@ -122,6 +175,36 @@ pub fn Slides(id: String) -> Element {
         }
     };
 
+    let mut exit_present = move || {
+        present_mode.set(false);
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            let _ = doc.exit_fullscreen();
+        }
+    };
+
+    let mut go_next = move || {
+        let len = slides.read().len();
+        let cur = *current_slide.read();
+        if cur + 1 < len {
+            current_slide.set(cur + 1);
+        }
+    };
+
+    let mut go_prev = move || {
+        let cur = *current_slide.read();
+        if cur > 0 {
+            current_slide.set(cur - 1);
+        }
+    };
+
+    let slide_count = slides.read().len();
+    let cur_idx = *current_slide.read();
+    let cur_title = slides.read().get(cur_idx).map(|s| s.title.clone()).unwrap_or_default();
+    let cur_body = slides.read().get(cur_idx).map(|s| s.body.clone()).unwrap_or_default();
+    let cur_notes = slides.read().get(cur_idx).map(|s| s.notes.clone()).unwrap_or_default();
+    let cur_bg = slides.read().get(cur_idx).map(|s| s.bg_color.clone()).unwrap_or_else(|| "#ffffff".into());
+    let cur_transition = slides.read().get(cur_idx).map(|s| s.transition.clone()).unwrap_or_else(|| "none".into());
+
     rsx! {
         Navbar {}
         div {
@@ -138,7 +221,6 @@ pub fn Slides(id: String) -> Element {
                     }
                 }
             },
-            // Title bar
             div { class: "doc-title-bar",
                 input {
                     class: "doc-title-input",
@@ -153,38 +235,97 @@ pub fn Slides(id: String) -> Element {
                     placeholder: "Untitled Presentation",
                 }
                 span { class: "save-status", "{saved_status}" }
+                button {
+                    class: "present-btn",
+                    onclick: move |_| {
+                        present_mode.set(true);
+                        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                            if let Some(el) = doc.get_element_by_id("present-stage") {
+                                let _ = el.request_fullscreen();
+                            }
+                        }
+                    },
+                    "Present"
+                }
             }
 
-            // Toolbar
             Toolbar { doc_type: "slides".to_string() }
 
-            // Loading / error overlay
             match doc_resource.read().as_ref() {
                 None => rsx! { div { class: "editor-loading", "Loading document..." } },
                 Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
                 Some(Ok(_)) => rsx! {},
             }
 
-            // Main editor
             div { class: "slides-editor",
-                // Left panel: slide thumbnails
                 div { class: "slide-panel",
-                    for i in 0..*slide_count.read() {
-                        div {
-                            class: if *current_slide.read() == i { "slide-thumbnail active" } else { "slide-thumbnail" },
-                            onclick: move |_| current_slide.set(i),
-                            div { class: "slide-thumb-number", "{i + 1}" }
-                            div { class: "slide-thumb-preview",
-                                // Miniature preview of the slide
-                                if i == 0 {
-                                    div { class: "thumb-content",
-                                        div { class: "thumb-title-bar" }
-                                        div { class: "thumb-subtitle-bar" }
+                    for i in 0..slide_count {
+                        {
+                            let mut schedule_save_drop = schedule_save.clone();
+                            let mut schedule_save_del = schedule_save.clone();
+                            rsx! {
+                                div {
+                                    key: "{slides.read()[i].id}-{i}",
+                                    class: if cur_idx == i { "slide-thumbnail slide-thumb active" } else { "slide-thumbnail slide-thumb" },
+                                    draggable: true,
+                                    ondragstart: move |_| {
+                                        drag_index.set(Some(i));
+                                    },
+                                    ondragover: move |e| {
+                                        e.prevent_default();
+                                    },
+                                    ondrop: move |e| {
+                                        e.prevent_default();
+                                        if let Some(from) = *drag_index.read() {
+                                            if from != i {
+                                                let mut list = slides.write();
+                                                let item = list.remove(from);
+                                                list.insert(i, item);
+                                                drop(list);
+                                                let cur = *current_slide.read();
+                                                if cur == from {
+                                                    current_slide.set(i);
+                                                } else if from < cur && i >= cur {
+                                                    current_slide.set(cur - 1);
+                                                } else if from > cur && i <= cur {
+                                                    current_slide.set(cur + 1);
+                                                }
+                                                schedule_save_drop();
+                                            }
+                                        }
+                                        drag_index.set(None);
+                                    },
+                                    onclick: move |_| current_slide.set(i),
+                                    div { class: "slide-thumb-number", "{i + 1}" }
+                                    div { class: "slide-thumb-preview",
+                                        div { class: "thumb-content",
+                                            if i == 0 {
+                                                div { class: "thumb-title-bar" }
+                                                div { class: "thumb-subtitle-bar" }
+                                            } else {
+                                                div { class: "thumb-body-bar" }
+                                                div { class: "thumb-body-bar short" }
+                                            }
+                                        }
                                     }
-                                } else {
-                                    div { class: "thumb-content",
-                                        div { class: "thumb-body-bar" }
-                                        div { class: "thumb-body-bar short" }
+                                    button {
+                                        class: "slide-thumb-delete",
+                                        onclick: move |e| {
+                                            e.stop_propagation();
+                                            let len = slides.read().len();
+                                            if len <= 1 {
+                                                return;
+                                            }
+                                            slides.write().remove(i);
+                                            let cur = *current_slide.read();
+                                            if cur >= slides.read().len() {
+                                                current_slide.set(slides.read().len() - 1);
+                                            } else if i < cur {
+                                                current_slide.set(cur - 1);
+                                            }
+                                            schedule_save_del();
+                                        },
+                                        "×"
                                     }
                                 }
                             }
@@ -195,9 +336,10 @@ pub fn Slides(id: String) -> Element {
                         onclick: {
                             let mut schedule_save = schedule_save.clone();
                             move |_| {
-                                let count = *slide_count.read();
-                                slide_count.set(count + 1);
-                                current_slide.set(count);
+                                let next_id = slides.read().iter().map(|s| s.id).max().unwrap_or(0) + 1;
+                                slides.write().push(SlideData::empty(next_id));
+                                let new_idx = slides.read().len() - 1;
+                                current_slide.set(new_idx);
                                 schedule_save();
                             }
                         },
@@ -205,61 +347,77 @@ pub fn Slides(id: String) -> Element {
                     }
                 }
 
-                // Main canvas
                 div { class: "slide-canvas",
                     div {
                         class: "slide-content",
-                        style: "background-color: {bg_color};",
+                        style: "background-color: {cur_bg};",
 
-                        if *current_slide.read() == 0 {
-                            // Title slide
+                        if cur_idx == 0 {
                             div { class: "slide-placeholder title-slide",
                                 h2 {
                                     contenteditable: "true",
                                     class: "slide-title-text",
                                     oninput: {
                                         let mut schedule_save = schedule_save.clone();
-                                        move |_| schedule_save()
+                                        move |e: FormEvent| {
+                                            if let Some(s) = slides.write().get_mut(cur_idx) {
+                                                s.title = e.value();
+                                            }
+                                            schedule_save();
+                                        }
                                     },
-                                    "Click to add title"
+                                    "{cur_title}"
                                 }
                                 p {
                                     contenteditable: "true",
                                     class: "slide-subtitle-text",
                                     oninput: {
                                         let mut schedule_save = schedule_save.clone();
-                                        move |_| schedule_save()
+                                        move |e: FormEvent| {
+                                            if let Some(s) = slides.write().get_mut(cur_idx) {
+                                                s.body = e.value();
+                                            }
+                                            schedule_save();
+                                        }
                                     },
-                                    "Click to add subtitle"
+                                    "{cur_body}"
                                 }
                             }
                         } else {
-                            // Content slide
                             div { class: "slide-placeholder content-slide",
                                 h3 {
                                     contenteditable: "true",
                                     class: "slide-heading-text",
                                     oninput: {
                                         let mut schedule_save = schedule_save.clone();
-                                        move |_| schedule_save()
+                                        move |e: FormEvent| {
+                                            if let Some(s) = slides.write().get_mut(cur_idx) {
+                                                s.title = e.value();
+                                            }
+                                            schedule_save();
+                                        }
                                     },
-                                    "Click to add heading"
+                                    "{cur_title}"
                                 }
                                 div {
                                     contenteditable: "true",
                                     class: "slide-body-text",
                                     oninput: {
                                         let mut schedule_save = schedule_save.clone();
-                                        move |_| schedule_save()
+                                        move |e: FormEvent| {
+                                            if let Some(s) = slides.write().get_mut(cur_idx) {
+                                                s.body = e.value();
+                                            }
+                                            schedule_save();
+                                        }
                                     },
-                                    "Click to add content"
+                                    "{cur_body}"
                                 }
                             }
                         }
                     }
                 }
 
-                // Right panel: properties
                 div { class: "properties-panel",
                     h3 { "Properties" }
 
@@ -268,8 +426,16 @@ pub fn Slides(id: String) -> Element {
                         input {
                             r#type: "color",
                             class: "property-input",
-                            value: "{bg_color}",
-                            oninput: move |e| bg_color.set(e.value()),
+                            value: "{cur_bg}",
+                            oninput: {
+                                let mut schedule_save = schedule_save.clone();
+                                move |e: FormEvent| {
+                                    if let Some(s) = slides.write().get_mut(cur_idx) {
+                                        s.bg_color = e.value();
+                                    }
+                                    schedule_save();
+                                }
+                            },
                         }
                     }
 
@@ -277,13 +443,21 @@ pub fn Slides(id: String) -> Element {
                         label { "Transition" }
                         select {
                             class: "property-select",
-                            value: "{transition}",
-                            oninput: move |e| transition.set(e.value()),
-                            option { value: "None", "None" }
-                            option { value: "Fade", "Fade" }
-                            option { value: "Slide", "Slide" }
-                            option { value: "Zoom", "Zoom" }
-                            option { value: "Flip", "Flip" }
+                            value: "{cur_transition}",
+                            oninput: {
+                                let mut schedule_save = schedule_save.clone();
+                                move |e: FormEvent| {
+                                    if let Some(s) = slides.write().get_mut(cur_idx) {
+                                        s.transition = e.value();
+                                    }
+                                    schedule_save();
+                                }
+                            },
+                            option { value: "none", "None" }
+                            option { value: "fade", "Fade" }
+                            option { value: "slide", "Slide" }
+                            option { value: "zoom", "Zoom" }
+                            option { value: "flip", "Flip" }
                         }
                     }
 
@@ -302,20 +476,44 @@ pub fn Slides(id: String) -> Element {
                         textarea {
                             class: "speaker-notes",
                             placeholder: "Add notes for this slide...",
+                            value: "{cur_notes}",
                             oninput: {
                                 let mut schedule_save = schedule_save.clone();
-                                move |_| schedule_save()
+                                move |e: FormEvent| {
+                                    if let Some(s) = slides.write().get_mut(cur_idx) {
+                                        s.notes = e.value();
+                                    }
+                                    schedule_save();
+                                }
                             },
                         }
                     }
                 }
             }
 
-            // Status bar
             div { class: "status-bar",
-                span { "Slide {*current_slide.read() + 1} of {slide_count}" }
-                span { "Transition: {transition}" }
+                span { "Slide {cur_idx + 1} of {slide_count}" }
+                span { "Transition: {cur_transition}" }
                 span { "ID: {id}" }
+            }
+
+            div {
+                id: "present-stage",
+                class: if *present_mode.read() { "present-stage active" } else { "present-stage" },
+                tabindex: "0",
+                onkeydown: move |e: KeyboardEvent| {
+                    match e.key() {
+                        Key::ArrowRight => { e.prevent_default(); go_next(); }
+                        Key::ArrowLeft => { e.prevent_default(); go_prev(); }
+                        Key::Escape => { e.prevent_default(); exit_present(); }
+                        Key::Character(ref ch) if ch == " " => { e.prevent_default(); go_next(); }
+                        _ => {}
+                    }
+                },
+                style: "background-color: {cur_bg};",
+                div { class: "present-slide-title", "{cur_title}" }
+                div { class: "present-slide-body", "{cur_body}" }
+                div { class: "present-counter", "{cur_idx + 1} / {slide_count}" }
             }
         }
     }
