@@ -1,7 +1,21 @@
 use dioxus::prelude::*;
+use serde::Deserialize;
 
 use crate::components::navbar::Navbar;
 use crate::components::toolbar::Toolbar;
+use crate::state::{AuthState, api_get};
+
+#[derive(Clone, Deserialize)]
+struct DocumentResponse {
+    name: String,
+    content: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct PresentationLite {
+    #[serde(default)]
+    slides: Vec<serde_json::Value>,
+}
 
 /// Presentation editor with slide panel, canvas, and properties panel.
 #[component]
@@ -12,6 +26,33 @@ pub fn Slides(id: String) -> Element {
     let mut saved_status = use_signal(|| "All changes saved".to_string());
     let mut bg_color = use_signal(|| "#ffffff".to_string());
     let mut transition = use_signal(|| "None".to_string());
+    let mut loaded = use_signal(|| false);
+
+    let auth = use_context::<Signal<AuthState>>();
+    let id_for_resource = id.clone();
+    let doc_resource = use_resource(move || {
+        let id = id_for_resource.clone();
+        let token = auth.read().token.clone().unwrap_or_default();
+        async move {
+            api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await
+        }
+    });
+
+    use_effect(move || {
+        if *loaded.read() {
+            return;
+        }
+        if let Some(Ok(doc)) = doc_resource.read().as_ref() {
+            doc_title.set(doc.name.clone());
+            if let Ok(p) = serde_json::from_value::<PresentationLite>(doc.content.clone()) {
+                let count = p.slides.len().max(1);
+                slide_count.set(count);
+                // TODO: deep-hydrate slide elements (text, layout, etc.)
+            }
+            current_slide.set(0);
+            loaded.set(true);
+        }
+    });
 
     rsx! {
         Navbar {}
@@ -29,6 +70,13 @@ pub fn Slides(id: String) -> Element {
 
             // Toolbar
             Toolbar { doc_type: "slides".to_string() }
+
+            // Loading / error overlay
+            match doc_resource.read().as_ref() {
+                None => rsx! { div { class: "editor-loading", "Loading document..." } },
+                Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                Some(Ok(_)) => rsx! {},
+            }
 
             // Main editor
             div { class: "slides-editor",

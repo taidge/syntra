@@ -1,10 +1,125 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
+use serde::Deserialize;
 use wasm_bindgen::JsCast;
 
 use crate::components::navbar::Navbar;
 use crate::components::toolbar::Toolbar;
+use crate::state::{AuthState, api_get};
+
+#[derive(Clone, Deserialize)]
+struct DocumentResponse {
+    name: String,
+    content: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct WorkbookLite {
+    #[serde(default)]
+    sheets: Vec<SheetLite>,
+}
+
+#[derive(Deserialize)]
+struct SheetLite {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    cells: serde_json::Value,
+}
+
+fn cell_value_to_string(v: &serde_json::Value) -> String {
+    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let inner = v.get("value");
+    match ty {
+        "Empty" => String::new(),
+        "Text" => inner.and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        "Number" => inner
+            .and_then(|x| x.as_f64())
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
+        "Boolean" => inner
+            .and_then(|x| x.as_bool())
+            .map(|b| if b { "TRUE" } else { "FALSE" }.to_string())
+            .unwrap_or_default(),
+        "Date" => inner.and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        "Error" => format!(
+            "#ERR: {}",
+            inner.and_then(|x| x.as_str()).unwrap_or("")
+        ),
+        _ => String::new(),
+    }
+}
+
+fn hydrate_workbook(
+    content: &serde_json::Value,
+) -> (Vec<String>, HashMap<(usize, u32, u32), String>) {
+    let wb: WorkbookLite = match serde_json::from_value(content.clone()) {
+        Ok(w) => w,
+        Err(_) => return (Vec::new(), HashMap::new()),
+    };
+    let mut names = Vec::new();
+    let mut cells = HashMap::new();
+    for (sheet_idx, sheet) in wb.sheets.iter().enumerate() {
+        names.push(sheet.name.clone());
+        // `cells` may be either a HashMap object {"row,col": Cell} OR
+        // a JSON object whose keys are JSON-encoded CellRef. Serde JSON
+        // serializes HashMap<CellRef, Cell> as an array of [CellRef, Cell]
+        // pairs because CellRef is not a string. Handle both shapes.
+        if let Some(arr) = sheet.cells.as_array() {
+            for pair in arr {
+                let Some(pair_arr) = pair.as_array() else { continue };
+                if pair_arr.len() != 2 { continue; }
+                let cref = &pair_arr[0];
+                let cell = &pair_arr[1];
+                let row = cref.get("row").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                let col = cref.get("col").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                let value = cell.get("value");
+                let formula = cell
+                    .get("formula")
+                    .and_then(|f| f.as_str())
+                    .map(|s| s.to_string());
+                let display = if let Some(f) = formula {
+                    f
+                } else if let Some(v) = value {
+                    cell_value_to_string(v)
+                } else {
+                    String::new()
+                };
+                if !display.is_empty() {
+                    cells.insert((sheet_idx, row, col), display);
+                }
+            }
+        } else if let Some(obj) = sheet.cells.as_object() {
+            for (k, cell) in obj {
+                let (row, col) = if let Ok(cref) = serde_json::from_str::<serde_json::Value>(k) {
+                    (
+                        cref.get("row").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                        cref.get("col").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                    )
+                } else {
+                    continue;
+                };
+                let value = cell.get("value");
+                let formula = cell
+                    .get("formula")
+                    .and_then(|f| f.as_str())
+                    .map(|s| s.to_string());
+                let display = if let Some(f) = formula {
+                    f
+                } else if let Some(v) = value {
+                    cell_value_to_string(v)
+                } else {
+                    String::new()
+                };
+                if !display.is_empty() {
+                    cells.insert((sheet_idx, row, col), display);
+                }
+            }
+        }
+    }
+    (names, cells)
+}
 
 const FORMULA_INPUT_ID: &str = "calc-formula-input";
 
@@ -105,6 +220,33 @@ pub fn Calc(id: String) -> Element {
     // ── Document chrome ──────────────────────────────────────────────────
     let mut doc_title = use_signal(|| "Untitled Spreadsheet".to_string());
     let mut saved_status = use_signal(|| "All changes saved".to_string());
+    let mut loaded = use_signal(|| false);
+
+    let auth = use_context::<Signal<AuthState>>();
+    let id_for_resource = id.clone();
+    let doc_resource = use_resource(move || {
+        let id = id_for_resource.clone();
+        let token = auth.read().token.clone().unwrap_or_default();
+        async move {
+            api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await
+        }
+    });
+
+    use_effect(move || {
+        if *loaded.read() {
+            return;
+        }
+        if let Some(Ok(doc)) = doc_resource.read().as_ref() {
+            doc_title.set(doc.name.clone());
+            let (names, hydrated) = hydrate_workbook(&doc.content);
+            if !names.is_empty() {
+                sheets.set(names);
+            }
+            cells.set(hydrated);
+            active_sheet.set(0);
+            loaded.set(true);
+        }
+    });
 
     // ── Derived values ───────────────────────────────────────────────────
     let (active_row, active_col) = *active_cell.read();
@@ -397,6 +539,13 @@ pub fn Calc(id: String) -> Element {
                         }
                     },
                 }
+            }
+
+            // ── Loading / error overlay ─────────────────────────────────
+            match doc_resource.read().as_ref() {
+                None => rsx! { div { class: "editor-loading", "Loading document..." } },
+                Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                Some(Ok(_)) => rsx! {},
             }
 
             // ── Spreadsheet grid ─────────────────────────────────────────

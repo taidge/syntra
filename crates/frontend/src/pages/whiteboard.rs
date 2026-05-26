@@ -1,6 +1,28 @@
 use dioxus::prelude::*;
+use serde::Deserialize;
 
 use crate::components::navbar::Navbar;
+use crate::state::{AuthState, api_get};
+
+#[derive(Clone, Deserialize)]
+struct DocumentResponse {
+    name: String,
+    content: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct WhiteboardLite {
+    #[serde(default)]
+    layers: Vec<LayerLite>,
+    #[serde(default)]
+    background_color: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LayerLite {
+    #[serde(default)]
+    elements: Vec<serde_json::Value>,
+}
 
 /// Whiteboard / freeform canvas editor with drawing tools.
 #[component]
@@ -13,6 +35,40 @@ pub fn Whiteboard(id: String) -> Element {
     let mut zoom = use_signal(|| 100u32);
     let mut elements = use_signal(|| Vec::<serde_json::Value>::new());
     let mut undo_stack = use_signal(|| Vec::<Vec<serde_json::Value>>::new());
+    let mut loaded = use_signal(|| false);
+
+    let auth = use_context::<Signal<AuthState>>();
+    let id_for_resource = id.clone();
+    let doc_resource = use_resource(move || {
+        let id = id_for_resource.clone();
+        let token = auth.read().token.clone().unwrap_or_default();
+        async move {
+            api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await
+        }
+    });
+
+    use_effect(move || {
+        if *loaded.read() {
+            return;
+        }
+        if let Some(Ok(doc)) = doc_resource.read().as_ref() {
+            doc_title.set(doc.name.clone());
+            if let Ok(wb) = serde_json::from_value::<WhiteboardLite>(doc.content.clone()) {
+                let mut flat: Vec<serde_json::Value> = Vec::new();
+                for layer in wb.layers {
+                    flat.extend(layer.elements);
+                }
+                elements.set(flat);
+                if let Some(bg) = wb.background_color {
+                    // Background hint preserved; canvas background colour
+                    // wiring is part of a later task.
+                    let _ = bg;
+                }
+            }
+            let _ = undo_stack;
+            loaded.set(true);
+        }
+    });
 
     /// List of available drawing tools.
     let tools: Vec<(&str, &str)> = vec![
@@ -175,6 +231,13 @@ pub fn Whiteboard(id: String) -> Element {
                         "Export SVG"
                     }
                 }
+            }
+
+            // Loading / error overlay
+            match doc_resource.read().as_ref() {
+                None => rsx! { div { class: "editor-loading", "Loading document..." } },
+                Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                Some(Ok(_)) => rsx! {},
             }
 
             // Canvas container

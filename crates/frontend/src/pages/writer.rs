@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use serde::Deserialize;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{MessageEvent, WebSocket};
@@ -7,7 +8,48 @@ use crate::collab_client::{CollabMessage, RemoteCursor, connect_collab};
 use crate::components::navbar::Navbar;
 use crate::components::sidebar::Sidebar;
 use crate::components::toolbar::Toolbar;
-use crate::state::AuthState;
+use crate::state::{AuthState, api_get};
+
+#[derive(Clone, Deserialize)]
+struct DocumentResponse {
+    name: String,
+    content: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct WriterDocLite {
+    #[serde(default)]
+    body: Vec<serde_json::Value>,
+}
+
+fn extract_run_text(runs: &[serde_json::Value]) -> String {
+    runs.iter()
+        .filter_map(|r| r.get("text").and_then(|t| t.as_str()))
+        .collect::<String>()
+}
+
+fn writer_content_to_plain(content: &serde_json::Value) -> String {
+    let doc: WriterDocLite = match serde_json::from_value(content.clone()) {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+    let mut out = String::new();
+    for block in &doc.body {
+        let runs = block
+            .get("runs")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if !runs.is_empty() {
+            out.push_str(&extract_run_text(&runs));
+            out.push('\n');
+        }
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
 
 /// Rich-text document editor (word processor).
 #[component]
@@ -18,10 +60,38 @@ pub fn Writer(id: String) -> Element {
     let mut page_count = use_signal(|| 1u32);
     let mut saved_status = use_signal(|| "All changes saved".to_string());
     let mut show_sidebar = use_signal(|| true);
+    let mut doc_body_text = use_signal(String::new);
+    let mut loaded = use_signal(|| false);
 
     let auth = use_context::<Signal<AuthState>>();
     let presence = use_signal(Vec::<RemoteCursor>::new);
     let mut ws_handle = use_signal(|| None::<WebSocket>);
+
+    let id_for_resource = id.clone();
+    let doc_resource = use_resource(move || {
+        let id = id_for_resource.clone();
+        let token = auth.read().token.clone().unwrap_or_default();
+        async move {
+            api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await
+        }
+    });
+
+    use_effect(move || {
+        if *loaded.read() {
+            return;
+        }
+        if let Some(Ok(doc)) = doc_resource.read().as_ref() {
+            doc_title.set(doc.name.clone());
+            let text = writer_content_to_plain(&doc.content);
+            let wc = text.split_whitespace().count() as u32;
+            let cc = text.len() as u32;
+            doc_body_text.set(text);
+            word_count.set(wc);
+            char_count.set(cc);
+            let _ = page_count;
+            loaded.set(true);
+        }
+    });
 
     let doc_id_for_effect = id.clone();
     use_effect(move || {
@@ -129,20 +199,26 @@ pub fn Writer(id: String) -> Element {
                 }
 
                 div { class: "editor-canvas writer-canvas",
-                    // Paper-like page
-                    div { class: "page",
-                        div {
-                            contenteditable: "true",
-                            class: "writer-content",
-                            oninput: move |evt: FormEvent| {
-                                let text = evt.value();
-                                let wc = text.split_whitespace().count() as u32;
-                                let cc = text.len() as u32;
-                                word_count.set(wc);
-                                char_count.set(cc);
-                                saved_status.set("Unsaved changes".to_string());
-                            },
-                        }
+                    match doc_resource.read().as_ref() {
+                        None => rsx! { div { class: "editor-loading", "Loading document..." } },
+                        Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                        Some(Ok(_)) => rsx! {
+                            div { class: "page",
+                                div {
+                                    contenteditable: "true",
+                                    class: "writer-content",
+                                    oninput: move |evt: FormEvent| {
+                                        let text = evt.value();
+                                        let wc = text.split_whitespace().count() as u32;
+                                        let cc = text.len() as u32;
+                                        word_count.set(wc);
+                                        char_count.set(cc);
+                                        saved_status.set("Unsaved changes".to_string());
+                                    },
+                                    "{doc_body_text}"
+                                }
+                            }
+                        },
                     }
                 }
             }
