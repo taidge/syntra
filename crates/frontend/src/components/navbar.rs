@@ -31,8 +31,8 @@ pub fn Navbar() -> Element {
     let mut auth = use_context::<Signal<AuthState>>();
     let nav = use_navigator();
     let mut theme = use_signal(current_theme);
+    let mut locale = use_context::<Signal<String>>();
 
-    // Derive a display initial from the current user (fallback "U").
     let user_initial = {
         let state = auth.read();
         state
@@ -44,6 +44,16 @@ pub fn Navbar() -> Element {
             .to_string()
     };
 
+    let other_locale: &'static str = if *locale.read() == "zh" { "en" } else { "zh" };
+    let lang_label: &'static str = if *locale.read() == "zh" { "EN" } else { "中" };
+    let theme_label = crate::i18n::t("nav.theme_toggle");
+    let logout_label = crate::i18n::t("nav.logout");
+    let search_placeholder = crate::i18n::t("nav.search_placeholder");
+    let dashboard_label = crate::i18n::t("nav.dashboard");
+    let files_label = crate::i18n::t("nav.files");
+    let admin_label = crate::i18n::t("nav.admin");
+    let profile_label = crate::i18n::t("nav.profile");
+
     rsx! {
         nav { class: "navbar",
             div { class: "navbar-brand",
@@ -54,24 +64,34 @@ pub fn Navbar() -> Element {
             }
 
             div { class: "navbar-menu",
-                Link { to: Route::Dashboard {}, class: "navbar-item", "Dashboard" }
-                Link { to: Route::FileManager {}, class: "navbar-item", "Files" }
-                Link { to: Route::Admin {}, class: "navbar-item", "Admin" }
+                Link { to: Route::Dashboard {}, class: "navbar-item", "{dashboard_label}" }
+                Link { to: Route::FileManager {}, class: "navbar-item", "{files_label}" }
+                Link { to: Route::Admin {}, class: "navbar-item", "{admin_label}" }
             }
 
             div { class: "navbar-end",
                 div { class: "navbar-search",
                     input {
                         r#type: "search",
-                        placeholder: "Search documents...",
+                        placeholder: "{search_placeholder}",
                         class: "search-input",
                     }
                 }
                 div { class: "navbar-user",
                     button {
+                        class: "lang-toggle",
+                        title: "{lang_label}",
+                        aria_label: "Switch language",
+                        onclick: move |_| {
+                            crate::i18n::set_locale(other_locale);
+                            locale.set(other_locale.to_string());
+                        },
+                        "{lang_label}"
+                    }
+                    button {
                         class: "theme-toggle",
-                        title: "Toggle theme",
-                        aria_label: "Toggle dark mode",
+                        title: "{theme_label}",
+                        aria_label: "{theme_label}",
                         onclick: move |_| {
                             let next = if *theme.read() == "dark" { "light" } else { "dark" };
                             set_theme(next);
@@ -79,16 +99,16 @@ pub fn Navbar() -> Element {
                         },
                         {if *theme.read() == "dark" { "\u{2600}" } else { "\u{1F319}" }}
                     }
-                    Link { to: Route::Profile {}, class: "user-avatar", title: "Profile", aria_label: "Open profile", "{user_initial}" }
+                    Link { to: Route::Profile {}, class: "user-avatar", title: "{profile_label}", aria_label: "{profile_label}", "{user_initial}" }
                     button {
                         class: "btn btn-outline btn-sm",
-                        aria_label: "Log out",
+                        aria_label: "{logout_label}",
                         onclick: move |_| {
                             state::clear_auth_state();
                             auth.set(AuthState::default());
                             nav.push(Route::Login {});
                         },
-                        "Logout"
+                        "{logout_label}"
                     }
                 }
             }

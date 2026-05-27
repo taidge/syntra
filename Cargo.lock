@@ -795,6 +795,7 @@ dependencies = [
  "dioxus",
  "gloo-timers",
  "js-sys",
+ "once_cell",
  "serde",
  "serde_json",
  "tracing",

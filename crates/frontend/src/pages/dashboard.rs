@@ -18,28 +18,37 @@ pub fn Dashboard() -> Element {
         }
     });
 
+    let _locale = use_context::<Signal<String>>();
+    let welcome = crate::i18n::t("nav.dashboard");
+    let recent_label = crate::i18n::t("dashboard.recent");
+    let new_writer = crate::i18n::t("dashboard.new_writer");
+    let new_calc = crate::i18n::t("dashboard.new_calc");
+    let new_slides = crate::i18n::t("dashboard.new_slides");
+    let new_whiteboard = crate::i18n::t("dashboard.new_whiteboard");
+    let storage_label = crate::i18n::t("profile.storage");
+
     rsx! {
         Navbar {}
         div { class: "dashboard",
             // Header with quick-create actions
             div { class: "dashboard-header",
-                h1 { "Dashboard" }
+                h1 { "{welcome}" }
                 div { class: "quick-actions",
                     Link { to: Route::Writer { id: "new".to_string() }, class: "quick-action-btn writer",
                         span { class: "qa-icon", "W" }
-                        span { "New Document" }
+                        span { "{new_writer}" }
                     }
                     Link { to: Route::Calc { id: "new".to_string() }, class: "quick-action-btn calc",
                         span { class: "qa-icon", "C" }
-                        span { "New Spreadsheet" }
+                        span { "{new_calc}" }
                     }
                     Link { to: Route::Slides { id: "new".to_string() }, class: "quick-action-btn slides",
                         span { class: "qa-icon", "S" }
-                        span { "New Presentation" }
+                        span { "{new_slides}" }
                     }
                     Link { to: Route::Whiteboard { id: "new".to_string() }, class: "quick-action-btn whiteboard",
                         span { class: "qa-icon", "B" }
-                        span { "New Whiteboard" }
+                        span { "{new_whiteboard}" }
                     }
                     Link { to: Route::FileManager {}, class: "quick-action-btn",
                         span { class: "qa-icon", "T" }
@@ -50,7 +59,7 @@ pub fn Dashboard() -> Element {
 
             // Recent documents
             div { class: "recent-documents",
-                h2 { "Recent Documents" }
+                h2 { "{recent_label}" }
                 div { class: "doc-grid",
                     // Render API-fetched recent documents if available
                     match &*recent_docs.read() {
@@ -139,7 +148,7 @@ pub fn Dashboard() -> Element {
 
             // Storage usage
             div { class: "storage-info",
-                h3 { "Storage" }
+                h3 { "{storage_label}" }
                 div { class: "storage-details",
                     div { class: "storage-bar-large",
                         div { class: "storage-fill", style: "width: 12%" }

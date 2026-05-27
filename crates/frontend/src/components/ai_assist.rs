@@ -25,12 +25,17 @@ pub struct AiAssistProps {
 pub fn AiAssist(props: AiAssistProps) -> Element {
     let auth = use_context::<Signal<AuthState>>();
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
+    let _locale = use_context::<Signal<String>>();
     let mut open = use_signal(|| false);
-    let mut prompt = use_signal(|| String::from("Summarize this document in 3 bullet points."));
+    let mut prompt = use_signal(|| crate::i18n::t("ai.placeholder"));
     let mut mode = use_signal(|| String::from("summarize"));
     let mut answer = use_signal(String::new);
     let mut loading = use_signal(|| false);
     let doc_id = props.doc_id.clone();
+
+    let ai_title = crate::i18n::t("ai.title");
+    let send_label = crate::i18n::t("ai.send");
+    let thinking_label = crate::i18n::t("ai.thinking");
 
     let send = move |_| {
         if *loading.read() {
@@ -60,14 +65,14 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
         button {
             class: "ai-fab",
             onclick: move |_| open.toggle(),
-            aria_label: "AI assistant",
-            title: "AI assistant",
+            aria_label: "{ai_title}",
+            title: "{ai_title}",
             "\u{2728}"
         }
         if *open.read() {
             aside { class: "ai-pane",
                 header { class: "ai-pane-header",
-                    strong { "AI assistant" }
+                    strong { "{ai_title}" }
                     button { class: "btn-icon", onclick: move |_| open.set(false), "\u{2715}" }
                 }
                 div { class: "ai-modes",
@@ -75,7 +80,7 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
                         button {
                             class: if *mode.read() == m { "ai-mode active" } else { "ai-mode" },
                             onclick: move |_| mode.set(m.to_string()),
-                            "{m}"
+                            { crate::i18n::t(&format!("ai.{m}")) }
                         }
                     }
                 }
@@ -89,7 +94,7 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
                     class: "btn btn-primary btn-sm",
                     disabled: *loading.read(),
                     onclick: send,
-                    {if *loading.read() { "Thinking..." } else { "Send" }}
+                    {if *loading.read() { thinking_label.clone() } else { send_label.clone() }}
                 }
                 if !answer.read().is_empty() {
                     div { class: "ai-answer", "{answer}" }

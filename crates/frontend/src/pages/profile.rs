@@ -58,12 +58,27 @@ pub fn Profile() -> Element {
         });
     }
 
+    let _locale = use_context::<Signal<String>>();
+    let title = crate::i18n::t("profile.title");
+    let account_label = crate::i18n::t("profile.account");
+    let username_label = crate::i18n::t("auth.username");
+    let email_label = crate::i18n::t("auth.email");
+    let role_label = crate::i18n::t("profile.role");
+    let storage_label = crate::i18n::t("profile.storage");
+    let display_name_label = crate::i18n::t("profile.display_name");
+    let save_label = crate::i18n::t("common.save");
+    let change_password_label = crate::i18n::t("profile.change_password");
+    let current_password_label = crate::i18n::t("profile.current_password");
+    let new_password_label = crate::i18n::t("profile.new_password");
+    let confirm_new_password_label = crate::i18n::t("profile.confirm_new_password");
+    let loading_label = crate::i18n::t("common.loading");
+
     rsx! {
         Navbar {}
         div { class: "profile-container",
-            h1 { "Profile" }
+            h1 { "{title}" }
             match me.read().as_ref() {
-                None => rsx! { div { class: "editor-loading", "Loading..." } },
+                None => rsx! { div { class: "editor-loading", "{loading_label}" } },
                 Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
                 Some(Ok(p)) => {
                     let storage_mb = (p.storage_used as f64) / 1_048_576.0;
@@ -73,21 +88,21 @@ pub fn Profile() -> Element {
                     } else { 0.0 };
                     rsx! {
                         section { class: "profile-section",
-                            h2 { "Account" }
+                            h2 { "{account_label}" }
                             div { class: "profile-row",
-                                label { "Username" }
+                                label { "{username_label}" }
                                 span { "{p.username}" }
                             }
                             div { class: "profile-row",
-                                label { "Email" }
+                                label { "{email_label}" }
                                 span { "{p.email}" }
                             }
                             div { class: "profile-row",
-                                label { "Role" }
+                                label { "{role_label}" }
                                 span { class: "badge", "{p.role}" }
                             }
                             div { class: "profile-row",
-                                label { "Storage" }
+                                label { "{storage_label}" }
                                 div { class: "storage-bar-wrap",
                                     div { class: "storage-bar",
                                         div { class: "storage-bar-fill", style: "width: {pct}%;" }
@@ -99,7 +114,7 @@ pub fn Profile() -> Element {
                             }
                         }
                         section { class: "profile-section",
-                            h2 { "Display name" }
+                            h2 { "{display_name_label}" }
                             input {
                                 class: "form-input",
                                 value: "{display_name}",
@@ -125,16 +140,16 @@ pub fn Profile() -> Element {
                                         });
                                     }
                                 },
-                                "Save"
+                                "{save_label}"
                             }
                             if !profile_status.read().is_empty() {
                                 span { class: "profile-status", "{profile_status}" }
                             }
                         }
                         section { class: "profile-section",
-                            h2 { "Change password" }
+                            h2 { "{change_password_label}" }
                             div { class: "form-group",
-                                label { "Current password" }
+                                label { "{current_password_label}" }
                                 input {
                                     class: "form-input",
                                     r#type: "password",
@@ -143,7 +158,7 @@ pub fn Profile() -> Element {
                                 }
                             }
                             div { class: "form-group",
-                                label { "New password" }
+                                label { "{new_password_label}" }
                                 input {
                                     class: "form-input",
                                     r#type: "password",
@@ -152,7 +167,7 @@ pub fn Profile() -> Element {
                                 }
                             }
                             div { class: "form-group",
-                                label { "Confirm new password" }
+                                label { "{confirm_new_password_label}" }
                                 input {
                                     class: "form-input",
                                     r#type: "password",
@@ -196,7 +211,7 @@ pub fn Profile() -> Element {
                                         });
                                     }
                                 },
-                                "Change password"
+                                "{change_password_label}"
                             }
                             if !pw_status.read().is_empty() {
                                 span { class: "profile-status", "{pw_status}" }

@@ -71,17 +71,27 @@ pub fn Register() -> Element {
         });
     };
 
+    let _locale = use_context::<Signal<String>>();
+    let title = crate::i18n::t("auth.register_title");
+    let username_label = crate::i18n::t("auth.username");
+    let email_label = crate::i18n::t("auth.email");
+    let password_label = crate::i18n::t("auth.password");
+    let confirm_label = crate::i18n::t("auth.confirm_password");
+    let create_label = crate::i18n::t("auth.register_link");
+    let have_label = crate::i18n::t("auth.have_account");
+    let login_link_label = crate::i18n::t("auth.login_link");
+
     rsx! {
         div { class: "auth-page",
             div { class: "auth-card",
                 div { class: "auth-header",
-                    h2 { "Create Account" }
+                    h2 { "{title}" }
                     p { class: "auth-subtitle", "Join Contrix Office" }
                 }
 
                 form { onsubmit: handle_submit,
                     div { class: "form-group",
-                        label { r#for: "username", "Username" }
+                        label { r#for: "username", "{username_label}" }
                         input {
                             id: "username",
                             r#type: "text",
@@ -93,7 +103,7 @@ pub fn Register() -> Element {
                     }
 
                     div { class: "form-group",
-                        label { r#for: "reg-email", "Email" }
+                        label { r#for: "reg-email", "{email_label}" }
                         input {
                             id: "reg-email",
                             r#type: "email",
@@ -105,7 +115,7 @@ pub fn Register() -> Element {
                     }
 
                     div { class: "form-group",
-                        label { r#for: "reg-password", "Password" }
+                        label { r#for: "reg-password", "{password_label}" }
                         input {
                             id: "reg-password",
                             r#type: "password",
@@ -117,7 +127,7 @@ pub fn Register() -> Element {
                     }
 
                     div { class: "form-group",
-                        label { r#for: "confirm-password", "Confirm Password" }
+                        label { r#for: "confirm-password", "{confirm_label}" }
                         input {
                             id: "confirm-password",
                             r#type: "password",
@@ -136,14 +146,14 @@ pub fn Register() -> Element {
                         r#type: "submit",
                         class: "btn btn-primary btn-block",
                         disabled: *loading.read(),
-                        if *loading.read() { "Creating account..." } else { "Sign Up" }
+                        if *loading.read() { "Creating account..." } else { "{create_label}" }
                     }
                 }
 
                 div { class: "auth-footer",
                     p {
-                        "Already have an account? "
-                        Link { to: Route::Login {}, "Sign In" }
+                        "{have_label} "
+                        Link { to: Route::Login {}, "{login_link_label}" }
                     }
                 }
             }

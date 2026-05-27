@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 mod collab_client;
 mod components;
+pub mod i18n;
 mod pages;
 mod state;
 
@@ -19,6 +20,7 @@ fn App() -> Element {
     // Provide global authentication state to all child components.
     use_context_provider(|| Signal::new(state::load_auth_state()));
     use_context_provider(|| Signal::new(Vec::<crate::components::toast::Toast>::new()));
+    use_context_provider(|| Signal::new(crate::i18n::current_locale()));
 
     rsx! {
         Router::<Route> {}

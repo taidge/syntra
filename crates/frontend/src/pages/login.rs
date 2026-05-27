@@ -58,17 +58,25 @@ pub fn Login() -> Element {
         });
     };
 
+    let _locale = use_context::<Signal<String>>();
+    let title = crate::i18n::t("auth.login_title");
+    let email_label = crate::i18n::t("auth.email");
+    let password_label = crate::i18n::t("auth.password");
+    let sign_in_label = crate::i18n::t("auth.sign_in");
+    let no_account_label = crate::i18n::t("auth.no_account");
+    let register_link_label = crate::i18n::t("auth.register_link");
+
     rsx! {
         div { class: "auth-page",
             div { class: "auth-card",
                 div { class: "auth-header",
-                    h2 { "Sign In" }
+                    h2 { "{title}" }
                     p { class: "auth-subtitle", "Welcome back to Contrix Office" }
                 }
 
                 form { onsubmit: handle_submit,
                     div { class: "form-group",
-                        label { r#for: "email", "Email" }
+                        label { r#for: "email", "{email_label}" }
                         input {
                             id: "email",
                             r#type: "email",
@@ -80,7 +88,7 @@ pub fn Login() -> Element {
                     }
 
                     div { class: "form-group",
-                        label { r#for: "password", "Password" }
+                        label { r#for: "password", "{password_label}" }
                         input {
                             id: "password",
                             r#type: "password",
@@ -99,14 +107,14 @@ pub fn Login() -> Element {
                         r#type: "submit",
                         class: "btn btn-primary btn-block",
                         disabled: *loading.read(),
-                        if *loading.read() { "Signing in..." } else { "Sign In" }
+                        if *loading.read() { "Signing in..." } else { "{sign_in_label}" }
                     }
                 }
 
                 div { class: "auth-footer",
                     p {
-                        "Don't have an account? "
-                        Link { to: Route::Register {}, "Sign Up" }
+                        "{no_account_label} "
+                        Link { to: Route::Register {}, "{register_link_label}" }
                     }
                 }
             }

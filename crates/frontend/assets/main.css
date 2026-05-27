@@ -3068,3 +3068,18 @@ input:-webkit-autofill:active {
     color: var(--primary);
     border-color: var(--primary);
 }
+
+.lang-toggle {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.2);
+    color: var(--text-white);
+    border-radius: var(--radius-full);
+    min-width: 32px;
+    height: 32px;
+    cursor: pointer;
+    margin-right: var(--space-sm);
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0 8px;
+}
+.lang-toggle:hover { background: rgba(255,255,255,0.08); }
