@@ -4,22 +4,27 @@ use crate::Route;
 
 #[component]
 pub fn MobileBar() -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let nav = use_navigator();
+    let home_label = crate::i18n::t("mobile.home");
+    let files_label = crate::i18n::t("mobile.files");
+    let ai_label = crate::i18n::t("mobile.ai");
+    let account_label = crate::i18n::t("mobile.account");
     rsx! {
         nav { class: "mobile-bar",
             button {
                 class: "mobile-bar-item",
                 onclick: move |_| { nav.push(Route::Dashboard {}); },
-                aria_label: "Dashboard",
+                aria_label: "{home_label}",
                 span { class: "mobile-bar-icon", "\u{1F3E0}" }
-                span { class: "mobile-bar-label", "Home" }
+                span { class: "mobile-bar-label", "{home_label}" }
             }
             button {
                 class: "mobile-bar-item",
                 onclick: move |_| { nav.push(Route::FileManager {}); },
-                aria_label: "Files",
+                aria_label: "{files_label}",
                 span { class: "mobile-bar-icon", "\u{1F4C1}" }
-                span { class: "mobile-bar-label", "Files" }
+                span { class: "mobile-bar-label", "{files_label}" }
             }
             button {
                 class: "mobile-bar-item",
@@ -32,16 +37,16 @@ pub fn MobileBar() -> Element {
                         }
                     }
                 },
-                aria_label: "AI",
+                aria_label: "{ai_label}",
                 span { class: "mobile-bar-icon", "\u{2728}" }
-                span { class: "mobile-bar-label", "AI" }
+                span { class: "mobile-bar-label", "{ai_label}" }
             }
             button {
                 class: "mobile-bar-item",
                 onclick: move |_| { nav.push(Route::Profile {}); },
-                aria_label: "Account",
+                aria_label: "{account_label}",
                 span { class: "mobile-bar-icon", "\u{1F464}" }
-                span { class: "mobile-bar-label", "Account" }
+                span { class: "mobile-bar-label", "{account_label}" }
             }
         }
     }

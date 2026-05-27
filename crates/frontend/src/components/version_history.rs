@@ -26,6 +26,7 @@ pub struct VersionHistoryProps {
 
 #[component]
 pub fn VersionHistory(props: VersionHistoryProps) -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let auth = use_context::<Signal<AuthState>>();
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
     let token = auth.read().token.clone().unwrap_or_default();
@@ -54,22 +55,27 @@ pub fn VersionHistory(props: VersionHistoryProps) -> Element {
     let restore_token = token.clone();
     let restore_id = props.doc_id.clone();
 
+    let title_label = crate::i18n::t("versions.title");
+    let close_label = crate::i18n::t("versions.close");
+    let loading_label = crate::i18n::t("versions.loading");
+    let empty_label = crate::i18n::t("versions.empty");
+    let restore_label = crate::i18n::t("versions.restore");
     rsx! {
         aside { class: "version-pane",
             header { class: "version-pane-header",
-                strong { "Version history" }
+                strong { "{title_label}" }
                 button {
                     class: "btn-icon",
-                    aria_label: "Close version history",
+                    aria_label: "{close_label}",
                     onclick: move |_| open_sig.set(false),
                     "\u{2715}"
                 }
             }
             div { class: "version-list",
                 match versions.read().as_ref() {
-                    None => rsx! { p { class: "muted", "Loading\u{2026}" } },
-                    Some(Err(e)) => rsx! { p { class: "muted", "Failed: {e}" } },
-                    Some(Ok(items)) if items.is_empty() => rsx! { p { class: "muted", "No versions yet." } },
+                    None => rsx! { p { class: "muted", "{loading_label}" } },
+                    Some(Err(e)) => rsx! { p { class: "muted", {crate::i18n::t("versions.failed").replace("{err}", &e.to_string())} } },
+                    Some(Ok(items)) if items.is_empty() => rsx! { p { class: "muted", "{empty_label}" } },
                     Some(Ok(items)) => rsx! {
                         for v in items.iter().cloned() {
                             div { class: "version-item", key: "{v.id}",
@@ -105,15 +111,15 @@ pub fn VersionHistory(props: VersionHistoryProps) -> Element {
                                                         &t,
                                                     ).await {
                                                         Ok(_) => {
-                                                            push_toast(bus, ToastKind::Success, "Version restored");
+                                                            push_toast(bus, ToastKind::Success, crate::i18n::t("versions.restored"));
                                                             let cur = *tick.read();
                                                             tick.set(cur + 1);
                                                         }
-                                                        Err(e) => push_toast(bus, ToastKind::Error, format!("Restore failed: {e}")),
+                                                        Err(e) => push_toast(bus, ToastKind::Error, crate::i18n::t("versions.restore_failed").replace("{err}", &e.to_string())),
                                                     }
                                                 });
                                             },
-                                            "Restore"
+                                            "{restore_label}"
                                         }
                                     }
                                 }

@@ -2,27 +2,27 @@ use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq)]
 struct MenuItem {
-    label: &'static str,
+    label_key: &'static str,
     cmd: &'static str,
     shortcut: &'static str,
     separator_after: bool,
 }
 
 impl MenuItem {
-    const fn new(label: &'static str, cmd: &'static str, shortcut: &'static str) -> Self {
-        Self { label, cmd, shortcut, separator_after: false }
+    const fn new(label_key: &'static str, cmd: &'static str, shortcut: &'static str) -> Self {
+        Self { label_key, cmd, shortcut, separator_after: false }
     }
-    const fn sep(label: &'static str, cmd: &'static str, shortcut: &'static str) -> Self {
-        Self { label, cmd, shortcut, separator_after: true }
+    const fn sep(label_key: &'static str, cmd: &'static str, shortcut: &'static str) -> Self {
+        Self { label_key, cmd, shortcut, separator_after: true }
     }
 }
 
 fn file_items(doc_type: &str) -> Vec<MenuItem> {
-    let export_label = match doc_type {
-        "writer" => "Export DOCX",
-        "calc" => "Export XLSX",
-        "slides" => "Export PPTX",
-        _ => "Export HTML",
+    let export_key = match doc_type {
+        "writer" => "menu.file.export_docx",
+        "calc" => "menu.file.export_xlsx",
+        "slides" => "menu.file.export_pptx",
+        _ => "menu.file.export_html",
     };
     let export_cmd = match doc_type {
         "writer" => "export-docx",
@@ -31,65 +31,65 @@ fn file_items(doc_type: &str) -> Vec<MenuItem> {
         _ => "export-html",
     };
     vec![
-        MenuItem::new("New", "new", ""),
-        MenuItem::sep("Open…", "back", ""),
-        MenuItem::new("Save", "save", "Ctrl+S"),
-        MenuItem::sep("Save As…", "save-as", "Ctrl+Shift+S"),
-        MenuItem::new("Export PDF", "export-pdf", ""),
-        MenuItem { label: export_label, cmd: export_cmd, shortcut: "", separator_after: false },
-        MenuItem::sep("Export HTML", "export-html", ""),
-        MenuItem::new("Print", "print", "Ctrl+P"),
-        MenuItem::new("Close", "back", ""),
+        MenuItem::new("menu.file.new", "new", ""),
+        MenuItem::sep("menu.file.open", "back", ""),
+        MenuItem::new("menu.file.save", "save", "Ctrl+S"),
+        MenuItem::sep("menu.file.save_as", "save-as", "Ctrl+Shift+S"),
+        MenuItem::new("menu.file.export_pdf", "export-pdf", ""),
+        MenuItem { label_key: export_key, cmd: export_cmd, shortcut: "", separator_after: false },
+        MenuItem::sep("menu.file.export_html", "export-html", ""),
+        MenuItem::new("menu.file.print", "print", "Ctrl+P"),
+        MenuItem::new("menu.file.close", "back", ""),
     ]
 }
 
 fn edit_items() -> Vec<MenuItem> {
     vec![
-        MenuItem::new("Undo", "undo", "Ctrl+Z"),
-        MenuItem::sep("Redo", "redo", "Ctrl+Y"),
-        MenuItem::new("Cut", "cut", "Ctrl+X"),
-        MenuItem::new("Copy", "copy", "Ctrl+C"),
-        MenuItem::sep("Paste", "paste", "Ctrl+V"),
-        MenuItem::new("Find", "find", "Ctrl+F"),
-        MenuItem::new("Replace", "replace", "Ctrl+H"),
+        MenuItem::new("menu.edit.undo", "undo", "Ctrl+Z"),
+        MenuItem::sep("menu.edit.redo", "redo", "Ctrl+Y"),
+        MenuItem::new("menu.edit.cut", "cut", "Ctrl+X"),
+        MenuItem::new("menu.edit.copy", "copy", "Ctrl+C"),
+        MenuItem::sep("menu.edit.paste", "paste", "Ctrl+V"),
+        MenuItem::new("menu.edit.find", "find", "Ctrl+F"),
+        MenuItem::new("menu.edit.replace", "replace", "Ctrl+H"),
     ]
 }
 
 fn view_items() -> Vec<MenuItem> {
     vec![
-        MenuItem::new("Zoom In", "zoom-in", "Ctrl++"),
-        MenuItem::new("Zoom Out", "zoom-out", "Ctrl+-"),
-        MenuItem::sep("Reset Zoom", "zoom-reset", "Ctrl+0"),
-        MenuItem::new("Toggle Sidebar", "toggle-sidebar", ""),
-        MenuItem::new("Toggle Theme", "toggle-theme", ""),
+        MenuItem::new("menu.view.zoom_in", "zoom-in", "Ctrl++"),
+        MenuItem::new("menu.view.zoom_out", "zoom-out", "Ctrl+-"),
+        MenuItem::sep("menu.view.zoom_reset", "zoom-reset", "Ctrl+0"),
+        MenuItem::new("menu.view.toggle_sidebar", "toggle-sidebar", ""),
+        MenuItem::new("menu.view.toggle_theme", "toggle-theme", ""),
     ]
 }
 
 fn insert_items(doc_type: &str) -> Vec<MenuItem> {
     match doc_type {
         "writer" => vec![
-            MenuItem::new("Image", "insert-image", ""),
-            MenuItem::new("Table", "insert-table", ""),
-            MenuItem::new("Link", "insert-link", ""),
-            MenuItem::new("Page Break", "insert-page-break", ""),
+            MenuItem::new("menu.insert.image", "insert-image", ""),
+            MenuItem::new("menu.insert.table", "insert-table", ""),
+            MenuItem::new("menu.insert.link", "insert-link", ""),
+            MenuItem::new("menu.insert.page_break", "insert-page-break", ""),
         ],
         "calc" => vec![
-            MenuItem::new("Row Above", "insert-row", ""),
-            MenuItem::new("Column Left", "insert-col", ""),
-            MenuItem::sep("Sheet", "insert-sheet", ""),
-            MenuItem::new("Chart", "insert-chart", ""),
-            MenuItem::new("Function", "insert-function", ""),
+            MenuItem::new("menu.insert.row_above", "insert-row", ""),
+            MenuItem::new("menu.insert.col_left", "insert-col", ""),
+            MenuItem::sep("menu.insert.sheet", "insert-sheet", ""),
+            MenuItem::new("menu.insert.chart", "insert-chart", ""),
+            MenuItem::new("menu.insert.function", "insert-function", ""),
         ],
         "slides" => vec![
-            MenuItem::new("Slide", "insert-slide", ""),
-            MenuItem::new("Text Box", "insert-textbox", ""),
-            MenuItem::new("Image", "insert-image", ""),
-            MenuItem::new("Shape", "insert-shape", ""),
+            MenuItem::new("menu.insert.slide", "insert-slide", ""),
+            MenuItem::new("menu.insert.textbox", "insert-textbox", ""),
+            MenuItem::new("menu.insert.image", "insert-image", ""),
+            MenuItem::new("menu.insert.shape", "insert-shape", ""),
         ],
         _ => vec![
-            MenuItem::new("Text", "insert-text", ""),
-            MenuItem::new("Image", "insert-image", ""),
-            MenuItem::new("Shape", "insert-shape", ""),
+            MenuItem::new("menu.insert.text", "insert-text", ""),
+            MenuItem::new("menu.insert.image", "insert-image", ""),
+            MenuItem::new("menu.insert.shape", "insert-shape", ""),
         ],
     }
 }
@@ -97,26 +97,26 @@ fn insert_items(doc_type: &str) -> Vec<MenuItem> {
 fn format_items(doc_type: &str) -> Vec<MenuItem> {
     match doc_type {
         "writer" => vec![
-            MenuItem::new("Bold", "format-bold", "Ctrl+B"),
-            MenuItem::new("Italic", "format-italic", "Ctrl+I"),
-            MenuItem::sep("Underline", "format-underline", "Ctrl+U"),
-            MenuItem::new("Paragraph", "format-paragraph", ""),
-            MenuItem::new("Styles", "format-styles", ""),
+            MenuItem::new("menu.format.bold", "format-bold", "Ctrl+B"),
+            MenuItem::new("menu.format.italic", "format-italic", "Ctrl+I"),
+            MenuItem::sep("menu.format.underline", "format-underline", "Ctrl+U"),
+            MenuItem::new("menu.format.paragraph", "format-paragraph", ""),
+            MenuItem::new("menu.format.styles", "format-styles", ""),
         ],
         "calc" => vec![
-            MenuItem::new("Cells", "format-cells", ""),
-            MenuItem::new("Number", "format-number", ""),
-            MenuItem::sep("Conditional Formatting", "format-conditional", ""),
-            MenuItem::new("Merge Cells", "format-merge", ""),
+            MenuItem::new("menu.format.cells", "format-cells", ""),
+            MenuItem::new("menu.format.number", "format-number", ""),
+            MenuItem::sep("menu.format.conditional", "format-conditional", ""),
+            MenuItem::new("menu.format.merge", "format-merge", ""),
         ],
         "slides" => vec![
-            MenuItem::new("Background", "format-background", ""),
-            MenuItem::new("Slide Layout", "format-layout", ""),
-            MenuItem::new("Transition", "format-transition", ""),
+            MenuItem::new("menu.format.background", "format-background", ""),
+            MenuItem::new("menu.format.layout", "format-layout", ""),
+            MenuItem::new("menu.format.transition", "format-transition", ""),
         ],
         _ => vec![
-            MenuItem::new("Stroke", "format-stroke", ""),
-            MenuItem::new("Fill", "format-fill", ""),
+            MenuItem::new("menu.format.stroke", "format-stroke", ""),
+            MenuItem::new("menu.format.fill", "format-fill", ""),
         ],
     }
 }
@@ -124,19 +124,19 @@ fn format_items(doc_type: &str) -> Vec<MenuItem> {
 fn tools_items(doc_type: &str) -> Vec<MenuItem> {
     let mut v = Vec::new();
     if doc_type == "writer" {
-        v.push(MenuItem::new("Word Count", "word-count", ""));
-        v.push(MenuItem::new("Spell Check", "spell-check", ""));
+        v.push(MenuItem::new("menu.tools.word_count", "word-count", ""));
+        v.push(MenuItem::new("menu.tools.spell_check", "spell-check", ""));
     }
-    v.push(MenuItem::sep("Statistics", "statistics", ""));
-    v.push(MenuItem::new("Comments", "toggle-comments", ""));
-    v.push(MenuItem::new("Version History", "version-history", ""));
+    v.push(MenuItem::sep("menu.tools.statistics", "statistics", ""));
+    v.push(MenuItem::new("menu.tools.comments", "toggle-comments", ""));
+    v.push(MenuItem::new("menu.tools.version_history", "version-history", ""));
     v
 }
 
 fn help_items() -> Vec<MenuItem> {
     vec![
-        MenuItem::new("Keyboard Shortcuts", "help-shortcuts", ""),
-        MenuItem::new("About Contrix Office", "about", ""),
+        MenuItem::new("menu.help.shortcuts", "help-shortcuts", ""),
+        MenuItem::new("menu.help.about", "about", ""),
     ]
 }
 
@@ -148,17 +148,18 @@ pub struct MenubarProps {
 
 #[component]
 pub fn Menubar(props: MenubarProps) -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let mut open = use_signal(|| None::<String>);
 
     let doc_type = props.doc_type.clone();
-    let menus: Vec<(&'static str, Vec<MenuItem>)> = vec![
-        ("File", file_items(&doc_type)),
-        ("Edit", edit_items()),
-        ("View", view_items()),
-        ("Insert", insert_items(&doc_type)),
-        ("Format", format_items(&doc_type)),
-        ("Tools", tools_items(&doc_type)),
-        ("Help", help_items()),
+    let menus: Vec<(&'static str, &'static str, Vec<MenuItem>)> = vec![
+        ("File", "menubar.file", file_items(&doc_type)),
+        ("Edit", "menubar.edit", edit_items()),
+        ("View", "menubar.view", view_items()),
+        ("Insert", "menubar.insert", insert_items(&doc_type)),
+        ("Format", "menubar.format", format_items(&doc_type)),
+        ("Tools", "menubar.tools", tools_items(&doc_type)),
+        ("Help", "menubar.help", help_items()),
     ];
 
     rsx! {
@@ -167,10 +168,10 @@ pub fn Menubar(props: MenubarProps) -> Element {
             onclick: move |e: MouseEvent| {
                 e.stop_propagation();
             },
-            for (name, items) in menus.into_iter() {
+            for (name, label_key, items) in menus.into_iter() {
                 {
                     let name_owned = name.to_string();
-                    let name_for_class = name.to_string();
+                    let display_label = crate::i18n::t(label_key);
                     let name_for_click = name.to_string();
                     let is_open = open.read().as_deref() == Some(name);
                     rsx! {
@@ -188,14 +189,14 @@ pub fn Menubar(props: MenubarProps) -> Element {
                                         open.set(Some(name_for_click.clone()));
                                     }
                                 },
-                                "{name_for_class}"
+                                "{display_label}"
                             }
                             if is_open {
                                 div { class: "menubar-dropdown",
                                     for (idx, item) in items.iter().enumerate() {
                                         {
                                             let cmd = item.cmd.to_string();
-                                            let label = item.label;
+                                            let label = crate::i18n::t(item.label_key);
                                             let shortcut = item.shortcut;
                                             let sep = item.separator_after;
                                             let on_cmd = props.on_command;

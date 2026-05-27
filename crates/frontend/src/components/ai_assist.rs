@@ -25,7 +25,7 @@ pub struct AiAssistProps {
 pub fn AiAssist(props: AiAssistProps) -> Element {
     let auth = use_context::<Signal<AuthState>>();
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
-    let _locale = use_context::<Signal<String>>();
+    let _ = use_context::<Signal<String>>().read();
     let mut open = use_signal(|| false);
     let mut prompt = use_signal(|| crate::i18n::t("ai.placeholder"));
     let mut mode = use_signal(|| String::from("summarize"));
@@ -53,9 +53,9 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
             match api_post::<AssistResponse, _>("/ai/assist", &body, &token).await {
                 Ok(r) => {
                     answer.set(r.answer);
-                    push_toast(bus, ToastKind::Success, "AI response received");
+                    push_toast(bus, ToastKind::Success, crate::i18n::t("ai.received"));
                 }
-                Err(e) => push_toast(bus, ToastKind::Error, format!("AI: {e}")),
+                Err(e) => push_toast(bus, ToastKind::Error, crate::i18n::t("ai.error").replace("{err}", &e.to_string())),
             }
             loading.set(false);
         });

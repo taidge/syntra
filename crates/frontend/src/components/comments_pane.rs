@@ -91,6 +91,7 @@ fn mention_prefix(s: &str) -> Option<String> {
 
 #[component]
 pub fn CommentsPane(props: CommentsPaneProps) -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let auth = use_context::<Signal<AuthState>>();
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
     let token = auth.read().token.clone().unwrap_or_default();
@@ -143,13 +144,13 @@ pub fn CommentsPane(props: CommentsPaneProps) -> Element {
             .await
             {
                 Ok(_) => {
-                    push_toast(bus, ToastKind::Success, "Comment added");
+                    push_toast(bus, ToastKind::Success, crate::i18n::t("comments.added"));
                     local_draft.set(String::new());
                     local_sugg.write().clear();
                     let cur = *tick.read();
                     tick.set(cur + 1);
                 }
-                Err(e) => push_toast(bus, ToastKind::Error, format!("Failed: {e}")),
+                Err(e) => push_toast(bus, ToastKind::Error, crate::i18n::t("comments.add_failed").replace("{err}", &e.to_string())),
             }
         });
     };
@@ -183,22 +184,29 @@ pub fn CommentsPane(props: CommentsPaneProps) -> Element {
         selected_idx.set(0);
     };
 
+    let title_label = crate::i18n::t("comments.title");
+    let close_label = crate::i18n::t("comments.close");
+    let loading_label = crate::i18n::t("comments.loading");
+    let empty_label = crate::i18n::t("comments.empty");
+    let placeholder_label = crate::i18n::t("comments.placeholder");
+    let new_comment_label = crate::i18n::t("comments.new_comment");
+    let post_label = crate::i18n::t("comments.post");
     rsx! {
         aside { class: "comments-pane",
             header { class: "comments-pane-header",
-                strong { "Comments" }
+                strong { "{title_label}" }
                 button {
                     class: "btn-icon",
-                    aria_label: "Close comments",
+                    aria_label: "{close_label}",
                     onclick: move |_| open_sig.set(false),
                     "\u{2715}"
                 }
             }
             div { class: "comments-list",
                 match comments.read().as_ref() {
-                    None => rsx! { p { class: "muted", "Loading\u{2026}" } },
-                    Some(Err(e)) => rsx! { p { class: "muted", "Failed: {e}" } },
-                    Some(Ok(items)) if items.is_empty() => rsx! { p { class: "muted", "No comments yet." } },
+                    None => rsx! { p { class: "muted", "{loading_label}" } },
+                    Some(Err(e)) => rsx! { p { class: "muted", {crate::i18n::t("comments.failed").replace("{err}", &e.to_string())} } },
+                    Some(Ok(items)) if items.is_empty() => rsx! { p { class: "muted", "{empty_label}" } },
                     Some(Ok(items)) => rsx! {
                         for c in items.iter().cloned() {
                             div { class: "comment-item", key: "{c.id}",
@@ -240,8 +248,8 @@ pub fn CommentsPane(props: CommentsPaneProps) -> Element {
                 textarea {
                     class: "form-input",
                     rows: 3,
-                    placeholder: "Add a comment...",
-                    aria_label: "New comment",
+                    placeholder: "{placeholder_label}",
+                    aria_label: "{new_comment_label}",
                     value: "{draft}",
                     oninput: {
                         let pool = pool.clone();
@@ -300,9 +308,9 @@ pub fn CommentsPane(props: CommentsPaneProps) -> Element {
                 }
                 button {
                     class: "btn btn-primary btn-sm",
-                    aria_label: "Post comment",
+                    aria_label: "{post_label}",
                     onclick: post,
-                    "Post"
+                    "{post_label}"
                 }
             }
         }

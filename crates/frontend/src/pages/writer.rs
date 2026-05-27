@@ -362,11 +362,12 @@ fn reject_all_changes() {
 /// Rich-text document editor (word processor).
 #[component]
 pub fn Writer(id: String) -> Element {
-    let mut doc_title = use_signal(|| "Untitled Document".to_string());
+    let _ = use_context::<Signal<String>>().read();
+    let mut doc_title = use_signal(|| crate::i18n::t("editor.writer.untitled"));
     let mut word_count = use_signal(|| 0u32);
     let mut char_count = use_signal(|| 0u32);
     let mut page_count = use_signal(|| 1u32);
-    let mut saved_status = use_signal(|| "All changes saved".to_string());
+    let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
     let mut show_sidebar = use_signal(|| true);
     let mut doc_body_text = use_signal(String::new);
     let mut initial_html = use_signal(String::new);
@@ -605,12 +606,12 @@ pub fn Writer(id: String) -> Element {
         let id = id.clone();
         move |body: serde_json::Value, mut status: Signal<String>, token: String| {
             let id = id.clone();
-            status.set("Saving…".to_string());
+            status.set(crate::i18n::t("common.saving"));
             wasm_bindgen_futures::spawn_local(async move {
                 let req = serde_json::json!({ "content": body });
                 match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
-                    Ok(_) => status.set("All changes saved".to_string()),
-                    Err(e) => status.set(format!("Save failed: {e}")),
+                    Ok(_) => status.set(crate::i18n::t("common.saved")),
+                    Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
                 }
             });
         }
@@ -623,7 +624,7 @@ pub fn Writer(id: String) -> Element {
             if !*loaded.read() {
                 return;
             }
-            saved_status.set("Unsaved changes".to_string());
+            saved_status.set(crate::i18n::t("common.unsaved"));
             let body = serde_json::json!({
                 "body": [{"runs": [{"text": doc_body_text.read().clone()}]}]
             });
@@ -658,14 +659,16 @@ pub fn Writer(id: String) -> Element {
         {
             let state = *conn_state.read();
             match state {
-                ConnectionState::Reconnecting(n) => rsx! {
-                    div { class: "ws-banner ws-reconnecting",
-                        "Connection lost — reconnecting (attempt {n})…"
+                ConnectionState::Reconnecting(n) => {
+                    let msg = crate::i18n::t("ws.reconnecting").replace("{n}", &n.to_string());
+                    rsx! {
+                        div { class: "ws-banner ws-reconnecting", "{msg}" }
                     }
                 },
-                ConnectionState::Failed => rsx! {
-                    div { class: "ws-banner ws-failed",
-                        "Could not reconnect. Refresh the page."
+                ConnectionState::Failed => {
+                    let msg = crate::i18n::t("ws.failed");
+                    rsx! {
+                        div { class: "ws-banner ws-failed", "{msg}" }
                     }
                 },
                 _ => rsx! {},
@@ -801,12 +804,12 @@ pub fn Writer(id: String) -> Element {
                                     let fmt_owned = format.to_string();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match export_document(&id, &fmt_owned, &token).await {
-                                            Ok(_) => push_toast(bus2, ToastKind::Success, format!("Exported as {}", fmt_owned.to_uppercase())),
-                                            Err(e) => push_toast(bus2, ToastKind::Error, format!("Export failed: {e}")),
+                                            Ok(_) => push_toast(bus2, ToastKind::Success, crate::i18n::t("editor.export_succeeded").replace("{fmt}", &fmt_owned.to_uppercase())),
+                                            Err(e) => push_toast(bus2, ToastKind::Error, crate::i18n::t("editor.export_failed").replace("{err}", &e.to_string())),
                                         }
                                     });
                                 }
-                                other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                                other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
                             }
                         },
                     }
@@ -825,7 +828,7 @@ pub fn Writer(id: String) -> Element {
                             schedule_save();
                         }
                     },
-                    placeholder: "Untitled Document",
+                    placeholder: crate::i18n::t("editor.writer.untitled"),
                 }
                 span { class: "save-status", "{saved_status}" }
                 if !presence.read().is_empty() {
@@ -849,7 +852,7 @@ pub fn Writer(id: String) -> Element {
                         let current = *show_sidebar.read();
                         show_sidebar.set(!current);
                     },
-                    if *show_sidebar.read() { "Hide Sidebar" } else { "Show Sidebar" }
+                    {if *show_sidebar.read() { crate::i18n::t("editor.hide_sidebar") } else { crate::i18n::t("editor.show_sidebar") }}
                 }
             }
 
@@ -869,11 +872,31 @@ pub fn Writer(id: String) -> Element {
                 let run_ol = run.clone(); let run_in = run.clone(); let run_out = run.clone();
                 let run_font = run.clone(); let run_size = run.clone();
                 let run_fore = run.clone(); let run_hi = run.clone();
+                let bold_title = crate::i18n::t("editor.bold");
+                let italic_title = crate::i18n::t("editor.italic");
+                let underline_title = crate::i18n::t("editor.underline");
+                let strike_title = crate::i18n::t("editor.strikethrough");
+                let bul_title = crate::i18n::t("editor.bulleted_list");
+                let num_title = crate::i18n::t("editor.numbered_list");
+                let indent_title = crate::i18n::t("editor.indent");
+                let outdent_title = crate::i18n::t("editor.outdent");
+                let alignl_title = crate::i18n::t("editor.align_left");
+                let alignc_title = crate::i18n::t("editor.align_center");
+                let alignr_title = crate::i18n::t("editor.align_right");
+                let justify_title = crate::i18n::t("editor.justify");
+                let tc_title = crate::i18n::t("editor.track_changes");
+                let changes_title = crate::i18n::t("editor.changes");
+                let font_title = crate::i18n::t("editor.writer.font_family");
+                let size_title = crate::i18n::t("editor.writer.font_size");
+                let textcol_title = crate::i18n::t("editor.text_color");
+                let hlcol_title = crate::i18n::t("editor.highlight_color");
                 rsx! {
                     div { class: "toolbar",
                         div { class: "toolbar-group",
                             select {
                                 class: "toolbar-select font-family",
+                                title: "{font_title}",
+                                aria_label: "{font_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onchange: move |e: FormEvent| { let mut r = run_font.clone(); r("fontName", Some(e.value())); },
                                 option { value: "Arial", "Arial" }
@@ -885,6 +908,8 @@ pub fn Writer(id: String) -> Element {
                             }
                             select {
                                 class: "toolbar-select font-size",
+                                title: "{size_title}",
+                                aria_label: "{size_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onchange: move |e: FormEvent| { let mut r = run_size.clone(); r("fontSize", Some(e.value())); },
                                 option { value: "2", "10pt" }
@@ -898,29 +923,29 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
                             button {
-                                class: "toolbar-btn", title: "Bold (Ctrl+B)",
-                                aria_label: "Bold (Ctrl+B)",
+                                class: "toolbar-btn", title: "{bold_title}",
+                                aria_label: "{bold_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_b.clone(); r("bold", None); },
                                 "B"
                             }
                             button {
-                                class: "toolbar-btn italic", title: "Italic (Ctrl+I)",
-                                aria_label: "Italic (Ctrl+I)",
+                                class: "toolbar-btn italic", title: "{italic_title}",
+                                aria_label: "{italic_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_i.clone(); r("italic", None); },
                                 "I"
                             }
                             button {
-                                class: "toolbar-btn underline", title: "Underline (Ctrl+U)",
-                                aria_label: "Underline (Ctrl+U)",
+                                class: "toolbar-btn underline", title: "{underline_title}",
+                                aria_label: "{underline_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_u.clone(); r("underline", None); },
                                 "U"
                             }
                             button {
-                                class: "toolbar-btn strikethrough", title: "Strikethrough",
-                                aria_label: "Strikethrough",
+                                class: "toolbar-btn strikethrough", title: "{strike_title}",
+                                aria_label: "{strike_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_s.clone(); r("strikeThrough", None); },
                                 "S"
@@ -929,29 +954,29 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
                             button {
-                                class: "toolbar-btn", title: "Bulleted List",
-                                aria_label: "Bulleted list",
+                                class: "toolbar-btn", title: "{bul_title}",
+                                aria_label: "{bul_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_ul.clone(); r("insertUnorderedList", None); },
                                 "* List"
                             }
                             button {
-                                class: "toolbar-btn", title: "Numbered List",
-                                aria_label: "Numbered list",
+                                class: "toolbar-btn", title: "{num_title}",
+                                aria_label: "{num_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_ol.clone(); r("insertOrderedList", None); },
                                 "1. List"
                             }
                             button {
-                                class: "toolbar-btn", title: "Indent",
-                                aria_label: "Indent",
+                                class: "toolbar-btn", title: "{indent_title}",
+                                aria_label: "{indent_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_in.clone(); r("indent", None); },
                                 ">>"
                             }
                             button {
-                                class: "toolbar-btn", title: "Outdent",
-                                aria_label: "Outdent",
+                                class: "toolbar-btn", title: "{outdent_title}",
+                                aria_label: "{outdent_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_out.clone(); r("outdent", None); },
                                 "<<"
@@ -960,29 +985,29 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
                             button {
-                                class: "toolbar-btn", title: "Align Left",
-                                aria_label: "Align left",
+                                class: "toolbar-btn", title: "{alignl_title}",
+                                aria_label: "{alignl_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_jl.clone(); r("justifyLeft", None); },
                                 "L"
                             }
                             button {
-                                class: "toolbar-btn", title: "Align Center",
-                                aria_label: "Align center",
+                                class: "toolbar-btn", title: "{alignc_title}",
+                                aria_label: "{alignc_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_jc.clone(); r("justifyCenter", None); },
                                 "C"
                             }
                             button {
-                                class: "toolbar-btn", title: "Align Right",
-                                aria_label: "Align right",
+                                class: "toolbar-btn", title: "{alignr_title}",
+                                aria_label: "{alignr_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_jr.clone(); r("justifyRight", None); },
                                 "R"
                             }
                             button {
-                                class: "toolbar-btn", title: "Justify",
-                                aria_label: "Justify",
+                                class: "toolbar-btn", title: "{justify_title}",
+                                aria_label: "{justify_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| { let mut r = run_jf.clone(); r("justifyFull", None); },
                                 "J"
@@ -991,14 +1016,14 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
                             input {
-                                r#type: "color", class: "toolbar-color", title: "Text Color", value: "#000000",
-                                aria_label: "Text color",
+                                r#type: "color", class: "toolbar-color", title: "{textcol_title}", value: "#000000",
+                                aria_label: "{textcol_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 oninput: move |e: FormEvent| { let mut r = run_fore.clone(); r("foreColor", Some(e.value())); },
                             }
                             input {
-                                r#type: "color", class: "toolbar-color", title: "Highlight Color", value: "#ffff00",
-                                aria_label: "Highlight color",
+                                r#type: "color", class: "toolbar-color", title: "{hlcol_title}", value: "#ffff00",
+                                aria_label: "{hlcol_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 oninput: move |e: FormEvent| {
                                     let val = e.value();
@@ -1012,8 +1037,8 @@ pub fn Writer(id: String) -> Element {
                         div { class: "toolbar-group",
                             button {
                                 class: if *tracking_on.read() { "toolbar-btn active" } else { "toolbar-btn" },
-                                title: "Track Changes",
-                                aria_label: "Toggle track changes",
+                                title: "{tc_title}",
+                                aria_label: "{tc_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| {
                                     let cur = *tracking_on.read();
@@ -1023,8 +1048,8 @@ pub fn Writer(id: String) -> Element {
                             }
                             button {
                                 class: "toolbar-btn",
-                                title: "Pending changes",
-                                aria_label: "Show pending tracked changes",
+                                title: "{changes_title}",
+                                aria_label: "{changes_title}",
                                 onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
                                 onclick: move |_| {
                                     let cur = *track_pane_open.read();
@@ -1032,7 +1057,7 @@ pub fn Writer(id: String) -> Element {
                                     let v = *changes_tick.read();
                                     changes_tick.set(v.wrapping_add(1));
                                 },
-                                "Changes"
+                                "{changes_title}"
                             }
                         }
                     }
@@ -1054,17 +1079,17 @@ pub fn Writer(id: String) -> Element {
                             coords.x,
                             coords.y,
                             vec![
-                                MenuEntry::new("Cut", "cut"),
-                                MenuEntry::new("Copy", "copy"),
-                                MenuEntry::new("Paste", "paste"),
-                                MenuEntry::new("Delete", "delete"),
-                                MenuEntry::new("Insert Link", "insert-link"),
+                                MenuEntry::new(crate::i18n::t("ctx.cut"), "cut"),
+                                MenuEntry::new(crate::i18n::t("ctx.copy"), "copy"),
+                                MenuEntry::new(crate::i18n::t("ctx.paste"), "paste"),
+                                MenuEntry::new(crate::i18n::t("ctx.delete"), "delete"),
+                                MenuEntry::new(crate::i18n::t("ctx.insert_link"), "insert-link"),
                             ],
                         )));
                     },
                     match doc_resource.read().as_ref() {
-                        None => rsx! { div { class: "editor-loading", "Loading document..." } },
-                        Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                        None => rsx! { div { class: "editor-loading", {crate::i18n::t("editor.loading_document")} } },
+                        Some(Err(e)) => rsx! { div { class: "editor-error", {crate::i18n::t("editor.failed_load").replace("{err}", &e.to_string())} } },
                         Some(Ok(_)) => rsx! {
                             div { class: "page",
                                 div {
@@ -1121,11 +1146,21 @@ pub fn Writer(id: String) -> Element {
             }
 
             // Status bar
-            div { class: "status-bar",
-                span { "Page {page_count} of {page_count}" }
-                span { "Words: {word_count}" }
-                span { "Characters: {char_count}" }
-                span { "Document ID: {id}" }
+            {
+                let page_str = crate::i18n::t("editor.writer.page")
+                    .replace("{cur}", &page_count.read().to_string())
+                    .replace("{total}", &page_count.read().to_string());
+                let words_str = crate::i18n::t("editor.writer.words").replace("{n}", &word_count.read().to_string());
+                let chars_str = crate::i18n::t("editor.writer.characters").replace("{n}", &char_count.read().to_string());
+                let id_str = crate::i18n::t("editor.writer.document_id").replace("{id}", &id);
+                rsx! {
+                    div { class: "status-bar",
+                        span { "{page_str}" }
+                        span { "{words_str}" }
+                        span { "{chars_str}" }
+                        span { "{id_str}" }
+                    }
+                }
             }
 
             FindDialog {
@@ -1137,20 +1172,20 @@ pub fn Writer(id: String) -> Element {
                         find_info.set(String::new());
                     } else {
                         let ok = window_find(&q, false);
-                        find_info.set(if ok { "Match".to_string() } else { "No matches".to_string() });
+                        find_info.set(if ok { crate::i18n::t("editor.writer.match_label") } else { crate::i18n::t("editor.writer.no_matches") });
                     }
                 },
                 on_next: move |_| {
                     let q = find_query.read().clone();
                     if q.is_empty() { return; }
                     let ok = window_find(&q, false);
-                    find_info.set(if ok { "Match".to_string() } else { "No matches".to_string() });
+                    find_info.set(if ok { crate::i18n::t("editor.writer.match_label") } else { crate::i18n::t("editor.writer.no_matches") });
                 },
                 on_prev: move |_| {
                     let q = find_query.read().clone();
                     if q.is_empty() { return; }
                     let ok = window_find(&q, true);
-                    find_info.set(if ok { "Match".to_string() } else { "No matches".to_string() });
+                    find_info.set(if ok { crate::i18n::t("editor.writer.match_label") } else { crate::i18n::t("editor.writer.no_matches") });
                 },
                 on_replace: {
                     let mut schedule_save = schedule_save.clone();
@@ -1161,9 +1196,9 @@ pub fn Writer(id: String) -> Element {
                             exec_cmd("insertText", Some(&replace));
                             doc_body_text.set(editor_text());
                             schedule_save();
-                            push_toast(bus, ToastKind::Success, "Replaced");
+                            push_toast(bus, ToastKind::Success, crate::i18n::t("editor.writer.replaced"));
                         } else {
-                            find_info.set("No matches".to_string());
+                            find_info.set(crate::i18n::t("editor.writer.no_matches"));
                         }
                     }
                 },
@@ -1182,7 +1217,7 @@ pub fn Writer(id: String) -> Element {
                             doc_body_text.set(editor_text());
                             schedule_save();
                         }
-                        push_toast(bus, ToastKind::Success, format!("Replaced {count} occurrences"));
+                        push_toast(bus, ToastKind::Success, crate::i18n::t("editor.writer.replaced_n").replace("{n}", &count.to_string()));
                     }
                 },
             }
@@ -1202,14 +1237,14 @@ pub fn Writer(id: String) -> Element {
                             "delete" => exec_cmd("delete", None),
                             "insert-link" => {
                                 if let Some(window) = web_sys::window() {
-                                    if let Ok(Some(url)) = window.prompt_with_message("Link URL:") {
+                                    if let Ok(Some(url)) = window.prompt_with_message(&crate::i18n::t("editor.writer.link_prompt")) {
                                         if !url.is_empty() {
                                             exec_cmd("createLink", Some(&url));
                                         }
                                     }
                                 }
                             }
-                            other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                            other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
                         }
                     }
                 },
@@ -1219,13 +1254,20 @@ pub fn Writer(id: String) -> Element {
                 let _ = changes_tick.read();
                 if *track_pane_open.read() {
                     let changes = list_pending_changes();
+                    let track_title = crate::i18n::t("track.title");
+                    let track_close = crate::i18n::t("track.close");
+                    let track_accept_all = crate::i18n::t("track.accept_all");
+                    let track_reject_all = crate::i18n::t("track.reject_all");
+                    let track_empty = crate::i18n::t("track.empty");
+                    let track_accept = crate::i18n::t("track.accept");
+                    let track_reject = crate::i18n::t("track.reject");
                     rsx! {
                         aside { class: "track-changes-pane",
                             header { class: "track-changes-header",
-                                strong { "Track changes" }
+                                strong { "{track_title}" }
                                 button {
                                     class: "btn-icon",
-                                    aria_label: "Close track changes",
+                                    aria_label: "{track_close}",
                                     onclick: move |_| track_pane_open.set(false),
                                     "\u{2715}"
                                 }
@@ -1238,7 +1280,7 @@ pub fn Writer(id: String) -> Element {
                                         let v = *changes_tick.read();
                                         changes_tick.set(v.wrapping_add(1));
                                     },
-                                    "Accept all"
+                                    "{track_accept_all}"
                                 }
                                 button {
                                     class: "btn btn-sm",
@@ -1247,17 +1289,19 @@ pub fn Writer(id: String) -> Element {
                                         let v = *changes_tick.read();
                                         changes_tick.set(v.wrapping_add(1));
                                     },
-                                    "Reject all"
+                                    "{track_reject_all}"
                                 }
                             }
                             div { class: "track-changes-list",
                                 if changes.is_empty() {
-                                    p { class: "muted", "No pending changes." }
+                                    p { class: "muted", "{track_empty}" }
                                 }
                                 for ch in changes.iter().cloned() {
                                     {
                                         let accept_id = ch.dom_id.clone();
                                         let reject_id = ch.dom_id.clone();
+                                        let track_accept = track_accept.clone();
+                                        let track_reject = track_reject.clone();
                                         rsx! {
                                             div { key: "{ch.dom_id}", class: "track-changes-item",
                                                 span { class: "track-changes-kind", "{ch.kind}" }
@@ -1266,7 +1310,7 @@ pub fn Writer(id: String) -> Element {
                                                 div { class: "track-changes-buttons",
                                                     button {
                                                         class: "btn-sm",
-                                                        aria_label: "Accept change",
+                                                        aria_label: "{track_accept}",
                                                         onclick: move |_| {
                                                             accept_change(&accept_id);
                                                             let v = *changes_tick.read();
@@ -1276,7 +1320,7 @@ pub fn Writer(id: String) -> Element {
                                                     }
                                                     button {
                                                         class: "btn-sm",
-                                                        aria_label: "Reject change",
+                                                        aria_label: "{track_reject}",
                                                         onclick: move |_| {
                                                             reject_change(&reject_id);
                                                             let v = *changes_tick.read();

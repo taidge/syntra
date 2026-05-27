@@ -6,6 +6,7 @@ use crate::components::navbar::Navbar;
 /// Main dashboard displayed after the user logs in.
 #[component]
 pub fn Dashboard() -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let auth = use_context::<Signal<crate::state::AuthState>>();
 
     // Fetch recent documents from the API.
@@ -18,13 +19,15 @@ pub fn Dashboard() -> Element {
         }
     });
 
-    let _locale = use_context::<Signal<String>>();
     let welcome = crate::i18n::t("nav.dashboard");
     let recent_label = crate::i18n::t("dashboard.recent");
     let new_writer = crate::i18n::t("dashboard.new_writer");
     let new_calc = crate::i18n::t("dashboard.new_calc");
     let new_slides = crate::i18n::t("dashboard.new_slides");
     let new_whiteboard = crate::i18n::t("dashboard.new_whiteboard");
+    let template_label = crate::i18n::t("dashboard.from_template");
+    let activity_label = crate::i18n::t("dashboard.activity");
+    let storage_text = crate::i18n::t("dashboard.storage_text");
     let storage_label = crate::i18n::t("profile.storage");
 
     rsx! {
@@ -52,7 +55,7 @@ pub fn Dashboard() -> Element {
                     }
                     Link { to: Route::FileManager {}, class: "quick-action-btn",
                         span { class: "qa-icon", "T" }
-                        span { "From Template" }
+                        span { "{template_label}" }
                     }
                 }
             }
@@ -153,13 +156,13 @@ pub fn Dashboard() -> Element {
                     div { class: "storage-bar-large",
                         div { class: "storage-fill", style: "width: 12%" }
                     }
-                    p { class: "storage-text", "120 MB used of 1 GB" }
+                    p { class: "storage-text", "{storage_text}" }
                 }
             }
 
             // Activity feed
             div { class: "activity-feed",
-                h3 { "Recent Activity" }
+                h3 { "{activity_label}" }
                 div { class: "activity-list",
                     // Render activity from fetched recent docs if available
                     match &*recent_docs.read() {

@@ -18,6 +18,7 @@ struct BreadcrumbEntry {
 /// Full-page file manager with sidebar, toolbar, and file grid/list.
 #[component]
 pub fn FileManager() -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let auth = use_context::<Signal<AuthState>>();
     let nav = use_navigator();
     let mut show_new_folder_modal = use_signal(|| false);
@@ -29,7 +30,7 @@ pub fn FileManager() -> Element {
     let mut breadcrumb = use_signal(|| {
         vec![BreadcrumbEntry {
             id: None,
-            name: "My Files".to_string(),
+            name: crate::i18n::t("file_mgr.my_files"),
         }]
     });
     let mut is_dragging = use_signal(|| false);
@@ -111,7 +112,7 @@ pub fn FileManager() -> Element {
 
                 if *is_dragging.read() {
                     div { class: "drop-zone-overlay",
-                        p { "Drop files here to upload" }
+                        p { {crate::i18n::t("file_mgr.drop_files")} }
                     }
                 }
 
@@ -139,7 +140,7 @@ pub fn FileManager() -> Element {
                     label {
                         r#for: "file-upload-input",
                         class: "btn btn-primary btn-sm",
-                        "Upload"
+                        {crate::i18n::t("file_mgr.upload")}
                     }
                     input {
                         id: "file-upload-input",
@@ -209,13 +210,13 @@ pub fn FileManager() -> Element {
                     button {
                         class: "btn btn-outline btn-sm",
                         onclick: move |_| show_new_folder_modal.set(true),
-                        "New Folder"
+                        {crate::i18n::t("file_mgr.new_folder")}
                     }
                     div { class: "toolbar-spacer" }
                     input {
                         r#type: "search",
                         class: "file-search",
-                        placeholder: "Search files...",
+                        placeholder: crate::i18n::t("file_mgr.search_files"),
                     }
                 }
 
@@ -245,14 +246,14 @@ pub fn FileManager() -> Element {
         }
 
         // New folder modal
-        Modal { title: "Create New Folder".to_string(), show: show_new_folder_modal,
+        Modal { title: crate::i18n::t("file_mgr.create_folder"), show: show_new_folder_modal,
             div { class: "modal-form",
                 div { class: "form-group",
-                    label { "Folder Name" }
+                    label { {crate::i18n::t("file_mgr.folder_name")} }
                     input {
                         r#type: "text",
                         class: "form-input",
-                        placeholder: "Enter folder name",
+                        placeholder: crate::i18n::t("file_mgr.folder_name_placeholder"),
                         value: "{new_folder_name}",
                         oninput: move |e| new_folder_name.set(e.value()),
                     }
@@ -264,7 +265,7 @@ pub fn FileManager() -> Element {
                             show_new_folder_modal.set(false);
                             new_folder_name.set(String::new());
                         },
-                        "Cancel"
+                        {crate::i18n::t("common.cancel")}
                     }
                     if let Some(err) = folder_error() {
                         div { class: "form-error", "{err}" }
@@ -274,7 +275,7 @@ pub fn FileManager() -> Element {
                         onclick: move |_| {
                             let name = new_folder_name.read().clone();
                             if name.is_empty() {
-                                folder_error.set(Some("Folder name cannot be empty.".into()));
+                                folder_error.set(Some(crate::i18n::t("file_mgr.folder_name_required")));
                                 return;
                             }
                             let token = auth.read().token.clone().unwrap_or_default();
@@ -298,7 +299,7 @@ pub fn FileManager() -> Element {
                                 }
                             });
                         },
-                        "Create"
+                        {crate::i18n::t("common.create")}
                     }
                 }
             }

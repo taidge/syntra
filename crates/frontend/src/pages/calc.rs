@@ -881,6 +881,7 @@ fn fill_rect(state: &FillState) -> ((u32, u32), (u32, u32)) {
 /// Spreadsheet editor with formula bar, cell grid, and sheet tabs.
 #[component]
 pub fn Calc(id: String) -> Element {
+    let _ = use_context::<Signal<String>>().read();
     // ── Cell data ────────────────────────────────────────────────────────
     // Key: (sheet_index, row, col)  Value: raw text / formula
     let mut cells = use_signal(|| HashMap::<(usize, u32, u32), String>::new());
@@ -911,8 +912,8 @@ pub fn Calc(id: String) -> Element {
     let mut active_sheet = use_signal(|| 0usize);
 
     // ── Document chrome ──────────────────────────────────────────────────
-    let mut doc_title = use_signal(|| "Untitled Spreadsheet".to_string());
-    let mut saved_status = use_signal(|| "All changes saved".to_string());
+    let mut doc_title = use_signal(|| crate::i18n::t("editor.calc.untitled"));
+    let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
     let mut loaded = use_signal(|| false);
 
     let mut undo_stack = use_signal(|| Vec::<CalcSnapshot>::new());
@@ -1094,12 +1095,12 @@ pub fn Calc(id: String) -> Element {
         let id = id.clone();
         move |body: serde_json::Value, mut status: Signal<String>, token: String| {
             let id = id.clone();
-            status.set("Saving…".to_string());
+            status.set(crate::i18n::t("common.saving"));
             wasm_bindgen_futures::spawn_local(async move {
                 let req = serde_json::json!({ "content": body });
                 match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
-                    Ok(_) => status.set("All changes saved".to_string()),
-                    Err(e) => status.set(format!("Save failed: {e}")),
+                    Ok(_) => status.set(crate::i18n::t("common.saved")),
+                    Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
                 }
             });
         }
@@ -1113,7 +1114,7 @@ pub fn Calc(id: String) -> Element {
             if !*loaded.read() {
                 return;
             }
-            saved_status.set("Unsaved changes".to_string());
+            saved_status.set(crate::i18n::t("common.unsaved"));
             let body = serialize_workbook();
             let token = auth.read().token.clone().unwrap_or_default();
             let status = saved_status;
@@ -1219,15 +1220,13 @@ pub fn Calc(id: String) -> Element {
         {
             let state = *conn_state.read();
             match state {
-                ConnectionState::Reconnecting(n) => rsx! {
-                    div { class: "ws-banner ws-reconnecting",
-                        "Connection lost — reconnecting (attempt {n})…"
-                    }
+                ConnectionState::Reconnecting(n) => {
+                    let msg = crate::i18n::t("ws.reconnecting").replace("{n}", &n.to_string());
+                    rsx! { div { class: "ws-banner ws-reconnecting", "{msg}" } }
                 },
-                ConnectionState::Failed => rsx! {
-                    div { class: "ws-banner ws-failed",
-                        "Could not reconnect. Refresh the page."
-                    }
+                ConnectionState::Failed => {
+                    let msg = crate::i18n::t("ws.failed");
+                    rsx! { div { class: "ws-banner ws-failed", "{msg}" } }
                 },
                 _ => rsx! {},
             }
@@ -1442,7 +1441,7 @@ pub fn Calc(id: String) -> Element {
                             }
                         }
                     }
-                    saved_status.set("Unsaved changes".to_string());
+                    saved_status.set(crate::i18n::t("common.unsaved"));
                     schedule_save();
                 }
             },
@@ -1522,7 +1521,7 @@ pub fn Calc(id: String) -> Element {
                             schedule_save();
                         }
                     },
-                    placeholder: "Untitled Spreadsheet",
+                    placeholder: crate::i18n::t("editor.calc.untitled"),
                 }
                 span { class: "save-status", "{saved_status}" }
                 if !presence.read().is_empty() {
@@ -1593,12 +1592,12 @@ pub fn Calc(id: String) -> Element {
                                     let fmt_owned = format.to_string();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match export_document(&id, &fmt_owned, &token).await {
-                                            Ok(_) => push_toast(bus2, ToastKind::Success, format!("Exported as {}", fmt_owned.to_uppercase())),
-                                            Err(e) => push_toast(bus2, ToastKind::Error, format!("Export failed: {e}")),
+                                            Ok(_) => push_toast(bus2, ToastKind::Success, crate::i18n::t("editor.export_succeeded").replace("{fmt}", &fmt_owned.to_uppercase())),
+                                            Err(e) => push_toast(bus2, ToastKind::Error, crate::i18n::t("editor.export_failed").replace("{err}", &e.to_string())),
                                         }
                                     });
                                 }
-                                other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                                other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
                             }
                         },
                     }
@@ -1728,6 +1727,31 @@ pub fn Calc(id: String) -> Element {
                 let apply_borders_right = apply_borders.clone();
                 let apply_borders_bottom = apply_borders.clone();
                 let apply_borders_left = apply_borders.clone();
+                let bold_label = crate::i18n::t("editor.bold");
+                let italic_label = crate::i18n::t("editor.italic");
+                let underline_label = crate::i18n::t("editor.underline");
+                let curr_label = crate::i18n::t("editor.calc.currency");
+                let pct_label = crate::i18n::t("editor.calc.percent");
+                let dec0_label = crate::i18n::t("editor.calc.dec_decimal");
+                let dec2_label = crate::i18n::t("editor.calc.inc_decimal");
+                let merge_label = crate::i18n::t("editor.calc.merge");
+                let borders_label = crate::i18n::t("editor.calc.borders");
+                let fill_label = crate::i18n::t("editor.calc.fill_color");
+                let textcol_label = crate::i18n::t("editor.text_color");
+                let alignl_label = crate::i18n::t("editor.align_left");
+                let alignc_label = crate::i18n::t("editor.align_center");
+                let alignr_label = crate::i18n::t("editor.align_right");
+                let sortaz_label = crate::i18n::t("editor.calc.sort_az");
+                let filter_label = crate::i18n::t("editor.calc.filter");
+                let fn_label = crate::i18n::t("editor.calc.insert_function");
+                let chart_label = crate::i18n::t("editor.calc.insert_chart");
+                let b_all = crate::i18n::t("borders.all");
+                let b_outline = crate::i18n::t("borders.outline");
+                let b_none = crate::i18n::t("borders.none");
+                let b_top = crate::i18n::t("borders.top");
+                let b_right = crate::i18n::t("borders.right");
+                let b_bottom = crate::i18n::t("borders.bottom");
+                let b_left = crate::i18n::t("borders.left");
                 rsx! {
                     div { class: "toolbar",
                         div { class: "toolbar-group",
@@ -1747,8 +1771,8 @@ pub fn Calc(id: String) -> Element {
                         div { class: "toolbar-group",
                             button {
                                 class: "toolbar-btn",
-                                title: "Bold",
-                                aria_label: "Bold (Ctrl+B)",
+                                title: "{bold_label}",
+                                aria_label: "{bold_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     let mut f = apply_toggle_b.clone();
@@ -1759,8 +1783,8 @@ pub fn Calc(id: String) -> Element {
                             }
                             button {
                                 class: "toolbar-btn italic",
-                                title: "Italic",
-                                aria_label: "Italic (Ctrl+I)",
+                                title: "{italic_label}",
+                                aria_label: "{italic_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     let mut f = apply_toggle_i.clone();
@@ -1771,8 +1795,8 @@ pub fn Calc(id: String) -> Element {
                             }
                             button {
                                 class: "toolbar-btn underline",
-                                title: "Underline",
-                                aria_label: "Underline (Ctrl+U)",
+                                title: "{underline_label}",
+                                aria_label: "{underline_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     let mut f = apply_toggle_u.clone();
@@ -1786,8 +1810,8 @@ pub fn Calc(id: String) -> Element {
                         div { class: "toolbar-group",
                             button {
                                 class: "toolbar-btn",
-                                title: "Currency",
-                                aria_label: "Currency format",
+                                title: "{curr_label}",
+                                aria_label: "{curr_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     let mut f = apply_format_c.clone();
@@ -1798,8 +1822,8 @@ pub fn Calc(id: String) -> Element {
                             }
                             button {
                                 class: "toolbar-btn",
-                                title: "Percent",
-                                aria_label: "Percent format",
+                                title: "{pct_label}",
+                                aria_label: "{pct_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     let mut f = apply_format_p.clone();
@@ -1810,8 +1834,8 @@ pub fn Calc(id: String) -> Element {
                             }
                             button {
                                 class: "toolbar-btn",
-                                title: "Decrease Decimal",
-                                aria_label: "Decrease decimal places",
+                                title: "{dec0_label}",
+                                aria_label: "{dec0_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     let mut f = apply_format_d0.clone();
@@ -1822,8 +1846,8 @@ pub fn Calc(id: String) -> Element {
                             }
                             button {
                                 class: "toolbar-btn",
-                                title: "Increase Decimal",
-                                aria_label: "Increase decimal places",
+                                title: "{dec2_label}",
+                                aria_label: "{dec2_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     let mut f = apply_format_d2.clone();
@@ -1835,44 +1859,44 @@ pub fn Calc(id: String) -> Element {
                         }
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
-                            button { class: "toolbar-btn", title: "Merge Cells", "Merge" }
+                            button { class: "toolbar-btn", title: "{merge_label}", "{merge_label}" }
                             div { style: "position: relative;",
                                 button {
                                     class: "toolbar-btn",
-                                    title: "Borders",
-                                    aria_label: "Borders",
+                                    title: "{borders_label}",
+                                    aria_label: "{borders_label}",
                                     onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                     onclick: move |_| borders_open.toggle(),
                                     "\u{2317}"
                                 }
                                 if *borders_open.read() {
                                     div { class: "borders-dropdown",
-                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_all.clone(); f(BorderOp::All); borders_open.set(false); }, "All" }
-                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_outline.clone(); f(BorderOp::Outline); borders_open.set(false); }, "Outline" }
-                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_none.clone(); f(BorderOp::None); borders_open.set(false); }, "None" }
-                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_top.clone(); f(BorderOp::Top); borders_open.set(false); }, "Top" }
-                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_right.clone(); f(BorderOp::Right); borders_open.set(false); }, "Right" }
-                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_bottom.clone(); f(BorderOp::Bottom); borders_open.set(false); }, "Bottom" }
-                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_left.clone(); f(BorderOp::Left); borders_open.set(false); }, "Left" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_all.clone(); f(BorderOp::All); borders_open.set(false); }, "{b_all}" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_outline.clone(); f(BorderOp::Outline); borders_open.set(false); }, "{b_outline}" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_none.clone(); f(BorderOp::None); borders_open.set(false); }, "{b_none}" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_top.clone(); f(BorderOp::Top); borders_open.set(false); }, "{b_top}" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_right.clone(); f(BorderOp::Right); borders_open.set(false); }, "{b_right}" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_bottom.clone(); f(BorderOp::Bottom); borders_open.set(false); }, "{b_bottom}" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_left.clone(); f(BorderOp::Left); borders_open.set(false); }, "{b_left}" }
                                     }
                                 }
                             }
-                            input { r#type: "color", class: "toolbar-color", title: "Fill Color", value: "#ffffff" }
-                            input { r#type: "color", class: "toolbar-color", title: "Text Color", value: "#000000" }
+                            input { r#type: "color", class: "toolbar-color", title: "{fill_label}", value: "#ffffff" }
+                            input { r#type: "color", class: "toolbar-color", title: "{textcol_label}", value: "#000000" }
                         }
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
-                            button { class: "toolbar-btn", title: "Align Left", "L" }
-                            button { class: "toolbar-btn", title: "Align Center", "C" }
-                            button { class: "toolbar-btn", title: "Align Right", "R" }
+                            button { class: "toolbar-btn", title: "{alignl_label}", "L" }
+                            button { class: "toolbar-btn", title: "{alignc_label}", "C" }
+                            button { class: "toolbar-btn", title: "{alignr_label}", "R" }
                         }
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
-                            button { class: "toolbar-btn", title: "Sort A-Z", "Sort" }
+                            button { class: "toolbar-btn", title: "{sortaz_label}", "{sortaz_label}" }
                             button {
                                 class: "toolbar-btn",
-                                title: "Filter",
-                                aria_label: "Toggle autofilter",
+                                title: "{filter_label}",
+                                aria_label: "{filter_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     if autofilter.read().is_some() {
@@ -1881,13 +1905,13 @@ pub fn Calc(id: String) -> Element {
                                         return;
                                     }
                                     let (Some(s), Some(e)) = (*selection_start.read(), *selection_end.read()) else {
-                                        push_toast(toast_bus, ToastKind::Warning, "Select a range first");
+                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.range_select_first"));
                                         return;
                                     };
                                     let (r1, r2) = (s.0.min(e.0), s.0.max(e.0));
                                     let (c1, c2) = (s.1.min(e.1), s.1.max(e.1));
                                     if r2 == r1 {
-                                        push_toast(toast_bus, ToastKind::Warning, "Range needs at least 2 rows");
+                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.range_needs_two_rows"));
                                         return;
                                     }
                                     autofilter.set(Some(AutoFilter {
@@ -1902,21 +1926,21 @@ pub fn Calc(id: String) -> Element {
                                 },
                                 "\u{25BD}"
                             }
-                            button { class: "toolbar-btn", title: "Insert Function", "f(x)" }
+                            button { class: "toolbar-btn", title: "{fn_label}", "f(x)" }
                             button {
                                 class: "toolbar-btn",
-                                title: "Insert Chart",
-                                aria_label: "Insert chart from selection",
+                                title: "{chart_label}",
+                                aria_label: "{chart_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
                                     let (Some(s), Some(e)) = (*selection_start.read(), *selection_end.read()) else {
-                                        push_toast(toast_bus, ToastKind::Warning, "Select a range first");
+                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.range_select_first"));
                                         return;
                                     };
                                     let (r1, r2) = (s.0.min(e.0), s.0.max(e.0));
                                     let (c1, c2) = (s.1.min(e.1), s.1.max(e.1));
                                     if r2 - r1 < 1 || c2 - c1 < 1 {
-                                        push_toast(toast_bus, ToastKind::Warning, "Range too small for a chart");
+                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.range_too_small"));
                                         return;
                                     }
                                     let si = *active_sheet.read();
@@ -1930,12 +1954,12 @@ pub fn Calc(id: String) -> Element {
                                         values.push(value);
                                     }
                                     chart_view.set(Some(ChartData {
-                                        title: format!("Chart of {}:{}", cell_ref(r1, c1), cell_ref(r2, c2)),
+                                        title: crate::i18n::t("editor.calc.chart_title").replace("{range}", &format!("{}:{}", cell_ref(r1, c1), cell_ref(r2, c2))),
                                         labels,
                                         values,
                                     }));
                                 },
-                                "Chart"
+                                "{chart_label}"
                             }
                         }
                     }
@@ -1995,7 +2019,7 @@ pub fn Calc(id: String) -> Element {
                 button {
                     class: "formula-icon",
                     r#type: "button",
-                    title: "Insert formula",
+                    title: crate::i18n::t("editor.calc.insert_formula"),
                     onclick: move |_| {
                         let current = formula_bar.read().clone();
                         if !current.starts_with('=') {
@@ -2010,7 +2034,7 @@ pub fn Calc(id: String) -> Element {
                     class: "formula-input",
                     id: FORMULA_INPUT_ID,
                     value: "{formula_bar}",
-                    placeholder: "Enter value or formula...",
+                    placeholder: crate::i18n::t("editor.calc.formula_placeholder"),
                     oninput: move |e| {
                         formula_bar.set(e.value());
                         is_editing.set(true);
@@ -2043,8 +2067,8 @@ pub fn Calc(id: String) -> Element {
 
             // ── Loading / error overlay ─────────────────────────────────
             match doc_resource.read().as_ref() {
-                None => rsx! { div { class: "editor-loading", "Loading document..." } },
-                Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                None => rsx! { div { class: "editor-loading", {crate::i18n::t("editor.loading_document")} } },
+                Some(Err(e)) => rsx! { div { class: "editor-error", {crate::i18n::t("editor.failed_load").replace("{err}", &e.to_string())} } },
                 Some(Ok(_)) => rsx! {},
             }
 
@@ -2058,15 +2082,15 @@ pub fn Calc(id: String) -> Element {
                         coords.x,
                         coords.y,
                         vec![
-                            MenuEntry::new("Cut", "cut"),
-                            MenuEntry::new("Copy", "copy"),
-                            MenuEntry::new("Paste", "paste"),
-                            MenuEntry::new("Delete", "delete"),
-                            MenuEntry::new("Clear Contents", "clear-contents"),
-                            MenuEntry::new("Insert Row", "insert-row"),
-                            MenuEntry::new("Insert Column", "insert-col"),
-                            MenuEntry::new("Delete Row", "delete-row"),
-                            MenuEntry::new("Delete Column", "delete-col"),
+                            MenuEntry::new(crate::i18n::t("ctx.cut"), "cut"),
+                            MenuEntry::new(crate::i18n::t("ctx.copy"), "copy"),
+                            MenuEntry::new(crate::i18n::t("ctx.paste"), "paste"),
+                            MenuEntry::new(crate::i18n::t("ctx.delete"), "delete"),
+                            MenuEntry::new(crate::i18n::t("ctx.clear_contents"), "clear-contents"),
+                            MenuEntry::new(crate::i18n::t("ctx.insert_row"), "insert-row"),
+                            MenuEntry::new(crate::i18n::t("ctx.insert_col"), "insert-col"),
+                            MenuEntry::new(crate::i18n::t("ctx.delete_row"), "delete-row"),
+                            MenuEntry::new(crate::i18n::t("ctx.delete_col"), "delete-col"),
                         ],
                     )));
                 },
@@ -2346,7 +2370,7 @@ pub fn Calc(id: String) -> Element {
                 }
                 button {
                     class: "sheet-tab-add",
-                    title: "Add sheet",
+                    title: crate::i18n::t("editor.calc.add_sheet"),
                     onclick: move |_| {
                         let count = sheets.read().len() + 1;
                         sheets.write().push(format!("Sheet{count}"));
@@ -2361,11 +2385,19 @@ pub fn Calc(id: String) -> Element {
             }
 
             // ── Status bar ───────────────────────────────────────────────
-            div { class: "status-bar",
-                span { "Cell: {cell_ref(active_row, active_col)}" }
-                span { "Sum: {stat_sum:.4}" }
-                span { "Average: {stat_avg:.4}" }
-                span { "Count: {stat_count}" }
+            {
+                let cell_str = crate::i18n::t("editor.calc.cell").replace("{ref}", &cell_ref(active_row, active_col));
+                let sum_str = crate::i18n::t("editor.calc.sum").replace("{value}", &format!("{:.4}", stat_sum));
+                let avg_str = crate::i18n::t("editor.calc.average").replace("{value}", &format!("{:.4}", stat_avg));
+                let count_str = crate::i18n::t("editor.calc.count").replace("{value}", &stat_count.to_string());
+                rsx! {
+                    div { class: "status-bar",
+                        span { "{cell_str}" }
+                        span { "{sum_str}" }
+                        span { "{avg_str}" }
+                        span { "{count_str}" }
+                    }
+                }
             }
 
             if let Some((kind, idx, mx, my)) = *header_menu.read() {
@@ -2420,7 +2452,7 @@ pub fn Calc(id: String) -> Element {
                                                     s();
                                                 }
                                             },
-                                            "Insert row above"
+                                            {crate::i18n::t("editor.calc.insert_row_above")}
                                         }
                                         button {
                                             onclick: {
@@ -2455,7 +2487,7 @@ pub fn Calc(id: String) -> Element {
                                                     s();
                                                 }
                                             },
-                                            "Insert row below"
+                                            {crate::i18n::t("editor.calc.insert_row_below")}
                                         }
                                         button {
                                             onclick: {
@@ -2495,7 +2527,7 @@ pub fn Calc(id: String) -> Element {
                                                     s();
                                                 }
                                             },
-                                            "Delete row"
+                                            {crate::i18n::t("editor.calc.delete_row")}
                                         }
                                     },
                                     HeaderMenuKind::Col => rsx! {
@@ -2531,7 +2563,7 @@ pub fn Calc(id: String) -> Element {
                                                     s();
                                                 }
                                             },
-                                            "Insert column left"
+                                            {crate::i18n::t("editor.calc.insert_col_left")}
                                         }
                                         button {
                                             onclick: {
@@ -2566,7 +2598,7 @@ pub fn Calc(id: String) -> Element {
                                                     s();
                                                 }
                                             },
-                                            "Insert column right"
+                                            {crate::i18n::t("editor.calc.insert_col_right")}
                                         }
                                         button {
                                             onclick: {
@@ -2606,7 +2638,7 @@ pub fn Calc(id: String) -> Element {
                                                     s();
                                                 }
                                             },
-                                            "Delete column"
+                                            {crate::i18n::t("editor.calc.delete_col")}
                                         }
                                         button {
                                             onclick: {
@@ -2637,7 +2669,7 @@ pub fn Calc(id: String) -> Element {
                                                     s();
                                                 }
                                             },
-                                            "Sort A-Z"
+                                            {crate::i18n::t("editor.calc.sort_az")}
                                         }
                                         button {
                                             onclick: {
@@ -2669,7 +2701,7 @@ pub fn Calc(id: String) -> Element {
                                                     s();
                                                 }
                                             },
-                                            "Sort Z-A"
+                                            {crate::i18n::t("editor.calc.sort_za")}
                                         }
                                     },
                                 }
@@ -2706,7 +2738,7 @@ pub fn Calc(id: String) -> Element {
                                             sheet_menu.set(None);
                                         }
                                     },
-                                    "Rename"
+                                    {crate::i18n::t("common.rename")}
                                 }
                                 button {
                                     onclick: {
@@ -2746,7 +2778,7 @@ pub fn Calc(id: String) -> Element {
                                             s();
                                         }
                                     },
-                                    "Delete"
+                                    {crate::i18n::t("common.delete")}
                                 }
                                 button {
                                     onclick: {
@@ -2780,7 +2812,7 @@ pub fn Calc(id: String) -> Element {
                                             s();
                                         }
                                     },
-                                    "Move left"
+                                    {crate::i18n::t("editor.calc.move_left")}
                                 }
                                 button {
                                     onclick: {
@@ -2814,7 +2846,7 @@ pub fn Calc(id: String) -> Element {
                                             s();
                                         }
                                     },
-                                    "Move right"
+                                    {crate::i18n::t("editor.calc.move_right")}
                                 }
                             }
                         }
@@ -2841,7 +2873,7 @@ pub fn Calc(id: String) -> Element {
                             }
                             div { class: "filter-popup", style: "left: 80px; top: 160px;",
                                 onclick: move |evt: MouseEvent| evt.stop_propagation(),
-                                div { style: "font-weight: 600; padding-bottom: 6px;", "Filter column {col_letter_s}" }
+                                div { style: "font-weight: 600; padding-bottom: 6px;", {crate::i18n::t("editor.calc.filter_column").replace("{col}", &col_letter_s.to_string())} }
                                 for v in values.iter() {
                                     {
                                         let val = v.clone();
@@ -2865,7 +2897,7 @@ pub fn Calc(id: String) -> Element {
                                                     },
                                                 }
                                                 if val_for_label.is_empty() {
-                                                    span { style: "color: var(--text-muted); font-style: italic;", "(blank)" }
+                                                    span { style: "color: var(--text-muted); font-style: italic;", {crate::i18n::t("editor.calc.filter_blank")} }
                                                 } else {
                                                     "{val_for_label}"
                                                 }
@@ -2901,7 +2933,7 @@ pub fn Calc(id: String) -> Element {
                                                 s();
                                             }
                                         },
-                                        "Sort A-Z"
+                                        {crate::i18n::t("editor.calc.sort_az")}
                                     }
                                     button {
                                         class: "toolbar-btn",
@@ -2933,7 +2965,7 @@ pub fn Calc(id: String) -> Element {
                                                 s();
                                             }
                                         },
-                                        "Sort Z-A"
+                                        {crate::i18n::t("editor.calc.sort_za")}
                                     }
                                     button {
                                         class: "toolbar-btn",
@@ -2944,7 +2976,7 @@ pub fn Calc(id: String) -> Element {
                                             }
                                             filter_dropdown.set(None);
                                         },
-                                        "Clear"
+                                        {crate::i18n::t("common.clear")}
                                     }
                                 }
                             }
@@ -3035,12 +3067,12 @@ pub fn Calc(id: String) -> Element {
                     if n == 0 {
                         find_matches.set(Vec::new());
                         find_index.set(0);
-                        find_info.set("No matches".to_string());
+                        find_info.set(crate::i18n::t("find.no_matches"));
                     } else {
                         let (si, r, c) = matches[0];
                         find_matches.set(matches);
                         find_index.set(0);
-                        find_info.set(format!("1 of {n}"));
+                        find_info.set(crate::i18n::t("find.n_of_m").replace("{n}", "1").replace("{m}", &n.to_string()));
                         active_sheet.set(si);
                         active_cell.set((r, c));
                         formula_bar.set(cells.read().get(&(si, r, c)).cloned().unwrap_or_default());
@@ -3060,7 +3092,7 @@ pub fn Calc(id: String) -> Element {
                     formula_bar.set(cells.read().get(&(si, r, c)).cloned().unwrap_or_default());
                     selection_start.set(Some((r, c)));
                     selection_end.set(Some((r, c)));
-                    find_info.set(format!("{} of {}", next + 1, n));
+                    find_info.set(crate::i18n::t("find.n_of_m").replace("{n}", &(next + 1).to_string()).replace("{m}", &n.to_string()));
                 },
                 on_prev: move |_| {
                     let matches = find_matches.read().clone();
@@ -3075,7 +3107,7 @@ pub fn Calc(id: String) -> Element {
                     formula_bar.set(cells.read().get(&(si, r, c)).cloned().unwrap_or_default());
                     selection_start.set(Some((r, c)));
                     selection_end.set(Some((r, c)));
-                    find_info.set(format!("{} of {}", prev + 1, n));
+                    find_info.set(crate::i18n::t("find.n_of_m").replace("{n}", &(prev + 1).to_string()).replace("{m}", &n.to_string()));
                 },
                 on_replace: {
                     let mut schedule_save = schedule_save.clone();
@@ -3096,9 +3128,9 @@ pub fn Calc(id: String) -> Element {
                             cells.write().insert((si, r, c), new_val);
                         }
                         formula_bar.set(cells.read().get(&(si, r, c)).cloned().unwrap_or_default());
-                        saved_status.set("Unsaved changes".to_string());
+                        saved_status.set(crate::i18n::t("common.unsaved"));
                         schedule_save();
-                        push_toast(bus, ToastKind::Success, "Replaced");
+                        push_toast(bus, ToastKind::Success, crate::i18n::t("editor.calc.replaced"));
                     }
                 },
                 on_replace_all: {
@@ -3123,10 +3155,10 @@ pub fn Calc(id: String) -> Element {
                             }
                         }
                         if count > 0 {
-                            saved_status.set("Unsaved changes".to_string());
+                            saved_status.set(crate::i18n::t("common.unsaved"));
                             schedule_save();
                         }
-                        push_toast(bus, ToastKind::Success, format!("Replaced {count} cells"));
+                        push_toast(bus, ToastKind::Success, crate::i18n::t("editor.calc.replaced_n").replace("{n}", &count.to_string()));
                     }
                 },
             }
@@ -3139,19 +3171,19 @@ pub fn Calc(id: String) -> Element {
                     let mut bus = toast_bus;
                     move |cmd: String| {
                         match cmd.as_str() {
-                            "copy" => push_toast(bus, ToastKind::Info, "Use Ctrl+C to copy"),
-                            "cut" => push_toast(bus, ToastKind::Info, "Use Ctrl+X to cut"),
-                            "paste" => push_toast(bus, ToastKind::Info, "Use Ctrl+V to paste"),
+                            "copy" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_c")),
+                            "cut" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_x")),
+                            "paste" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_v")),
                             "delete" | "clear-contents" => {
                                 let (r, c) = *active_cell.read();
                                 let si = *active_sheet.read();
                                 if cells.read().contains_key(&(si, r, c)) {
                                     cells.write().remove(&(si, r, c));
                                     formula_bar.set(String::new());
-                                    saved_status.set("Unsaved changes".to_string());
+                                    saved_status.set(crate::i18n::t("common.unsaved"));
                                 }
                             }
-                            other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                            other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", &other)),
                         }
                     }
                 },

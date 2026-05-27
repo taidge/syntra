@@ -33,33 +33,40 @@ struct ActivityEntry {
 
 #[component]
 pub fn Admin() -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let mut active_tab = use_signal(|| "overview".to_string());
+
+    let title = crate::i18n::t("admin.title");
+    let tab_overview = crate::i18n::t("admin.tab.overview");
+    let tab_users = crate::i18n::t("admin.tab.users");
+    let tab_activity = crate::i18n::t("admin.tab.activity");
+    let tab_settings = crate::i18n::t("admin.tab.settings");
 
     rsx! {
         Navbar {}
         div { class: "admin-panel",
-            h1 { "Admin Panel" }
+            h1 { "{title}" }
 
             div { class: "admin-tabs",
                 button {
                     class: if *active_tab.read() == "overview" { "tab-btn active" } else { "tab-btn" },
                     onclick: move |_| active_tab.set("overview".to_string()),
-                    "Overview"
+                    "{tab_overview}"
                 }
                 button {
                     class: if *active_tab.read() == "users" { "tab-btn active" } else { "tab-btn" },
                     onclick: move |_| active_tab.set("users".to_string()),
-                    "Users"
+                    "{tab_users}"
                 }
                 button {
                     class: if *active_tab.read() == "activity" { "tab-btn active" } else { "tab-btn" },
                     onclick: move |_| active_tab.set("activity".to_string()),
-                    "Activity Log"
+                    "{tab_activity}"
                 }
                 button {
                     class: if *active_tab.read() == "settings" { "tab-btn active" } else { "tab-btn" },
                     onclick: move |_| active_tab.set("settings".to_string()),
-                    "Settings"
+                    "{tab_settings}"
                 }
             }
 
@@ -76,6 +83,7 @@ pub fn Admin() -> Element {
 
 #[component]
 fn AdminOverview() -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let auth = use_context::<Signal<AuthState>>();
 
     let stats = use_resource(move || {
@@ -109,28 +117,28 @@ fn AdminOverview() -> Element {
             div { class: "stat-card",
                 div { class: "stat-icon users-icon", "U" }
                 div { class: "stat-info",
-                    h3 { "Total Users" }
+                    h3 { {crate::i18n::t("admin.total_users")} }
                     p { class: "stat-value", "{users_val}" }
                 }
             }
             div { class: "stat-card",
                 div { class: "stat-icon files-icon", "F" }
                 div { class: "stat-info",
-                    h3 { "Total Files" }
+                    h3 { {crate::i18n::t("admin.total_files")} }
                     p { class: "stat-value", "{files_val}" }
                 }
             }
             div { class: "stat-card",
                 div { class: "stat-icon docs-icon", "D" }
                 div { class: "stat-info",
-                    h3 { "Total Documents" }
+                    h3 { {crate::i18n::t("admin.total_documents")} }
                     p { class: "stat-value", "{docs_val}" }
                 }
             }
             div { class: "stat-card",
                 div { class: "stat-icon storage-icon", "S" }
                 div { class: "stat-info",
-                    h3 { "Storage Used" }
+                    h3 { {crate::i18n::t("admin.storage_used")} }
                     p { class: "stat-value", "{storage_val}" }
                 }
             }
@@ -138,15 +146,15 @@ fn AdminOverview() -> Element {
 
         div { class: "admin-charts",
             div { class: "chart-card",
-                h3 { "Documents Created (Last 7 Days)" }
+                h3 { {crate::i18n::t("admin.docs_chart")} }
                 div { class: "chart-placeholder",
-                    p { "Chart will be rendered here" }
+                    p { {crate::i18n::t("admin.chart_placeholder")} }
                 }
             }
             div { class: "chart-card",
-                h3 { "Active Users (Last 7 Days)" }
+                h3 { {crate::i18n::t("admin.users_chart")} }
                 div { class: "chart-placeholder",
-                    p { "Chart will be rendered here" }
+                    p { {crate::i18n::t("admin.chart_placeholder")} }
                 }
             }
         }
@@ -155,6 +163,7 @@ fn AdminOverview() -> Element {
 
 #[component]
 fn AdminUsers() -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let auth = use_context::<Signal<AuthState>>();
 
     let users = use_resource(move || {
@@ -165,50 +174,50 @@ fn AdminUsers() -> Element {
     rsx! {
         div { class: "admin-section",
             div { class: "section-header",
-                h2 { "Users" }
-                button { class: "btn btn-primary btn-sm", "Add User" }
+                h2 { {crate::i18n::t("admin.users_heading")} }
+                button { class: "btn btn-primary btn-sm", {crate::i18n::t("admin.add_user")} }
             }
 
             div { class: "admin-filter-bar",
                 input {
                     r#type: "search",
                     class: "form-input",
-                    placeholder: "Search users...",
+                    placeholder: crate::i18n::t("admin.search_users"),
                 }
                 select { class: "form-select",
-                    option { "All Roles" }
-                    option { "Admin" }
-                    option { "Editor" }
-                    option { "Viewer" }
+                    option { {crate::i18n::t("admin.all_roles")} }
+                    option { {crate::i18n::t("admin.role.admin")} }
+                    option { {crate::i18n::t("admin.role.editor")} }
+                    option { {crate::i18n::t("admin.role.viewer")} }
                 }
             }
 
             table { class: "admin-table",
                 thead {
                     tr {
-                        th { "Username" }
-                        th { "Email" }
-                        th { "Role" }
-                        th { "Storage Used" }
-                        th { "Last Login" }
-                        th { "Actions" }
+                        th { {crate::i18n::t("admin.col.username")} }
+                        th { {crate::i18n::t("admin.col.email")} }
+                        th { {crate::i18n::t("admin.col.role")} }
+                        th { {crate::i18n::t("admin.col.storage")} }
+                        th { {crate::i18n::t("admin.col.last_login")} }
+                        th { {crate::i18n::t("admin.col.actions")} }
                     }
                 }
                 tbody {
                     match &*users.read() {
                         None => rsx! {
                             tr {
-                                td { colspan: "6", "Loading users…" }
+                                td { colspan: "6", {crate::i18n::t("admin.loading_users")} }
                             }
                         },
                         Some(Err(e)) => rsx! {
                             tr {
-                                td { colspan: "6", "Failed to load users: {e}" }
+                                td { colspan: "6", {crate::i18n::t("admin.load_users_failed").replace("{err}", &e.to_string())} }
                             }
                         },
                         Some(Ok(list)) if list.is_empty() => rsx! {
                             tr {
-                                td { colspan: "6", "No users yet." }
+                                td { colspan: "6", {crate::i18n::t("admin.no_users")} }
                             }
                         },
                         Some(Ok(list)) => rsx! {
@@ -221,7 +230,7 @@ fn AdminUsers() -> Element {
                                         _ => "badge",
                                     };
                                     let storage_text = format!("{} MB", user.storage_used / 1_048_576);
-                                    let last_login = user.last_login_at.clone().unwrap_or_else(|| "Never".to_string());
+                                    let last_login = user.last_login_at.clone().unwrap_or_else(|| crate::i18n::t("admin.never"));
                                     let key = user.id.clone();
                                     rsx! {
                                         tr { key: "{key}",
@@ -231,8 +240,8 @@ fn AdminUsers() -> Element {
                                             td { "{storage_text}" }
                                             td { "{last_login}" }
                                             td { class: "table-actions",
-                                                button { class: "btn-icon", "Edit" }
-                                                button { class: "btn-icon danger", "Disable" }
+                                                button { class: "btn-icon", {crate::i18n::t("admin.edit")} }
+                                                button { class: "btn-icon danger", {crate::i18n::t("admin.disable")} }
                                             }
                                         }
                                     }
@@ -244,9 +253,9 @@ fn AdminUsers() -> Element {
             }
 
             div { class: "pagination",
-                button { class: "btn btn-outline btn-sm", disabled: true, "Previous" }
-                span { class: "page-info", "Page 1 of 1" }
-                button { class: "btn btn-outline btn-sm", disabled: true, "Next" }
+                button { class: "btn btn-outline btn-sm", disabled: true, {crate::i18n::t("common.previous")} }
+                span { class: "page-info", {crate::i18n::t("admin.page_info")} }
+                button { class: "btn btn-outline btn-sm", disabled: true, {crate::i18n::t("common.next")} }
             }
         }
     }
@@ -254,6 +263,7 @@ fn AdminUsers() -> Element {
 
 #[component]
 fn AdminActivity() -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let auth = use_context::<Signal<AuthState>>();
 
     let activity = use_resource(move || {
@@ -263,21 +273,21 @@ fn AdminActivity() -> Element {
 
     rsx! {
         div { class: "admin-section",
-            h2 { "Activity Log" }
+            h2 { {crate::i18n::t("admin.activity_log")} }
 
             div { class: "admin-filter-bar",
                 input {
                     r#type: "search",
                     class: "form-input",
-                    placeholder: "Search activity...",
+                    placeholder: crate::i18n::t("admin.search_activity"),
                 }
                 select { class: "form-select",
-                    option { "All Actions" }
-                    option { "Create" }
-                    option { "Update" }
-                    option { "Delete" }
-                    option { "Share" }
-                    option { "Login" }
+                    option { {crate::i18n::t("admin.all_actions")} }
+                    option { {crate::i18n::t("admin.action.create")} }
+                    option { {crate::i18n::t("admin.action.update")} }
+                    option { {crate::i18n::t("admin.action.delete")} }
+                    option { {crate::i18n::t("admin.action.share")} }
+                    option { {crate::i18n::t("admin.action.login")} }
                 }
                 input { r#type: "date", class: "form-input" }
             }
@@ -286,17 +296,17 @@ fn AdminActivity() -> Element {
                 match &*activity.read() {
                     None => rsx! {
                         div { class: "log-entry",
-                            span { class: "log-time", "Loading activity…" }
+                            span { class: "log-time", {crate::i18n::t("admin.loading_activity")} }
                         }
                     },
                     Some(Err(e)) => rsx! {
                         div { class: "log-entry",
-                            span { class: "log-time", "Failed to load activity: {e}" }
+                            span { class: "log-time", {crate::i18n::t("admin.load_activity_failed").replace("{err}", &e.to_string())} }
                         }
                     },
                     Some(Ok(list)) if list.is_empty() => rsx! {
                         div { class: "log-entry",
-                            span { class: "log-time", "No activity yet." }
+                            span { class: "log-time", {crate::i18n::t("admin.no_activity")} }
                         }
                     },
                     Some(Ok(list)) => rsx! {
@@ -323,13 +333,14 @@ fn AdminActivity() -> Element {
 
 #[component]
 fn AdminSettings() -> Element {
+    let _ = use_context::<Signal<String>>().read();
     rsx! {
         div { class: "admin-section",
-            h2 { "System Settings" }
+            h2 { {crate::i18n::t("admin.system_settings")} }
 
             div { class: "settings-form",
                 div { class: "form-group",
-                    label { "Default Storage Quota (MB)" }
+                    label { {crate::i18n::t("admin.default_quota")} }
                     input {
                         r#type: "number",
                         class: "form-input",
@@ -337,7 +348,7 @@ fn AdminSettings() -> Element {
                     }
                 }
                 div { class: "form-group",
-                    label { "Max Upload Size (MB)" }
+                    label { {crate::i18n::t("admin.max_upload")} }
                     input {
                         r#type: "number",
                         class: "form-input",
@@ -345,28 +356,28 @@ fn AdminSettings() -> Element {
                     }
                 }
                 div { class: "form-group",
-                    label { "Allow Public Registration" }
+                    label { {crate::i18n::t("admin.allow_registration")} }
                     select { class: "form-select",
-                        option { value: "true", "Yes" }
-                        option { value: "false", "No" }
+                        option { value: "true", {crate::i18n::t("admin.yes")} }
+                        option { value: "false", {crate::i18n::t("admin.no")} }
                     }
                 }
                 div { class: "form-group",
-                    label { "Default User Role" }
+                    label { {crate::i18n::t("admin.default_role")} }
                     select { class: "form-select",
-                        option { "editor" }
-                        option { "viewer" }
+                        option { {crate::i18n::t("admin.role.editor")} }
+                        option { {crate::i18n::t("admin.role.viewer")} }
                     }
                 }
                 div { class: "form-group",
-                    label { "SMTP Server (for notifications)" }
+                    label { {crate::i18n::t("admin.smtp")} }
                     input {
                         r#type: "text",
                         class: "form-input",
-                        placeholder: "smtp.example.com",
+                        placeholder: crate::i18n::t("admin.smtp_placeholder"),
                     }
                 }
-                button { class: "btn btn-primary", "Save Settings" }
+                button { class: "btn btn-primary", {crate::i18n::t("admin.save_settings")} }
             }
         }
     }

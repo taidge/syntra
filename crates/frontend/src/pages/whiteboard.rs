@@ -344,11 +344,12 @@ fn sanitize_filename(title: &str) -> String {
 
 #[component]
 pub fn Whiteboard(id: String) -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let mut tool = use_signal(|| "pen".to_string());
     let mut color = use_signal(|| "#000000".to_string());
     let mut stroke_width = use_signal(|| 2.0f64);
-    let mut doc_title = use_signal(|| "Untitled Whiteboard".to_string());
-    let mut saved_status = use_signal(|| "All changes saved".to_string());
+    let mut doc_title = use_signal(|| crate::i18n::t("editor.whiteboard.untitled"));
+    let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
     let mut zoom = use_signal(|| 100u32);
     let mut elements = use_signal(|| Vec::<serde_json::Value>::new());
     let mut undo_stack = use_signal(|| Vec::<Vec<serde_json::Value>>::new());
@@ -404,12 +405,12 @@ pub fn Whiteboard(id: String) -> Element {
         let id = id.clone();
         move |body: serde_json::Value, mut status: Signal<String>, token: String| {
             let id = id.clone();
-            status.set("Saving…".to_string());
+            status.set(crate::i18n::t("common.saving"));
             wasm_bindgen_futures::spawn_local(async move {
                 let req = serde_json::json!({ "content": body });
                 match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
-                    Ok(_) => status.set("All changes saved".to_string()),
-                    Err(e) => status.set(format!("Save failed: {e}")),
+                    Ok(_) => status.set(crate::i18n::t("common.saved")),
+                    Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
                 }
             });
         }
@@ -423,7 +424,7 @@ pub fn Whiteboard(id: String) -> Element {
             if !*loaded.read() {
                 return;
             }
-            saved_status.set("Unsaved changes".to_string());
+            saved_status.set(crate::i18n::t("common.unsaved"));
             let body = serialize_whiteboard();
             let token = auth.read().token.clone().unwrap_or_default();
             let status = saved_status;
@@ -455,14 +456,14 @@ pub fn Whiteboard(id: String) -> Element {
         undo_stack.write().push(snap);
     };
 
-    let tools: Vec<(&str, &str)> = vec![
-        ("pen", "Pen"),
-        ("eraser", "Eraser"),
-        ("rect", "Rectangle"),
-        ("circle", "Circle"),
-        ("line", "Line"),
-        ("text", "Text"),
-        ("select", "Select"),
+    let tools: Vec<(&str, String)> = vec![
+        ("pen", crate::i18n::t("editor.whiteboard.tool.pen")),
+        ("eraser", crate::i18n::t("editor.whiteboard.tool.eraser")),
+        ("rect", crate::i18n::t("editor.whiteboard.tool.rect")),
+        ("circle", crate::i18n::t("editor.whiteboard.tool.circle")),
+        ("line", crate::i18n::t("editor.whiteboard.tool.line")),
+        ("text", crate::i18n::t("editor.whiteboard.tool.text")),
+        ("select", crate::i18n::t("editor.whiteboard.tool.select")),
     ];
 
     let canvas_cursor_class = {
@@ -521,7 +522,7 @@ pub fn Whiteboard(id: String) -> Element {
                             schedule_save();
                         }
                     },
-                    placeholder: "Untitled Whiteboard",
+                    placeholder: crate::i18n::t("editor.whiteboard.untitled"),
                 }
                 span { class: "save-status", "{saved_status}" }
             }
@@ -572,12 +573,12 @@ pub fn Whiteboard(id: String) -> Element {
                                     let fmt_owned = format.to_string();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match export_document(&id, &fmt_owned, &token).await {
-                                            Ok(_) => push_toast(bus2, ToastKind::Success, format!("Exported as {}", fmt_owned.to_uppercase())),
-                                            Err(e) => push_toast(bus2, ToastKind::Error, format!("Export failed: {e}")),
+                                            Ok(_) => push_toast(bus2, ToastKind::Success, crate::i18n::t("editor.export_succeeded").replace("{fmt}", &fmt_owned.to_uppercase())),
+                                            Err(e) => push_toast(bus2, ToastKind::Error, crate::i18n::t("editor.export_failed").replace("{err}", &e.to_string())),
                                         }
                                     });
                                 }
-                                other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                                other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
                             }
                         },
                     }
@@ -590,7 +591,7 @@ pub fn Whiteboard(id: String) -> Element {
                         {
                             let key_owned = key.to_string();
                             let key_for_class = key.to_string();
-                            let label_owned = label.to_string();
+                            let label_owned = label.clone();
                             rsx! {
                                 button {
                                     class: if *tool.read() == key_for_class { "tool-btn active" } else { "tool-btn" },
@@ -606,14 +607,14 @@ pub fn Whiteboard(id: String) -> Element {
                 div { class: "toolbar-separator" }
 
                 div { class: "toolbar-group",
-                    label { class: "toolbar-label", "Color:" }
+                    label { class: "toolbar-label", {crate::i18n::t("editor.whiteboard.color_label")} }
                     input {
                         r#type: "color",
                         class: "toolbar-color",
                         value: "{color}",
                         oninput: move |e| color.set(e.value()),
                     }
-                    label { class: "toolbar-label", "Size:" }
+                    label { class: "toolbar-label", {crate::i18n::t("editor.whiteboard.size_label")} }
                     input {
                         r#type: "range",
                         class: "toolbar-range",
@@ -634,7 +635,7 @@ pub fn Whiteboard(id: String) -> Element {
                 div { class: "toolbar-group",
                     button {
                         class: "tool-btn",
-                        title: "Undo (Ctrl+Z)",
+                        title: crate::i18n::t("editor.whiteboard.undo"),
                         onclick: {
                             let mut schedule_save = schedule_save.clone();
                             move |_| {
@@ -646,11 +647,11 @@ pub fn Whiteboard(id: String) -> Element {
                                 }
                             }
                         },
-                        "Undo"
+                        {crate::i18n::t("editor.whiteboard.undo")}
                     }
                     button {
                         class: "tool-btn",
-                        title: "Redo (Ctrl+Y)",
+                        title: crate::i18n::t("editor.whiteboard.redo"),
                         onclick: {
                             let mut schedule_save = schedule_save.clone();
                             move |_| {
@@ -660,11 +661,11 @@ pub fn Whiteboard(id: String) -> Element {
                                 }
                             }
                         },
-                        "Redo"
+                        {crate::i18n::t("editor.whiteboard.redo")}
                     }
                     button {
                         class: "tool-btn danger",
-                        title: "Clear canvas",
+                        title: crate::i18n::t("editor.whiteboard.clear_canvas"),
                         onclick: {
                             let mut schedule_save = schedule_save.clone();
                             move |_| {
@@ -676,7 +677,7 @@ pub fn Whiteboard(id: String) -> Element {
                                 schedule_save();
                             }
                         },
-                        "Clear"
+                        {crate::i18n::t("editor.whiteboard.clear")}
                     }
                 }
 
@@ -707,36 +708,36 @@ pub fn Whiteboard(id: String) -> Element {
                 div { class: "toolbar-group",
                     button {
                         class: "tool-btn",
-                        title: "Export as PNG",
+                        title: crate::i18n::t("editor.whiteboard.export_png"),
                         onclick: move |_| {
                             let els = elements.read().clone();
                             let svg = build_svg_string(&els);
                             let base = sanitize_filename(&doc_title.read());
                             let filename = format!("{base}.png");
                             svg_to_png_and_download(&svg, &filename);
-                            push_toast(toast_bus, ToastKind::Success, "Exported PNG".to_string());
+                            push_toast(toast_bus, ToastKind::Success, crate::i18n::t("editor.whiteboard.exported_png"));
                         },
-                        "Export PNG"
+                        {crate::i18n::t("editor.whiteboard.export_png")}
                     }
                     button {
                         class: "tool-btn",
-                        title: "Export as SVG",
+                        title: crate::i18n::t("editor.whiteboard.export_svg"),
                         onclick: move |_| {
                             let els = elements.read().clone();
                             let svg = build_svg_string(&els);
                             let base = sanitize_filename(&doc_title.read());
                             let filename = format!("{base}.svg");
                             trigger_download(&filename, "image/svg+xml", svg.as_bytes());
-                            push_toast(toast_bus, ToastKind::Success, "Exported SVG".to_string());
+                            push_toast(toast_bus, ToastKind::Success, crate::i18n::t("editor.whiteboard.exported_svg"));
                         },
-                        "Export SVG"
+                        {crate::i18n::t("editor.whiteboard.export_svg")}
                     }
                 }
             }
 
             match doc_resource.read().as_ref() {
-                None => rsx! { div { class: "editor-loading", "Loading document..." } },
-                Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                None => rsx! { div { class: "editor-loading", {crate::i18n::t("editor.loading_document")} } },
+                Some(Err(e)) => rsx! { div { class: "editor-error", {crate::i18n::t("editor.failed_load").replace("{err}", &e.to_string())} } },
                 Some(Ok(_)) => rsx! {},
             }
 
@@ -1231,13 +1232,23 @@ pub fn Whiteboard(id: String) -> Element {
                 }
             }
 
-            div { class: "status-bar",
-                span { "Tool: {tool}" }
-                span { "Color: {color}" }
-                span { "Stroke: {stroke_width:.0}px" }
-                span { "Zoom: {zoom}%" }
-                span { "Elements: {elements.read().len()}" }
-                span { "ID: {id}" }
+            {
+                let tool_str = crate::i18n::t("editor.whiteboard.tool_label").replace("{name}", &tool.read());
+                let color_str = crate::i18n::t("editor.whiteboard.color_status").replace("{value}", &color.read());
+                let stroke_str = crate::i18n::t("editor.whiteboard.stroke_status").replace("{value}", &format!("{:.0}", *stroke_width.read()));
+                let zoom_str = crate::i18n::t("editor.whiteboard.zoom_status").replace("{value}", &zoom.read().to_string());
+                let elements_str = crate::i18n::t("editor.whiteboard.elements_status").replace("{n}", &elements.read().len().to_string());
+                let id_str = crate::i18n::t("editor.whiteboard.id_status").replace("{id}", &id);
+                rsx! {
+                    div { class: "status-bar",
+                        span { "{tool_str}" }
+                        span { "{color_str}" }
+                        span { "{stroke_str}" }
+                        span { "{zoom_str}" }
+                        span { "{elements_str}" }
+                        span { "{id_str}" }
+                    }
+                }
             }
             crate::components::ai_assist::AiAssist { doc_id: id.clone() }
         }

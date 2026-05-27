@@ -15,6 +15,7 @@ pub struct FindDialogProps {
 
 #[component]
 pub fn FindDialog(props: FindDialogProps) -> Element {
+    let _ = use_context::<Signal<String>>().read();
     if !*props.open.read() {
         return rsx! {};
     }
@@ -27,13 +28,21 @@ pub fn FindDialog(props: FindDialogProps) -> Element {
     } else {
         "find-dialog"
     };
+    let find_placeholder = crate::i18n::t("find.placeholder");
+    let replace_placeholder = crate::i18n::t("find.replace_placeholder");
+    let prev_title = crate::i18n::t("find.prev");
+    let next_title = crate::i18n::t("find.next");
+    let toggle_replace = crate::i18n::t("find.toggle_replace");
+    let close_title = crate::i18n::t("find.close");
+    let replace_label = crate::i18n::t("find.replace");
+    let replace_all_label = crate::i18n::t("find.replace_all");
     rsx! {
         div { class: "{dialog_class}",
             div { class: "find-row",
                 input {
                     r#type: "text",
                     class: "find-input",
-                    placeholder: "Find...",
+                    placeholder: "{find_placeholder}",
                     value: "{query}",
                     autofocus: true,
                     oninput: move |e| {
@@ -62,15 +71,15 @@ pub fn FindDialog(props: FindDialogProps) -> Element {
                 button {
                     class: "find-btn",
                     onclick: move |_| props.on_prev.call(()),
-                    title: "Previous (Shift+Enter)",
-                    aria_label: "Previous match (Shift+Enter)",
+                    title: "{prev_title}",
+                    aria_label: "{prev_title}",
                     "↑"
                 }
                 button {
                     class: "find-btn",
                     onclick: move |_| props.on_next.call(()),
-                    title: "Next (Enter)",
-                    aria_label: "Next match (Enter)",
+                    title: "{next_title}",
+                    aria_label: "{next_title}",
                     "↓"
                 }
                 button {
@@ -79,15 +88,15 @@ pub fn FindDialog(props: FindDialogProps) -> Element {
                         let cur = *replace_mode.read();
                         replace_mode.set(!cur);
                     },
-                    title: "Toggle Replace",
-                    aria_label: "Toggle replace mode",
-                    "Replace"
+                    title: "{toggle_replace}",
+                    aria_label: "{toggle_replace}",
+                    "{replace_label}"
                 }
                 button {
                     class: "find-btn",
                     onclick: move |_| open_sig.set(false),
-                    title: "Close (Esc)",
-                    aria_label: "Close find dialog (Esc)",
+                    title: "{close_title}",
+                    aria_label: "{close_title}",
                     "✕"
                 }
             }
@@ -96,7 +105,7 @@ pub fn FindDialog(props: FindDialogProps) -> Element {
                     input {
                         r#type: "text",
                         class: "find-input",
-                        placeholder: "Replace with...",
+                        placeholder: "{replace_placeholder}",
                         value: "{replace_text}",
                         oninput: move |e| replace_text.set(e.value()),
                         onkeydown: move |e: KeyboardEvent| {
@@ -115,9 +124,9 @@ pub fn FindDialog(props: FindDialogProps) -> Element {
                                 props.on_replace.call((q, r));
                             }
                         },
-                        title: "Replace current match",
-                        aria_label: "Replace current match",
-                        "Replace"
+                        title: "{replace_label}",
+                        aria_label: "{replace_label}",
+                        "{replace_label}"
                     }
                     button {
                         class: "find-btn",
@@ -128,9 +137,9 @@ pub fn FindDialog(props: FindDialogProps) -> Element {
                                 props.on_replace_all.call((q, r));
                             }
                         },
-                        title: "Replace all matches",
-                        aria_label: "Replace all matches",
-                        "Replace All"
+                        title: "{replace_all_label}",
+                        aria_label: "{replace_all_label}",
+                        "{replace_all_label}"
                     }
                 }
             }

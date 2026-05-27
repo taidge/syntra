@@ -74,10 +74,11 @@ impl SlideData {
 
 #[component]
 pub fn Slides(id: String) -> Element {
+    let _ = use_context::<Signal<String>>().read();
     let mut slides = use_signal(|| vec![SlideData::empty(0)]);
     let mut current_slide = use_signal(|| 0usize);
-    let mut doc_title = use_signal(|| "Untitled Presentation".to_string());
-    let mut saved_status = use_signal(|| "All changes saved".to_string());
+    let mut doc_title = use_signal(|| crate::i18n::t("editor.slides.untitled"));
+    let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
     let mut loaded = use_signal(|| false);
     let mut drag_index = use_signal(|| None::<usize>);
     let mut present_mode = use_signal(|| false);
@@ -148,12 +149,12 @@ pub fn Slides(id: String) -> Element {
         let id = id.clone();
         move |body: serde_json::Value, mut status: Signal<String>, token: String| {
             let id = id.clone();
-            status.set("Saving…".to_string());
+            status.set(crate::i18n::t("common.saving"));
             wasm_bindgen_futures::spawn_local(async move {
                 let req = serde_json::json!({ "content": body });
                 match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
-                    Ok(_) => status.set("All changes saved".to_string()),
-                    Err(e) => status.set(format!("Save failed: {e}")),
+                    Ok(_) => status.set(crate::i18n::t("common.saved")),
+                    Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
                 }
             });
         }
@@ -167,7 +168,7 @@ pub fn Slides(id: String) -> Element {
             if !*loaded.read() {
                 return;
             }
-            saved_status.set("Unsaved changes".to_string());
+            saved_status.set(crate::i18n::t("common.unsaved"));
             let body = serialize_slides();
             let token = auth.read().token.clone().unwrap_or_default();
             let status = saved_status;
@@ -252,7 +253,7 @@ pub fn Slides(id: String) -> Element {
                             schedule_save();
                         }
                     },
-                    placeholder: "Untitled Presentation",
+                    placeholder: crate::i18n::t("editor.slides.untitled"),
                 }
                 span { class: "save-status", "{saved_status}" }
                 button {
@@ -261,7 +262,7 @@ pub fn Slides(id: String) -> Element {
                         let cur = *layouts_open.read();
                         layouts_open.set(!cur);
                     },
-                    "Layouts"
+                    {crate::i18n::t("editor.slides.layouts")}
                 }
                 button {
                     class: "present-btn",
@@ -273,7 +274,7 @@ pub fn Slides(id: String) -> Element {
                             }
                         }
                     },
-                    "Present"
+                    {crate::i18n::t("editor.slides.present")}
                 }
             }
 
@@ -333,12 +334,12 @@ pub fn Slides(id: String) -> Element {
                                     let fmt_owned = format.to_string();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match export_document(&id, &fmt_owned, &token).await {
-                                            Ok(_) => push_toast(bus2, ToastKind::Success, format!("Exported as {}", fmt_owned.to_uppercase())),
-                                            Err(e) => push_toast(bus2, ToastKind::Error, format!("Export failed: {e}")),
+                                            Ok(_) => push_toast(bus2, ToastKind::Success, crate::i18n::t("editor.export_succeeded").replace("{fmt}", &fmt_owned.to_uppercase())),
+                                            Err(e) => push_toast(bus2, ToastKind::Error, crate::i18n::t("editor.export_failed").replace("{err}", &e.to_string())),
                                         }
                                     });
                                 }
-                                other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                                other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
                             }
                         },
                     }
@@ -348,8 +349,8 @@ pub fn Slides(id: String) -> Element {
             Toolbar { doc_type: "slides".to_string() }
 
             match doc_resource.read().as_ref() {
-                None => rsx! { div { class: "editor-loading", "Loading document..." } },
-                Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                None => rsx! { div { class: "editor-loading", {crate::i18n::t("editor.loading_document")} } },
+                Some(Err(e)) => rsx! { div { class: "editor-error", {crate::i18n::t("editor.failed_load").replace("{err}", &e.to_string())} } },
                 Some(Ok(_)) => rsx! {},
             }
 
@@ -439,7 +440,7 @@ pub fn Slides(id: String) -> Element {
                                 schedule_save();
                             }
                         },
-                        "+ Add Slide"
+                        {crate::i18n::t("editor.slides.add_slide")}
                     }
                 }
 
@@ -453,11 +454,11 @@ pub fn Slides(id: String) -> Element {
                             coords.x,
                             coords.y,
                             vec![
-                                MenuEntry::new("Cut", "cut"),
-                                MenuEntry::new("Copy", "copy"),
-                                MenuEntry::new("Paste", "paste"),
-                                MenuEntry::new("Duplicate Slide", "duplicate-slide"),
-                                MenuEntry::new("Delete Slide", "delete-slide"),
+                                MenuEntry::new(crate::i18n::t("ctx.cut"), "cut"),
+                                MenuEntry::new(crate::i18n::t("ctx.copy"), "copy"),
+                                MenuEntry::new(crate::i18n::t("ctx.paste"), "paste"),
+                                MenuEntry::new(crate::i18n::t("ctx.duplicate_slide"), "duplicate-slide"),
+                                MenuEntry::new(crate::i18n::t("ctx.delete_slide"), "delete-slide"),
                             ],
                         )));
                     },
@@ -498,15 +499,16 @@ pub fn Slides(id: String) -> Element {
 
                 if *layouts_open.read() {
                     div { class: "layouts-rail",
-                        for (kind, name) in [
-                            ("title-only", "Title Only"),
-                            ("title-body", "Title + Body"),
-                            ("two-column", "Two Column"),
-                            ("blank", "Blank"),
-                            ("section-header", "Section Header"),
-                            ("image-title", "Image + Title"),
+                        for (kind, name_key) in [
+                            ("title-only", "editor.slides.layout.title_only"),
+                            ("title-body", "editor.slides.layout.title_body"),
+                            ("two-column", "editor.slides.layout.two_column"),
+                            ("blank", "editor.slides.layout.blank"),
+                            ("section-header", "editor.slides.layout.section_header"),
+                            ("image-title", "editor.slides.layout.image_title"),
                         ] {
                             {
+                                let name = crate::i18n::t(name_key);
                                 let mut schedule_save_l = schedule_save.clone();
                                 let active = cur_layout == kind;
                                 rsx! {
@@ -544,16 +546,16 @@ pub fn Slides(id: String) -> Element {
                                     layouts_open.set(false);
                                 }
                             },
-                            "Apply to all"
+                            {crate::i18n::t("editor.slides.apply_to_all")}
                         }
                     }
                 }
 
                 div { class: "properties-panel",
-                    h3 { "Properties" }
+                    h3 { {crate::i18n::t("editor.slides.properties")} }
 
                     div { class: "property-group",
-                        label { "Background" }
+                        label { {crate::i18n::t("editor.slides.background")} }
                         input {
                             r#type: "color",
                             class: "property-input",
@@ -571,7 +573,7 @@ pub fn Slides(id: String) -> Element {
                     }
 
                     div { class: "property-group",
-                        label { "Transition" }
+                        label { {crate::i18n::t("editor.slides.transition")} }
                         select {
                             class: "property-select",
                             value: "{cur_transition}",
@@ -584,29 +586,29 @@ pub fn Slides(id: String) -> Element {
                                     schedule_save();
                                 }
                             },
-                            option { value: "none", "None" }
-                            option { value: "fade", "Fade" }
-                            option { value: "slide", "Slide" }
-                            option { value: "zoom", "Zoom" }
-                            option { value: "flip", "Flip" }
+                            option { value: "none", {crate::i18n::t("editor.slides.transition.none")} }
+                            option { value: "fade", {crate::i18n::t("editor.slides.transition.fade")} }
+                            option { value: "slide", {crate::i18n::t("editor.slides.transition.slide")} }
+                            option { value: "zoom", {crate::i18n::t("editor.slides.transition.zoom")} }
+                            option { value: "flip", {crate::i18n::t("editor.slides.transition.flip")} }
                         }
                     }
 
                     div { class: "property-group",
-                        label { "Layout" }
+                        label { {crate::i18n::t("editor.slides.layout")} }
                         select { class: "property-select",
-                            option { "Title Slide" }
-                            option { "Title and Content" }
-                            option { "Two Columns" }
-                            option { "Blank" }
+                            option { {crate::i18n::t("editor.slides.layout.title_slide")} }
+                            option { {crate::i18n::t("editor.slides.layout.title_content")} }
+                            option { {crate::i18n::t("editor.slides.layout.two_columns")} }
+                            option { {crate::i18n::t("editor.slides.layout.blank")} }
                         }
                     }
 
                     div { class: "property-group",
-                        label { "Speaker Notes" }
+                        label { {crate::i18n::t("editor.slides.speaker_notes")} }
                         textarea {
                             class: "speaker-notes",
-                            placeholder: "Add notes for this slide...",
+                            placeholder: crate::i18n::t("editor.slides.notes_placeholder"),
                             value: "{cur_notes}",
                             oninput: {
                                 let mut schedule_save = schedule_save.clone();
@@ -622,10 +624,19 @@ pub fn Slides(id: String) -> Element {
                 }
             }
 
-            div { class: "status-bar",
-                span { "Slide {cur_idx + 1} of {slide_count}" }
-                span { "Transition: {cur_transition}" }
-                span { "ID: {id}" }
+            {
+                let slide_str = crate::i18n::t("editor.slides.slide_of")
+                    .replace("{cur}", &(cur_idx + 1).to_string())
+                    .replace("{total}", &slide_count.to_string());
+                let trans_str = crate::i18n::t("editor.slides.transition_label").replace("{kind}", &cur_transition);
+                let id_str = crate::i18n::t("editor.slides.id_label").replace("{id}", &id);
+                rsx! {
+                    div { class: "status-bar",
+                        span { "{slide_str}" }
+                        span { "{trans_str}" }
+                        span { "{id_str}" }
+                    }
+                }
             }
 
             div {
@@ -678,10 +689,10 @@ pub fn Slides(id: String) -> Element {
                                 }
                                 schedule_save_ctx();
                             }
-                            "cut" => push_toast(bus, ToastKind::Info, "Use Ctrl+X to cut"),
-                            "copy" => push_toast(bus, ToastKind::Info, "Use Ctrl+C to copy"),
-                            "paste" => push_toast(bus, ToastKind::Info, "Use Ctrl+V to paste"),
-                            other => push_toast(bus, ToastKind::Info, format!("Coming soon: {other}")),
+                            "cut" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_x")),
+                            "copy" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_c")),
+                            "paste" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_v")),
+                            other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
                         }
                     }
                 },
