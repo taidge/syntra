@@ -58,4 +58,7 @@ features = [
     "Blob",
     "BlobPropertyBag",
     "Url",
+    "CustomEvent",
+    "Location",
+    "EventTarget",
 ]

@@ -138,6 +138,52 @@ fn bbox_contains(b: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
     x >= b.0 && x <= b.2 && y >= b.1 && y <= b.3
 }
 
+fn find_element_at(elements: &[serde_json::Value], x: f64, y: f64) -> Option<usize> {
+    for (i, el) in elements.iter().enumerate().rev() {
+        if let Some((x1, y1, x2, y2)) = element_bbox(el) {
+            if x >= x1 - 4.0 && x <= x2 + 4.0 && y >= y1 - 4.0 && y <= y2 + 4.0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn move_element(el: &mut serde_json::Value, dx: f64, dy: f64) {
+    let ty = el.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let obj = match el.as_object_mut() { Some(o) => o, None => return };
+    fn shift(v: &mut serde_json::Value, d: f64) {
+        if let Some(n) = v.as_f64() { *v = serde_json::json!(n + d); }
+    }
+    match ty.as_str() {
+        "rect" | "text" => {
+            if let Some(x) = obj.get_mut("x") { shift(x, dx); }
+            if let Some(y) = obj.get_mut("y") { shift(y, dy); }
+        }
+        "circle" => {
+            if let Some(x) = obj.get_mut("cx") { shift(x, dx); }
+            if let Some(y) = obj.get_mut("cy") { shift(y, dy); }
+        }
+        "line" => {
+            if let Some(x) = obj.get_mut("x1") { shift(x, dx); }
+            if let Some(y) = obj.get_mut("y1") { shift(y, dy); }
+            if let Some(x) = obj.get_mut("x2") { shift(x, dx); }
+            if let Some(y) = obj.get_mut("y2") { shift(y, dy); }
+        }
+        "pen" => {
+            if let Some(points) = obj.get_mut("points").and_then(|p| p.as_array_mut()) {
+                for p in points {
+                    if let Some(arr) = p.as_array_mut() {
+                        if let Some(x) = arr.get_mut(0) { shift(x, dx); }
+                        if let Some(y) = arr.get_mut(1) { shift(y, dy); }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn xml_escape(input: &str) -> String {
     let mut s = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -310,6 +356,9 @@ pub fn Whiteboard(id: String) -> Element {
     let mut draft = use_signal(|| None::<DraftStroke>);
     let mut is_drawing = use_signal(|| false);
     let mut text_input = use_signal(|| None::<((f64, f64), String)>);
+    let mut selected_index = use_signal(|| None::<usize>);
+    let mut drag_last = use_signal(|| None::<(f64, f64)>);
+    let mut drag_active = use_signal(|| false);
 
     let auth = use_context::<Signal<AuthState>>();
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
@@ -421,6 +470,7 @@ pub fn Whiteboard(id: String) -> Element {
         match t.as_str() {
             "eraser" => "whiteboard-canvas tool-eraser",
             "text" => "whiteboard-canvas tool-text",
+            "select" => "whiteboard-canvas tool-select",
             _ => "whiteboard-canvas",
         }
     };
@@ -432,12 +482,31 @@ pub fn Whiteboard(id: String) -> Element {
             tabindex: "0",
             onkeydown: {
                 let flush_save = flush_save.clone();
+                let mut schedule_save = schedule_save.clone();
                 move |evt: KeyboardEvent| {
                     if evt.modifiers().contains(Modifiers::CONTROL) {
                         if evt.key() == Key::Character("s".to_string()) {
                             evt.prevent_default();
                             flush_save();
                         }
+                        return;
+                    }
+                    match evt.key() {
+                        Key::Delete | Key::Backspace => {
+                            if text_input.read().is_some() { return; }
+                            let sel = *selected_index.read();
+                            if let Some(idx) = sel {
+                                evt.prevent_default();
+                                let snap = elements.read().clone();
+                                if idx < snap.len() {
+                                    undo_stack.write().push(snap);
+                                    elements.write().remove(idx);
+                                    selected_index.set(None);
+                                    schedule_save();
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             },
@@ -716,15 +785,43 @@ pub fn Whiteboard(id: String) -> Element {
                                 "text" => {
                                     text_input.set(Some(((x, y), String::new())));
                                 }
+                                "select" => {
+                                    let hit = find_element_at(&elements.read(), x, y);
+                                    selected_index.set(hit);
+                                    if hit.is_some() {
+                                        push_undo_snapshot();
+                                        drag_last.set(Some((x, y)));
+                                        drag_active.set(true);
+                                    } else {
+                                        drag_last.set(None);
+                                        drag_active.set(false);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
                     },
                     onpointermove: move |evt: PointerEvent| {
+                        let t = tool.read().clone();
+                        if t == "select" {
+                            if !*drag_active.read() { return; }
+                            let Some(idx) = *selected_index.read() else { return; };
+                            let c = evt.client_coordinates();
+                            let Some((x, y)) = svg_point(c.x, c.y) else { return; };
+                            let last = *drag_last.read();
+                            if let Some((lx, ly)) = last {
+                                let dx = x - lx;
+                                let dy = y - ly;
+                                if let Some(el) = elements.write().get_mut(idx) {
+                                    move_element(el, dx, dy);
+                                }
+                                drag_last.set(Some((x, y)));
+                            }
+                            return;
+                        }
                         if !*is_drawing.read() { return; }
                         let c = evt.client_coordinates();
                         let Some((x, y)) = svg_point(c.x, c.y) else { return; };
-                        let t = tool.read().clone();
                         if t == "eraser" {
                             let current = elements.read().clone();
                             let kept: Vec<serde_json::Value> = current.iter().filter(|e| {
@@ -750,9 +847,17 @@ pub fn Whiteboard(id: String) -> Element {
                         let mut schedule_save = schedule_save.clone();
                         let mut push_undo_snapshot = push_undo_snapshot;
                         move |_evt: PointerEvent| {
+                            let t = tool.read().clone();
+                            if t == "select" {
+                                if *drag_active.read() {
+                                    drag_active.set(false);
+                                    drag_last.set(None);
+                                    schedule_save();
+                                }
+                                return;
+                            }
                             if !*is_drawing.read() { return; }
                             is_drawing.set(false);
-                            let t = tool.read().clone();
                             if t == "eraser" {
                                 schedule_save();
                                 return;
@@ -951,6 +1056,32 @@ pub fn Whiteboard(id: String) -> Element {
                         }
                     }
 
+                    {
+                        let sel = *selected_index.read();
+                        let bbox_opt = sel.and_then(|idx| elements.read().get(idx).and_then(element_bbox));
+                        if let Some((x1, y1, x2, y2)) = bbox_opt {
+                            let sx = x1 - 4.0;
+                            let sy = y1 - 4.0;
+                            let sw = (x2 - x1) + 8.0;
+                            let sh = (y2 - y1) + 8.0;
+                            rsx! {
+                                rect {
+                                    x: "{sx}",
+                                    y: "{sy}",
+                                    width: "{sw}",
+                                    height: "{sh}",
+                                    fill: "none",
+                                    stroke: "#2563eb",
+                                    stroke_width: "1.5",
+                                    stroke_dasharray: "5,3",
+                                    pointer_events: "none",
+                                }
+                            }
+                        } else {
+                            rsx! {}
+                        }
+                    }
+
                     if let Some(d) = draft.read().as_ref() {
                         {
                             let stroke = d.color.clone();
@@ -1108,6 +1239,7 @@ pub fn Whiteboard(id: String) -> Element {
                 span { "Elements: {elements.read().len()}" }
                 span { "ID: {id}" }
             }
+            crate::components::ai_assist::AiAssist { doc_id: id.clone() }
         }
     }
 }

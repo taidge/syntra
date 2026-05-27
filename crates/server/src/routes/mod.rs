@@ -66,7 +66,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                         .push(convert_routes())
                         .push(notification_pref_routes())
                         .push(batch_routes())
-                        .push(api_key_routes()),
+                        .push(api_key_routes())
+                        .push(ai_routes()),
                 ),
         )
         // Robots.txt at root
@@ -577,6 +578,10 @@ fn batch_routes() -> Router {
         .push(Router::with_path("download").post(handlers::batch::batch_download))
         .push(Router::with_path("mark-read").post(handlers::batch::batch_mark_read))
         .push(Router::with_path("duplicate").post(handlers::batch::batch_duplicate))
+}
+
+fn ai_routes() -> Router {
+    Router::with_path("ai").push(Router::with_path("assist").post(handlers::ai::assist))
 }
 
 fn api_key_routes() -> Router {

@@ -65,11 +65,23 @@ fn parse_cell_ref(s: &str) -> Option<(u32, u32)> {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
+struct CellBorders {
+    top: bool,
+    right: bool,
+    bottom: bool,
+    left: bool,
+}
+
+#[derive(Clone, Copy)]
+enum BorderOp { All, None, Outline, Top, Right, Bottom, Left }
+
+#[derive(Clone, Debug, Default, PartialEq)]
 struct CellStyle {
     bold: bool,
     italic: bool,
     underline: bool,
     number_format: String,
+    borders: CellBorders,
 }
 
 #[derive(Clone, PartialEq)]
@@ -147,6 +159,15 @@ fn style_to_json(style: &CellStyle) -> Option<serde_json::Value> {
             serde_json::Value::String(style.number_format.clone()),
         );
     }
+    let b = &style.borders;
+    if b.top || b.right || b.bottom || b.left {
+        let mut bo = serde_json::Map::new();
+        bo.insert("top".to_string(), serde_json::Value::Bool(b.top));
+        bo.insert("right".to_string(), serde_json::Value::Bool(b.right));
+        bo.insert("bottom".to_string(), serde_json::Value::Bool(b.bottom));
+        bo.insert("left".to_string(), serde_json::Value::Bool(b.left));
+        obj.insert("borders".to_string(), serde_json::Value::Object(bo));
+    }
     Some(serde_json::Value::Object(obj))
 }
 
@@ -174,6 +195,15 @@ fn cell_value_to_string(v: &serde_json::Value) -> String {
 }
 
 fn style_from_json(v: &serde_json::Value) -> CellStyle {
+    let borders = v
+        .get("borders")
+        .map(|b| CellBorders {
+            top: b.get("top").and_then(|x| x.as_bool()).unwrap_or(false),
+            right: b.get("right").and_then(|x| x.as_bool()).unwrap_or(false),
+            bottom: b.get("bottom").and_then(|x| x.as_bool()).unwrap_or(false),
+            left: b.get("left").and_then(|x| x.as_bool()).unwrap_or(false),
+        })
+        .unwrap_or_default();
     CellStyle {
         bold: v.get("bold").and_then(|b| b.as_bool()).unwrap_or(false),
         italic: v.get("italic").and_then(|b| b.as_bool()).unwrap_or(false),
@@ -183,6 +213,7 @@ fn style_from_json(v: &serde_json::Value) -> CellStyle {
             .and_then(|s| s.as_str())
             .unwrap_or("general")
             .to_string(),
+        borders,
     }
 }
 
@@ -1623,6 +1654,58 @@ pub fn Calc(id: String) -> Element {
                 let apply_format_p = apply_format.clone();
                 let apply_format_d0 = apply_format.clone();
                 let apply_format_d2 = apply_format.clone();
+                let mut borders_open = use_signal(|| false);
+                let mut schedule_save_borders = schedule_save.clone();
+                let mut push_snapshot_b = push_snapshot.clone();
+                let apply_borders = move |op: BorderOp| {
+                    if *loaded.read() {
+                        push_snapshot_b();
+                    }
+                    let active = *active_cell.read();
+                    let sel_s = *selection_start.read();
+                    let sel_e = *selection_end.read();
+                    let extra = extra_selection.read().clone();
+                    let targets = current_selection_cells(active, sel_s, sel_e, &extra);
+                    let si = *active_sheet.read();
+                    let (min_r, max_r, min_c, max_c) = targets.iter().fold(
+                        (u32::MAX, 0u32, u32::MAX, 0u32),
+                        |(mr, xr, mc, xc), (r, c)| (mr.min(*r), xr.max(*r), mc.min(*c), xc.max(*c)),
+                    );
+                    let mut w = cell_styles.write();
+                    for (r, c) in targets {
+                        let entry = w.entry((si, r, c)).or_default();
+                        match op {
+                            BorderOp::All => {
+                                entry.borders = CellBorders { top: true, right: true, bottom: true, left: true };
+                            }
+                            BorderOp::None => {
+                                entry.borders = CellBorders::default();
+                            }
+                            BorderOp::Outline => {
+                                if r == min_r { entry.borders.top = true; }
+                                if r == max_r { entry.borders.bottom = true; }
+                                if c == min_c { entry.borders.left = true; }
+                                if c == max_c { entry.borders.right = true; }
+                            }
+                            BorderOp::Top => { entry.borders.top = !entry.borders.top; }
+                            BorderOp::Right => { entry.borders.right = !entry.borders.right; }
+                            BorderOp::Bottom => { entry.borders.bottom = !entry.borders.bottom; }
+                            BorderOp::Left => { entry.borders.left = !entry.borders.left; }
+                        }
+                        if entry == &CellStyle::default() {
+                            w.remove(&(si, r, c));
+                        }
+                    }
+                    drop(w);
+                    schedule_save_borders();
+                };
+                let apply_borders_all = apply_borders.clone();
+                let apply_borders_outline = apply_borders.clone();
+                let apply_borders_none = apply_borders.clone();
+                let apply_borders_top = apply_borders.clone();
+                let apply_borders_right = apply_borders.clone();
+                let apply_borders_bottom = apply_borders.clone();
+                let apply_borders_left = apply_borders.clone();
                 rsx! {
                     div { class: "toolbar",
                         div { class: "toolbar-group",
@@ -1731,7 +1814,27 @@ pub fn Calc(id: String) -> Element {
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
                             button { class: "toolbar-btn", title: "Merge Cells", "Merge" }
-                            button { class: "toolbar-btn", title: "Cell Borders", "Borders" }
+                            div { style: "position: relative;",
+                                button {
+                                    class: "toolbar-btn",
+                                    title: "Borders",
+                                    aria_label: "Borders",
+                                    onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                    onclick: move |_| borders_open.toggle(),
+                                    "\u{2317}"
+                                }
+                                if *borders_open.read() {
+                                    div { class: "borders-dropdown",
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_all.clone(); f(BorderOp::All); borders_open.set(false); }, "All" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_outline.clone(); f(BorderOp::Outline); borders_open.set(false); }, "Outline" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_none.clone(); f(BorderOp::None); borders_open.set(false); }, "None" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_top.clone(); f(BorderOp::Top); borders_open.set(false); }, "Top" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_right.clone(); f(BorderOp::Right); borders_open.set(false); }, "Right" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_bottom.clone(); f(BorderOp::Bottom); borders_open.set(false); }, "Bottom" }
+                                        button { onmousedown: move |evt: MouseEvent| evt.prevent_default(), onclick: move |_| { let mut f = apply_borders_left.clone(); f(BorderOp::Left); borders_open.set(false); }, "Left" }
+                                    }
+                                }
+                            }
                             input { r#type: "color", class: "toolbar-color", title: "Fill Color", value: "#ffffff" }
                             input { r#type: "color", class: "toolbar-color", title: "Text Color", value: "#000000" }
                         }
@@ -1943,6 +2046,10 @@ pub fn Calc(id: String) -> Element {
                                         if style.bold { style_classes.push_str(" cell-bold"); }
                                         if style.italic { style_classes.push_str(" cell-italic"); }
                                         if style.underline { style_classes.push_str(" cell-underline"); }
+                                        if style.borders.top { style_classes.push_str(" border-t"); }
+                                        if style.borders.right { style_classes.push_str(" border-r"); }
+                                        if style.borders.bottom { style_classes.push_str(" border-b"); }
+                                        if style.borders.left { style_classes.push_str(" border-l"); }
                                         let class_str = format!("{base_class}{style_classes}");
                                         let evaluated = evaluate_cell_display(&cell_value, si, &cells.read());
                                         let display = if style.number_format.is_empty() || style.number_format == "general" {
@@ -2736,6 +2843,7 @@ pub fn Calc(id: String) -> Element {
                     }
                 },
             }
+            crate::components::ai_assist::AiAssist { doc_id: id.clone() }
         }
     }
 }

@@ -33,10 +33,13 @@ struct SlideDto {
     transition: String,
     #[serde(default = "default_bg")]
     bg_color: String,
+    #[serde(default = "default_layout")]
+    layout: String,
 }
 
 fn default_transition() -> String { "none".into() }
 fn default_bg() -> String { "#ffffff".into() }
+fn default_layout() -> String { "title-body".into() }
 
 #[derive(Deserialize)]
 struct PresentationLite {
@@ -52,6 +55,7 @@ struct SlideData {
     notes: String,
     transition: String,
     bg_color: String,
+    layout: String,
 }
 
 impl SlideData {
@@ -63,6 +67,7 @@ impl SlideData {
             notes: String::new(),
             transition: "none".into(),
             bg_color: "#ffffff".into(),
+            layout: "title-body".into(),
         }
     }
 }
@@ -79,6 +84,7 @@ pub fn Slides(id: String) -> Element {
     let mut ctx_menu = use_signal(|| None::<(f64, f64, Vec<MenuEntry>)>);
     let mut comments_open = use_signal(|| false);
     let mut versions_open = use_signal(|| false);
+    let mut layouts_open = use_signal(|| false);
 
     let auth = use_context::<Signal<AuthState>>();
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
@@ -108,6 +114,7 @@ pub fn Slides(id: String) -> Element {
                         notes: s.notes,
                         transition: s.transition,
                         bg_color: s.bg_color,
+                        layout: s.layout,
                     }
                 }).collect(),
                 _ => vec![SlideData::empty(0)],
@@ -131,6 +138,7 @@ pub fn Slides(id: String) -> Element {
                 "notes": s.notes,
                 "transition": s.transition,
                 "bg_color": s.bg_color,
+                "layout": s.layout,
             }))
             .collect();
         serde_json::json!({ "slides": payload })
@@ -215,6 +223,7 @@ pub fn Slides(id: String) -> Element {
     let cur_notes = slides.read().get(cur_idx).map(|s| s.notes.clone()).unwrap_or_default();
     let cur_bg = slides.read().get(cur_idx).map(|s| s.bg_color.clone()).unwrap_or_else(|| "#ffffff".into());
     let cur_transition = slides.read().get(cur_idx).map(|s| s.transition.clone()).unwrap_or_else(|| "none".into());
+    let cur_layout = slides.read().get(cur_idx).map(|s| s.layout.clone()).unwrap_or_else(|| "title-body".into());
 
     rsx! {
         Navbar {}
@@ -246,6 +255,14 @@ pub fn Slides(id: String) -> Element {
                     placeholder: "Untitled Presentation",
                 }
                 span { class: "save-status", "{saved_status}" }
+                button {
+                    class: "btn-icon",
+                    onclick: move |_| {
+                        let cur = *layouts_open.read();
+                        layouts_open.set(!cur);
+                    },
+                    "Layouts"
+                }
                 button {
                     class: "present-btn",
                     onclick: move |_| {
@@ -428,6 +445,7 @@ pub fn Slides(id: String) -> Element {
 
                 div {
                     class: "slide-canvas",
+                    "data-layout": "{cur_layout}",
                     oncontextmenu: move |evt: MouseEvent| {
                         evt.prevent_default();
                         let coords = evt.client_coordinates();
@@ -447,68 +465,86 @@ pub fn Slides(id: String) -> Element {
                         class: "slide-content",
                         style: "background-color: {cur_bg};",
 
-                        if cur_idx == 0 {
-                            div { class: "slide-placeholder title-slide",
-                                h2 {
-                                    contenteditable: "true",
-                                    class: "slide-title-text",
-                                    oninput: {
-                                        let mut schedule_save = schedule_save.clone();
-                                        move |e: FormEvent| {
-                                            if let Some(s) = slides.write().get_mut(cur_idx) {
-                                                s.title = e.value();
-                                            }
-                                            schedule_save();
-                                        }
-                                    },
-                                    "{cur_title}"
+                        div {
+                            class: "slide-title",
+                            contenteditable: "true",
+                            oninput: {
+                                let mut schedule_save = schedule_save.clone();
+                                move |e: FormEvent| {
+                                    if let Some(s) = slides.write().get_mut(cur_idx) {
+                                        s.title = e.value();
+                                    }
+                                    schedule_save();
                                 }
-                                p {
-                                    contenteditable: "true",
-                                    class: "slide-subtitle-text",
-                                    oninput: {
-                                        let mut schedule_save = schedule_save.clone();
-                                        move |e: FormEvent| {
-                                            if let Some(s) = slides.write().get_mut(cur_idx) {
-                                                s.body = e.value();
-                                            }
-                                            schedule_save();
-                                        }
-                                    },
-                                    "{cur_body}"
+                            },
+                            "{cur_title}"
+                        }
+                        div {
+                            class: "slide-body",
+                            contenteditable: "true",
+                            oninput: {
+                                let mut schedule_save = schedule_save.clone();
+                                move |e: FormEvent| {
+                                    if let Some(s) = slides.write().get_mut(cur_idx) {
+                                        s.body = e.value();
+                                    }
+                                    schedule_save();
+                                }
+                            },
+                            "{cur_body}"
+                        }
+                    }
+                }
+
+                if *layouts_open.read() {
+                    div { class: "layouts-rail",
+                        for (kind, name) in [
+                            ("title-only", "Title Only"),
+                            ("title-body", "Title + Body"),
+                            ("two-column", "Two Column"),
+                            ("blank", "Blank"),
+                            ("section-header", "Section Header"),
+                            ("image-title", "Image + Title"),
+                        ] {
+                            {
+                                let mut schedule_save_l = schedule_save.clone();
+                                let active = cur_layout == kind;
+                                rsx! {
+                                    button {
+                                        class: if active { "layout-tile active" } else { "layout-tile" },
+                                        onclick: move |_| {
+                                            let cur = *current_slide.read();
+                                            slides.with_mut(|sl| {
+                                                if let Some(slide) = sl.get_mut(cur) {
+                                                    slide.layout = kind.to_string();
+                                                }
+                                            });
+                                            schedule_save_l();
+                                        },
+                                        div { class: "layout-tile-name", "{name}" }
+                                        div { class: "layout-tile-preview" }
+                                    }
                                 }
                             }
-                        } else {
-                            div { class: "slide-placeholder content-slide",
-                                h3 {
-                                    contenteditable: "true",
-                                    class: "slide-heading-text",
-                                    oninput: {
-                                        let mut schedule_save = schedule_save.clone();
-                                        move |e: FormEvent| {
-                                            if let Some(s) = slides.write().get_mut(cur_idx) {
-                                                s.title = e.value();
-                                            }
-                                            schedule_save();
+                        }
+                        button {
+                            class: "btn btn-sm",
+                            onclick: {
+                                let mut schedule_save_all = schedule_save.clone();
+                                move |_| {
+                                    let cur_layout_now = slides.read().get(*current_slide.read())
+                                        .map(|s| s.layout.clone())
+                                        .unwrap_or_else(|| "title-body".into());
+                                    slides.with_mut(|sl| {
+                                        for slide in sl.iter_mut() {
+                                            slide.layout = cur_layout_now.clone();
                                         }
-                                    },
-                                    "{cur_title}"
+                                    });
+                                    schedule_save_all();
+                                    layouts_open.set(false);
                                 }
-                                div {
-                                    contenteditable: "true",
-                                    class: "slide-body-text",
-                                    oninput: {
-                                        let mut schedule_save = schedule_save.clone();
-                                        move |e: FormEvent| {
-                                            if let Some(s) = slides.write().get_mut(cur_idx) {
-                                                s.body = e.value();
-                                            }
-                                            schedule_save();
-                                        }
-                                    },
-                                    "{cur_body}"
-                                }
-                            }
+                            },
+                            "Apply to all"
                         }
                     }
                 }
@@ -650,6 +686,7 @@ pub fn Slides(id: String) -> Element {
                     }
                 },
             }
+            crate::components::ai_assist::AiAssist { doc_id: id.clone() }
         }
     }
 }

@@ -23,6 +23,7 @@ fn App() -> Element {
     rsx! {
         Router::<Route> {}
         crate::components::ToastRack {}
+        crate::components::post_message::PostMessageBridge {}
     }
 }
 

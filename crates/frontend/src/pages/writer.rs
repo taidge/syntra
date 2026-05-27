@@ -831,6 +831,7 @@ pub fn Writer(id: String) -> Element {
                                 div {
                                     id: WRITER_BODY_ID,
                                     contenteditable: "true",
+                                    spellcheck: "true",
                                     class: "writer-content",
                                     dangerous_inner_html: "{initial_html}",
                                     oninput: {
@@ -945,6 +946,7 @@ pub fn Writer(id: String) -> Element {
 
             CommentsPane { doc_id: id.clone(), open: comments_open }
             VersionHistory { doc_id: id.clone(), open: versions_open }
+            crate::components::ai_assist::AiAssist { doc_id: id.clone() }
             ContextMenu {
                 state: ctx_menu,
                 on_command: {
