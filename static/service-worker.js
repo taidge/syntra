@@ -1,4 +1,4 @@
-const CACHE_NAME = 'contrix-v16-beta2b';
+const CACHE_NAME = 'contrix-v18-gamma';
 const PRECACHE_URLS = ['/', '/index.html', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {

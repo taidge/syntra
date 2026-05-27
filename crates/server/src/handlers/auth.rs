@@ -10,6 +10,8 @@ use jsonwebtoken::{EncodingKey, Header, encode};
 use salvo::prelude::*;
 use uuid::Uuid;
 
+use serde::Deserialize;
+
 use contrix_core::dto::{
     ApiResponse, AuthResponse, ForgotPasswordRequest, LoginRequest, RegisterRequest,
     ResetPasswordRequest, UserProfile,
@@ -437,6 +439,230 @@ pub async fn me(depot: &mut Depot, res: &mut Response) {
             )));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// PUT /auth/me
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct UpdateMeRequest {
+    pub display_name: Option<String>,
+}
+
+#[handler]
+pub async fn update_me(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+
+    let uid = match get_user_id(depot) {
+        Some(val) => val,
+        None => {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Auth("Not authenticated".into()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let body: UpdateMeRequest = match req.parse_json::<UpdateMeRequest>().await {
+        Ok(b) => b,
+        Err(e) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let mut conn = match state.db.get() {
+        Ok(c) => c,
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let now = Utc::now().to_rfc3339();
+    if let Err(e) = diesel::update(u::users.filter(u::id.eq(&uid)))
+        .set((
+            u::display_name.eq(&body.display_name),
+            u::updated_at.eq(&now),
+        ))
+        .execute(&mut conn)
+    {
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Database(e.to_string()).to_response(),
+        )));
+        return;
+    }
+
+    match u::users
+        .filter(u::id.eq(&uid))
+        .first::<User>(&mut conn)
+        .optional()
+    {
+        Ok(Some(user_row)) => {
+            let profile = UserProfile {
+                id: user_row.id.parse().unwrap_or_default(),
+                username: user_row.username,
+                email: user_row.email,
+                display_name: user_row.display_name,
+                avatar_url: user_row.avatar_url,
+                role: UserRole::from_str(&user_row.role),
+                storage_used: user_row.storage_used,
+                storage_quota: user_row.storage_quota.unwrap_or(0),
+            };
+            res.status_code(StatusCode::OK);
+            res.render(Json(ApiResponse::ok(profile)));
+        }
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("User not found".into()).to_response(),
+            )));
+        }
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PUT /auth/password
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[handler]
+pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+
+    let uid = match get_user_id(depot) {
+        Some(val) => val,
+        None => {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Auth("Not authenticated".into()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let body: ChangePasswordRequest = match req.parse_json::<ChangePasswordRequest>().await {
+        Ok(b) => b,
+        Err(e) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    if body.new_password.len() < 8 {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("Password must be at least 8 characters".into()).to_response(),
+        )));
+        return;
+    }
+
+    let mut conn = match state.db.get() {
+        Ok(c) => c,
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let user_row: User = match u::users
+        .filter(u::id.eq(&uid))
+        .first::<User>(&mut conn)
+        .optional()
+    {
+        Ok(Some(usr)) => usr,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("User not found".into()).to_response(),
+            )));
+            return;
+        }
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let parsed_hash = match PasswordHash::new(&user_row.password_hash) {
+        Ok(h) => h,
+        Err(_) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Internal("Password hash corrupt".into()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    if Argon2::default()
+        .verify_password(body.current_password.as_bytes(), &parsed_hash)
+        .is_err()
+    {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Auth("Current password is incorrect".into()).to_response(),
+        )));
+        return;
+    }
+
+    let salt = SaltString::generate(&mut OsRng);
+    let new_hash = match Argon2::default().hash_password(body.new_password.as_bytes(), &salt) {
+        Ok(h) => h.to_string(),
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Internal(format!("Password hashing failed: {e}")).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let now = Utc::now().to_rfc3339();
+    if let Err(e) = diesel::update(u::users.filter(u::id.eq(&uid)))
+        .set((u::password_hash.eq(&new_hash), u::updated_at.eq(&now)))
+        .execute(&mut conn)
+    {
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Database(e.to_string()).to_response(),
+        )));
+        return;
+    }
+
+    res.status_code(StatusCode::OK);
+    res.render(Json(ApiResponse::ok(
+        serde_json::json!({ "success": true }),
+    )));
 }
 
 // ---------------------------------------------------------------------------

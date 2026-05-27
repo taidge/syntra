@@ -93,6 +93,50 @@ test.describe('Authentication API @api', () => {
     expect(response.status()).toBe(401);
   });
 
+  test('should update display_name via PUT /auth/me', async ({ request }) => {
+    const email = uniqueEmail();
+    const username = uniqueUsername();
+    const user = await registerUser(request, username, email, 'Test@12345');
+
+    const updateRes = await request.put('/api/v1/auth/me', {
+      headers: authHeaders(user.token),
+      data: { display_name: 'Updated Name' },
+    });
+    expect(updateRes.status()).toBe(200);
+
+    const meRes = await request.get('/api/v1/auth/me', {
+      headers: authHeaders(user.token),
+    });
+    expect(meRes.status()).toBe(200);
+    const body = await meRes.json();
+    expect(body.data.display_name).toBe('Updated Name');
+  });
+
+  test('should change password via PUT /auth/password', async ({ request }) => {
+    const email = uniqueEmail();
+    const username = uniqueUsername();
+    const user = await registerUser(request, username, email, 'Test@12345');
+
+    const wrongRes = await request.put('/api/v1/auth/password', {
+      headers: authHeaders(user.token),
+      data: { current_password: 'WrongPass1', new_password: 'NewPass@123' },
+    });
+    expect(wrongRes.status()).toBe(401);
+
+    const okRes = await request.put('/api/v1/auth/password', {
+      headers: authHeaders(user.token),
+      data: { current_password: 'Test@12345', new_password: 'NewPass@123' },
+    });
+    expect(okRes.status()).toBe(200);
+
+    const loginRes = await request.post('/api/v1/auth/login', {
+      data: { email, password: 'NewPass@123' },
+    });
+    expect(loginRes.status()).toBe(200);
+    const loginBody = await loginRes.json();
+    expect(loginBody.data.token).toBeTruthy();
+  });
+
   test('should return storage quota for new user', async ({ request }) => {
     const user = await registerUser(request, uniqueUsername(), uniqueEmail(), 'Test@12345');
 

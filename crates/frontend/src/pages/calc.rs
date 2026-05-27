@@ -2379,6 +2379,69 @@ pub fn Calc(id: String) -> Element {
                                             },
                                             "Delete column"
                                         }
+                                        button {
+                                            onclick: {
+                                                let mut s = schedule_save_hm.clone();
+                                                let mut p = push_snapshot_hm.clone();
+                                                move |_| {
+                                                    if *loaded.read() { p(); }
+                                                    let mut pairs: Vec<(u32, String)> = cells
+                                                        .read()
+                                                        .iter()
+                                                        .filter(|((sh, _, c), _)| *sh == si && *c == idx)
+                                                        .map(|((_, r, _), v)| (*r, v.clone()))
+                                                        .collect();
+                                                    let rows: Vec<u32> = pairs.iter().map(|(r, _)| *r).collect();
+                                                    pairs.sort_by(|a, b| {
+                                                        let (av, bv) = (&a.1, &b.1);
+                                                        match (av.parse::<f64>(), bv.parse::<f64>()) {
+                                                            (Ok(an), Ok(bn)) => an.partial_cmp(&bn).unwrap_or(std::cmp::Ordering::Equal),
+                                                            _ => av.cmp(bv),
+                                                        }
+                                                    });
+                                                    let mut w = cells.write();
+                                                    for (i, (_, v)) in pairs.into_iter().enumerate() {
+                                                        w.insert((si, rows[i], idx), v);
+                                                    }
+                                                    drop(w);
+                                                    header_menu.set(None);
+                                                    s();
+                                                }
+                                            },
+                                            "Sort A-Z"
+                                        }
+                                        button {
+                                            onclick: {
+                                                let mut s = schedule_save_hm.clone();
+                                                let mut p = push_snapshot_hm.clone();
+                                                move |_| {
+                                                    if *loaded.read() { p(); }
+                                                    let mut pairs: Vec<(u32, String)> = cells
+                                                        .read()
+                                                        .iter()
+                                                        .filter(|((sh, _, c), _)| *sh == si && *c == idx)
+                                                        .map(|((_, r, _), v)| (*r, v.clone()))
+                                                        .collect();
+                                                    let rows: Vec<u32> = pairs.iter().map(|(r, _)| *r).collect();
+                                                    pairs.sort_by(|a, b| {
+                                                        let (av, bv) = (&a.1, &b.1);
+                                                        let cmp = match (av.parse::<f64>(), bv.parse::<f64>()) {
+                                                            (Ok(an), Ok(bn)) => an.partial_cmp(&bn).unwrap_or(std::cmp::Ordering::Equal),
+                                                            _ => av.cmp(bv),
+                                                        };
+                                                        cmp.reverse()
+                                                    });
+                                                    let mut w = cells.write();
+                                                    for (i, (_, v)) in pairs.into_iter().enumerate() {
+                                                        w.insert((si, rows[i], idx), v);
+                                                    }
+                                                    drop(w);
+                                                    header_menu.set(None);
+                                                    s();
+                                                }
+                                            },
+                                            "Sort Z-A"
+                                        }
                                     },
                                 }
                             }
@@ -2593,6 +2656,58 @@ pub fn Calc(id: String) -> Element {
                     selection_start.set(Some((r, c)));
                     selection_end.set(Some((r, c)));
                     find_info.set(format!("{} of {}", prev + 1, n));
+                },
+                on_replace: {
+                    let mut schedule_save = schedule_save.clone();
+                    let mut push_snapshot = push_snapshot.clone();
+                    let mut bus = toast_bus;
+                    move |(find, replace): (String, String)| {
+                        if find.is_empty() { return; }
+                        let matches = find_matches.read().clone();
+                        if matches.is_empty() { return; }
+                        let idx = *find_index.read();
+                        let Some(&(si, r, c)) = matches.get(idx) else { return; };
+                        if *loaded.read() { push_snapshot(); }
+                        let cur = cells.read().get(&(si, r, c)).cloned().unwrap_or_default();
+                        let new_val = cur.replace(&find, &replace);
+                        if new_val.is_empty() {
+                            cells.write().remove(&(si, r, c));
+                        } else {
+                            cells.write().insert((si, r, c), new_val);
+                        }
+                        formula_bar.set(cells.read().get(&(si, r, c)).cloned().unwrap_or_default());
+                        saved_status.set("Unsaved changes".to_string());
+                        schedule_save();
+                        push_toast(bus, ToastKind::Success, "Replaced");
+                    }
+                },
+                on_replace_all: {
+                    let mut schedule_save = schedule_save.clone();
+                    let mut push_snapshot = push_snapshot.clone();
+                    let mut bus = toast_bus;
+                    move |(find, replace): (String, String)| {
+                        if find.is_empty() { return; }
+                        if *loaded.read() { push_snapshot(); }
+                        let mut count = 0u32;
+                        let keys: Vec<(usize, u32, u32)> = cells.read().keys().cloned().collect();
+                        for k in keys {
+                            let v = cells.read().get(&k).cloned().unwrap_or_default();
+                            if v.contains(&find) {
+                                let new_v = v.replace(&find, &replace);
+                                if new_v.is_empty() {
+                                    cells.write().remove(&k);
+                                } else {
+                                    cells.write().insert(k, new_v);
+                                }
+                                count += 1;
+                            }
+                        }
+                        if count > 0 {
+                            saved_status.set("Unsaved changes".to_string());
+                            schedule_save();
+                        }
+                        push_toast(bus, ToastKind::Success, format!("Replaced {count} cells"));
+                    }
                 },
             }
 

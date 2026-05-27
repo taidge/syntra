@@ -2495,6 +2495,9 @@ input:-webkit-autofill:active {
 }
 .find-btn:hover { background: var(--primary-light); }
 
+.find-dialog.replace-mode { flex-direction: column; align-items: stretch; }
+.find-dialog.replace-mode .find-row { display: flex; align-items: center; gap: 8px; }
+
 .header-context-menu {
     position: fixed;
     background: var(--bg-white);
@@ -2704,3 +2707,41 @@ input:-webkit-autofill:active {
 .menubar-dropdown button:hover { background: var(--primary-light); }
 .menubar-shortcut { color: var(--text-muted); font-size: 0.75rem; margin-left: 24px; }
 .menubar-sep { height: 1px; background: var(--border); margin: 4px 0; }
+
+.comments-compose {
+    position: relative;
+}
+.mention-suggestions {
+    position: absolute;
+    bottom: 100%;
+    left: 14px;
+    right: 14px;
+    background: var(--bg-white);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    z-index: 100;
+    max-height: 160px;
+    overflow: auto;
+    color: var(--text);
+    margin-bottom: 4px;
+}
+.mention-suggestion {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    padding: 6px 12px;
+    cursor: pointer;
+    color: inherit;
+    font-size: 0.875rem;
+}
+.mention-suggestion:hover,
+.mention-suggestion.active { background: var(--primary-light); }
+.mention {
+    color: var(--primary);
+    background: var(--primary-light);
+    border-radius: 3px;
+    padding: 0 3px;
+}

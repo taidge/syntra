@@ -105,7 +105,13 @@ fn auth_routes() -> Router {
 }
 
 fn auth_protected_routes() -> Router {
-    Router::with_path("auth").push(Router::with_path("me").get(handlers::auth::me))
+    Router::with_path("auth")
+        .push(
+            Router::with_path("me")
+                .get(handlers::auth::me)
+                .put(handlers::auth::update_me),
+        )
+        .push(Router::with_path("password").put(handlers::auth::change_password))
 }
 
 fn health_routes() -> Router {

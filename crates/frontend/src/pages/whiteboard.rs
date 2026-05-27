@@ -138,6 +138,164 @@ fn bbox_contains(b: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
     x >= b.0 && x <= b.2 && y >= b.1 && y <= b.3
 }
 
+fn xml_escape(input: &str) -> String {
+    let mut s = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => s.push_str("&amp;"),
+            '<' => s.push_str("&lt;"),
+            '>' => s.push_str("&gt;"),
+            '"' => s.push_str("&quot;"),
+            '\'' => s.push_str("&apos;"),
+            _ => s.push(ch),
+        }
+    }
+    s
+}
+
+fn build_svg_string(elements: &[serde_json::Value]) -> String {
+    let mut s = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1920 1080\" width=\"1920\" height=\"1080\">",
+    );
+    s.push_str(r#"<rect width="100%" height="100%" fill="white"/>"#);
+    for el in elements {
+        let ty = el.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let stroke = el.get("stroke").and_then(|v| v.as_str()).unwrap_or("#000000");
+        let sw = el.get("stroke_width").and_then(|v| v.as_f64()).unwrap_or(2.0);
+        match ty {
+            "pen" => {
+                let points = el.get("points").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                if points.is_empty() {
+                    continue;
+                }
+                s.push_str(&format!(
+                    r#"<path fill="none" stroke="{stroke}" stroke-width="{sw}" stroke-linecap="round" stroke-linejoin="round" d=""#
+                ));
+                for (i, p) in points.iter().enumerate() {
+                    let arr = p.as_array().cloned().unwrap_or_default();
+                    let x = arr.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let y = arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    if i == 0 {
+                        s.push_str(&format!("M {x:.2} {y:.2}"));
+                    } else {
+                        s.push_str(&format!(" L {x:.2} {y:.2}"));
+                    }
+                }
+                s.push_str(r#""/>"#);
+            }
+            "rect" => {
+                let x = el.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = el.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let w = el.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let h = el.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                s.push_str(&format!(
+                    r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="none" stroke="{stroke}" stroke-width="{sw}"/>"#
+                ));
+            }
+            "circle" => {
+                let cx = el.get("cx").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let cy = el.get("cy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let rx = el.get("rx").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let ry = el.get("ry").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                s.push_str(&format!(
+                    r#"<ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" fill="none" stroke="{stroke}" stroke-width="{sw}"/>"#
+                ));
+            }
+            "line" => {
+                let x1 = el.get("x1").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y1 = el.get("y1").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let x2 = el.get("x2").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y2 = el.get("y2").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                s.push_str(&format!(
+                    r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{stroke}" stroke-width="{sw}" stroke-linecap="round"/>"#
+                ));
+            }
+            "text" => {
+                let x = el.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = el.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let content = el.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let col = el.get("color").and_then(|v| v.as_str()).unwrap_or("#000000");
+                let size = el.get("size").and_then(|v| v.as_f64()).unwrap_or(16.0);
+                s.push_str(&format!(
+                    r#"<text x="{x}" y="{y}" fill="{col}" font-size="{size}" font-family="sans-serif">{}</text>"#,
+                    xml_escape(content)
+                ));
+            }
+            _ => {}
+        }
+    }
+    s.push_str("</svg>");
+    s
+}
+
+fn trigger_download(filename: &str, mime: &str, data: &[u8]) {
+    use wasm_bindgen::JsCast;
+    let Some(window) = web_sys::window() else { return };
+    let Some(document) = window.document() else { return };
+    let array = js_sys::Uint8Array::from(data);
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let blob_props = web_sys::BlobPropertyBag::new();
+    blob_props.set_type(mime);
+    let Ok(blob) = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &blob_props) else { return };
+    let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else { return };
+    let Ok(anchor_el) = document.create_element("a") else {
+        let _ = web_sys::Url::revoke_object_url(&url);
+        return;
+    };
+    let Ok(anchor) = anchor_el.dyn_into::<web_sys::HtmlAnchorElement>() else {
+        let _ = web_sys::Url::revoke_object_url(&url);
+        return;
+    };
+    anchor.set_href(&url);
+    anchor.set_download(filename);
+    anchor.click();
+    let _ = web_sys::Url::revoke_object_url(&url);
+}
+
+fn svg_to_png_and_download(svg_str: &str, filename: &str) {
+    use base64::Engine;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
+    let Some(window) = web_sys::window() else { return };
+    let Some(document) = window.document() else { return };
+    let Ok(img_el) = document.create_element("img") else { return };
+    let Ok(img) = img_el.dyn_into::<HtmlImageElement>() else { return };
+    let Ok(canvas_el) = document.create_element("canvas") else { return };
+    let Ok(canvas) = canvas_el.dyn_into::<HtmlCanvasElement>() else { return };
+    canvas.set_width(1920);
+    canvas.set_height(1080);
+    let svg_b64 = base64::engine::general_purpose::STANDARD.encode(svg_str.as_bytes());
+    let data_url = format!("data:image/svg+xml;base64,{svg_b64}");
+    let filename = filename.to_string();
+    let canvas_for_load = canvas.clone();
+    let img_for_load = img.clone();
+    let onload = Closure::once_into_js(move || {
+        let Ok(Some(ctx_raw)) = canvas_for_load.get_context("2d") else { return };
+        let Ok(ctx) = ctx_raw.dyn_into::<CanvasRenderingContext2d>() else { return };
+        let _ = ctx.draw_image_with_html_image_element(&img_for_load, 0.0, 0.0);
+        let Ok(url) = canvas_for_load.to_data_url_with_type("image/png") else { return };
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+        let Ok(anchor_el) = document.create_element("a") else { return };
+        let Ok(anchor) = anchor_el.dyn_into::<web_sys::HtmlAnchorElement>() else { return };
+        anchor.set_href(&url);
+        anchor.set_download(&filename);
+        anchor.click();
+    });
+    img.set_onload(Some(onload.as_ref().unchecked_ref()));
+    img.set_src(&data_url);
+}
+
+fn sanitize_filename(title: &str) -> String {
+    let s: String = title
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+        .collect();
+    let trimmed = s.trim();
+    if trimmed.is_empty() { "whiteboard".to_string() } else { trimmed.to_string() }
+}
+
 #[component]
 pub fn Whiteboard(id: String) -> Element {
     let mut tool = use_signal(|| "pen".to_string());
@@ -482,7 +640,12 @@ pub fn Whiteboard(id: String) -> Element {
                         class: "tool-btn",
                         title: "Export as PNG",
                         onclick: move |_| {
-                            saved_status.set("Export PNG: coming soon".to_string());
+                            let els = elements.read().clone();
+                            let svg = build_svg_string(&els);
+                            let base = sanitize_filename(&doc_title.read());
+                            let filename = format!("{base}.png");
+                            svg_to_png_and_download(&svg, &filename);
+                            push_toast(toast_bus, ToastKind::Success, "Exported PNG".to_string());
                         },
                         "Export PNG"
                     }
@@ -490,7 +653,12 @@ pub fn Whiteboard(id: String) -> Element {
                         class: "tool-btn",
                         title: "Export as SVG",
                         onclick: move |_| {
-                            saved_status.set("Export SVG: coming soon".to_string());
+                            let els = elements.read().clone();
+                            let svg = build_svg_string(&els);
+                            let base = sanitize_filename(&doc_title.read());
+                            let filename = format!("{base}.svg");
+                            trigger_download(&filename, "image/svg+xml", svg.as_bytes());
+                            push_toast(toast_bus, ToastKind::Success, "Exported SVG".to_string());
                         },
                         "Export SVG"
                     }

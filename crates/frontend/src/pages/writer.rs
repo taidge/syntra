@@ -908,6 +908,39 @@ pub fn Writer(id: String) -> Element {
                     let ok = window_find(&q, true);
                     find_info.set(if ok { "Match".to_string() } else { "No matches".to_string() });
                 },
+                on_replace: {
+                    let mut schedule_save = schedule_save.clone();
+                    let mut bus = toast_bus;
+                    move |(find, replace): (String, String)| {
+                        if find.is_empty() { return; }
+                        if window_find(&find, false) {
+                            exec_cmd("insertText", Some(&replace));
+                            doc_body_text.set(editor_text());
+                            schedule_save();
+                            push_toast(bus, ToastKind::Success, "Replaced");
+                        } else {
+                            find_info.set("No matches".to_string());
+                        }
+                    }
+                },
+                on_replace_all: {
+                    let mut schedule_save = schedule_save.clone();
+                    let mut bus = toast_bus;
+                    move |(find, replace): (String, String)| {
+                        if find.is_empty() { return; }
+                        let mut count = 0u32;
+                        while window_find(&find, false) {
+                            exec_cmd("insertText", Some(&replace));
+                            count += 1;
+                            if count > 1000 { break; }
+                        }
+                        if count > 0 {
+                            doc_body_text.set(editor_text());
+                            schedule_save();
+                        }
+                        push_toast(bus, ToastKind::Success, format!("Replaced {count} occurrences"));
+                    }
+                },
             }
 
             CommentsPane { doc_id: id.clone(), open: comments_open }

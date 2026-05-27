@@ -2495,6 +2495,9 @@ input:-webkit-autofill:active {
 }
 .find-btn:hover { background: var(--primary-light); }
 
+.find-dialog.replace-mode { flex-direction: column; align-items: stretch; }
+.find-dialog.replace-mode .find-row { display: flex; align-items: center; gap: 8px; }
+
 .header-context-menu {
     position: fixed;
     background: var(--bg-white);
@@ -2705,107 +2708,40 @@ input:-webkit-autofill:active {
 .menubar-shortcut { color: var(--text-muted); font-size: 0.75rem; margin-left: 24px; }
 .menubar-sep { height: 1px; background: var(--border); margin: 4px 0; }
 
-/* ── Context menu ─────────────────────────────────────────────────────── */
-.context-menu-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 4000;
-    background: transparent;
+.comments-compose {
+    position: relative;
 }
-.context-menu {
-    position: fixed;
-    z-index: 4001;
+.mention-suggestions {
+    position: absolute;
+    bottom: 100%;
+    left: 14px;
+    right: 14px;
     background: var(--bg-white);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    box-shadow: var(--shadow-lg);
-    padding: 4px 0;
-    min-width: 180px;
+    box-shadow: var(--shadow-md);
+    z-index: 100;
+    max-height: 160px;
+    overflow: auto;
     color: var(--text);
+    margin-bottom: 4px;
 }
-.context-menu-item {
+.mention-suggestion {
     display: block;
     width: 100%;
     text-align: left;
     background: transparent;
     border: none;
-    padding: 6px 14px;
-    font-size: 0.875rem;
+    padding: 6px 12px;
     cursor: pointer;
     color: inherit;
+    font-size: 0.875rem;
 }
-.context-menu-item:hover:not(:disabled) { background: var(--primary-light); }
-.context-menu-item:disabled { color: var(--text-muted); cursor: not-allowed; }
-
-/* ── Comments pane ────────────────────────────────────────────────────── */
-.comments-pane {
-    position: fixed;
-    top: 0; right: 0; bottom: 0;
-    width: 320px;
-    background: var(--bg-white);
-    border-left: 1px solid var(--border);
-    z-index: 600;
-    display: flex;
-    flex-direction: column;
-    box-shadow: -4px 0 12px rgba(0,0,0,0.05);
-    color: var(--text);
-}
-.comments-pane-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--border);
-}
-.comments-list { flex: 1; overflow: auto; padding: 8px 14px; }
-.comment-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
-.comment-meta { font-size: 0.75rem; }
-.comments-compose { padding: 10px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-.muted { color: var(--text-muted); font-size: 0.875rem; }
-
-/* ── Version history pane ─────────────────────────────────────────────── */
-.version-pane {
-    position: fixed;
-    top: 0; right: 0; bottom: 0;
-    width: 320px;
-    background: var(--bg-white);
-    border-left: 1px solid var(--border);
-    z-index: 600;
-    display: flex;
-    flex-direction: column;
-    box-shadow: -4px 0 12px rgba(0,0,0,0.05);
-    color: var(--text);
-}
-.version-pane-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--border);
-}
-.version-list { flex: 1; overflow: auto; padding: 8px 14px; }
-.version-item {
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 8px;
-}
-.version-meta { font-size: 0.75rem; flex: 1; }
-.version-label { color: var(--text-muted); font-size: 0.75rem; margin-top: 2px; }
-
-/* ── Focus-visible ───────────────────────────────────────────────────── */
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
-[tabindex]:focus-visible {
-    outline: 2px solid var(--primary);
-    outline-offset: 2px;
-    border-radius: 2px;
-}
-.menubar-item:focus-visible,
-.btn:focus-visible {
-    outline-offset: 1px;
+.mention-suggestion:hover,
+.mention-suggestion.active { background: var(--primary-light); }
+.mention {
+    color: var(--primary);
+    background: var(--primary-light);
+    border-radius: 3px;
+    padding: 0 3px;
 }
