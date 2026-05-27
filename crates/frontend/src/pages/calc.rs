@@ -91,6 +91,24 @@ struct CalcSnapshot {
     sheets: Vec<String>,
 }
 
+#[derive(Clone, PartialEq)]
+struct AutoFilter {
+    sheet: usize,
+    header_row: u32,
+    start_col: u32,
+    end_col: u32,
+    start_row: u32,
+    end_row: u32,
+    hidden: HashMap<u32, std::collections::HashSet<String>>,
+}
+
+#[derive(Clone, PartialEq)]
+struct ChartData {
+    title: String,
+    labels: Vec<String>,
+    values: Vec<f64>,
+}
+
 fn current_selection_cells(
     active: (u32, u32),
     sel_start: Option<(u32, u32)>,
@@ -918,6 +936,10 @@ pub fn Calc(id: String) -> Element {
     let mut rename_buffer = use_signal(String::new);
     let mut address_input = use_signal(|| cell_ref(0, 0));
     let mut address_error = use_signal(|| false);
+
+    let mut autofilter = use_signal(|| None::<AutoFilter>);
+    let mut filter_dropdown = use_signal(|| None::<u32>);
+    let mut chart_view = use_signal(|| None::<ChartData>);
 
     let mut push_snapshot = move || {
         let snap = CalcSnapshot {
@@ -1847,9 +1869,74 @@ pub fn Calc(id: String) -> Element {
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
                             button { class: "toolbar-btn", title: "Sort A-Z", "Sort" }
-                            button { class: "toolbar-btn", title: "Filter", "Filter" }
+                            button {
+                                class: "toolbar-btn",
+                                title: "Filter",
+                                aria_label: "Toggle autofilter",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    if autofilter.read().is_some() {
+                                        autofilter.set(None);
+                                        filter_dropdown.set(None);
+                                        return;
+                                    }
+                                    let (Some(s), Some(e)) = (*selection_start.read(), *selection_end.read()) else {
+                                        push_toast(toast_bus, ToastKind::Warning, "Select a range first");
+                                        return;
+                                    };
+                                    let (r1, r2) = (s.0.min(e.0), s.0.max(e.0));
+                                    let (c1, c2) = (s.1.min(e.1), s.1.max(e.1));
+                                    if r2 == r1 {
+                                        push_toast(toast_bus, ToastKind::Warning, "Range needs at least 2 rows");
+                                        return;
+                                    }
+                                    autofilter.set(Some(AutoFilter {
+                                        sheet: *active_sheet.read(),
+                                        header_row: r1,
+                                        start_col: c1,
+                                        end_col: c2,
+                                        start_row: r1,
+                                        end_row: r2,
+                                        hidden: HashMap::new(),
+                                    }));
+                                },
+                                "\u{25BD}"
+                            }
                             button { class: "toolbar-btn", title: "Insert Function", "f(x)" }
-                            button { class: "toolbar-btn", title: "Insert Chart", "Chart" }
+                            button {
+                                class: "toolbar-btn",
+                                title: "Insert Chart",
+                                aria_label: "Insert chart from selection",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let (Some(s), Some(e)) = (*selection_start.read(), *selection_end.read()) else {
+                                        push_toast(toast_bus, ToastKind::Warning, "Select a range first");
+                                        return;
+                                    };
+                                    let (r1, r2) = (s.0.min(e.0), s.0.max(e.0));
+                                    let (c1, c2) = (s.1.min(e.1), s.1.max(e.1));
+                                    if r2 - r1 < 1 || c2 - c1 < 1 {
+                                        push_toast(toast_bus, ToastKind::Warning, "Range too small for a chart");
+                                        return;
+                                    }
+                                    let si = *active_sheet.read();
+                                    let mut labels = Vec::new();
+                                    let mut values = Vec::new();
+                                    for row in r1..=r2 {
+                                        let label = cells.read().get(&(si, row, c1)).cloned().unwrap_or_default();
+                                        let value_str = cells.read().get(&(si, row, c1 + 1)).cloned().unwrap_or_default();
+                                        let value = value_str.parse::<f64>().unwrap_or(0.0);
+                                        labels.push(label);
+                                        values.push(value);
+                                    }
+                                    chart_view.set(Some(ChartData {
+                                        title: format!("Chart of {}:{}", cell_ref(r1, c1), cell_ref(r2, c2)),
+                                        labels,
+                                        values,
+                                    }));
+                                },
+                                "Chart"
+                            }
                         }
                     }
                 }
@@ -2002,7 +2089,23 @@ pub fn Calc(id: String) -> Element {
                     }
                     tbody {
                         for row in 0..NUM_ROWS {
+                            {
+                                let row_hidden = if let Some(filt) = autofilter.read().as_ref() {
+                                    if filt.sheet == sheet_idx && row > filt.start_row && row <= filt.end_row {
+                                        let mut any_hidden = false;
+                                        for col in filt.start_col..=filt.end_col {
+                                            if let Some(hidden_set) = filt.hidden.get(&col) {
+                                                let val = cells.read().get(&(filt.sheet, row, col)).cloned().unwrap_or_default();
+                                                if hidden_set.contains(&val) { any_hidden = true; break; }
+                                            }
+                                        }
+                                        any_hidden
+                                    } else { false }
+                                } else { false };
+                                let tr_class = if row_hidden { "row-hidden" } else { "" };
+                                rsx! {
                             tr {
+                                class: "{tr_class}",
                                 th {
                                     class: if active_row == row { "row-header active-header" } else { "row-header" },
                                     oncontextmenu: move |evt: MouseEvent| {
@@ -2141,9 +2244,28 @@ pub fn Calc(id: String) -> Element {
                                                         },
                                                     }
                                                 }
+
+                                                if autofilter.read().as_ref().map(|f| f.sheet == sheet_idx && row == f.header_row && col >= f.start_col && col <= f.end_col).unwrap_or(false) {
+                                                    button {
+                                                        class: "filter-arrow",
+                                                        onmousedown: move |evt: MouseEvent| evt.stop_propagation(),
+                                                        onclick: move |evt: MouseEvent| {
+                                                            evt.stop_propagation();
+                                                            let cur = *filter_dropdown.read();
+                                                            if cur == Some(col) {
+                                                                filter_dropdown.set(None);
+                                                            } else {
+                                                                filter_dropdown.set(Some(col));
+                                                            }
+                                                        },
+                                                        "\u{25BE}"
+                                                    }
+                                                }
                                             }
                                         }
                                     }
+                                }
+                            }
                                 }
                             }
                         }
@@ -2693,6 +2815,197 @@ pub fn Calc(id: String) -> Element {
                                         }
                                     },
                                     "Move right"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(col) = *filter_dropdown.read() {
+                {
+                    let snap = autofilter.read().clone();
+                    if let Some(filt) = snap {
+                        let mut values: Vec<String> = (filt.start_row + 1..=filt.end_row)
+                            .map(|r| cells.read().get(&(filt.sheet, r, col)).cloned().unwrap_or_default())
+                            .collect();
+                        values.sort();
+                        values.dedup();
+                        let hidden_set = filt.hidden.get(&col).cloned().unwrap_or_default();
+                        let col_letter_s = col_letter(col);
+                        rsx! {
+                            div {
+                                class: "header-context-menu-backdrop",
+                                style: "position: fixed; inset: 0; z-index: 999;",
+                                onclick: move |_| filter_dropdown.set(None),
+                            }
+                            div { class: "filter-popup", style: "left: 80px; top: 160px;",
+                                onclick: move |evt: MouseEvent| evt.stop_propagation(),
+                                div { style: "font-weight: 600; padding-bottom: 6px;", "Filter column {col_letter_s}" }
+                                for v in values.iter() {
+                                    {
+                                        let val = v.clone();
+                                        let val_for_label = val.clone();
+                                        let checked = !hidden_set.contains(&val);
+                                        rsx! {
+                                            label {
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: checked,
+                                                    onchange: move |_| {
+                                                        let mut w = autofilter.write();
+                                                        if let Some(f) = w.as_mut() {
+                                                            let set = f.hidden.entry(col).or_default();
+                                                            if set.contains(&val) {
+                                                                set.remove(&val);
+                                                            } else {
+                                                                set.insert(val.clone());
+                                                            }
+                                                        }
+                                                    },
+                                                }
+                                                if val_for_label.is_empty() {
+                                                    span { style: "color: var(--text-muted); font-style: italic;", "(blank)" }
+                                                } else {
+                                                    "{val_for_label}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "filter-popup-actions",
+                                    button {
+                                        class: "toolbar-btn",
+                                        onclick: {
+                                            let mut s = schedule_save.clone();
+                                            let mut p = push_snapshot.clone();
+                                            move |_| {
+                                                if *loaded.read() { p(); }
+                                                let si = autofilter.read().as_ref().map(|f| f.sheet).unwrap_or(0);
+                                                let (start_row, end_row) = autofilter.read().as_ref().map(|f| (f.start_row, f.end_row)).unwrap_or((0,0));
+                                                let mut pairs: Vec<(u32, String)> = cells.read().iter()
+                                                    .filter(|((sh, r, c), _)| *sh == si && *c == col && *r > start_row && *r <= end_row)
+                                                    .map(|((_, r, _), v)| (*r, v.clone()))
+                                                    .collect();
+                                                let rows: Vec<u32> = pairs.iter().map(|(r, _)| *r).collect();
+                                                pairs.sort_by(|a, b| match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                                                    (Ok(an), Ok(bn)) => an.partial_cmp(&bn).unwrap_or(std::cmp::Ordering::Equal),
+                                                    _ => a.1.cmp(&b.1),
+                                                });
+                                                let mut w = cells.write();
+                                                for (i, (_, v)) in pairs.into_iter().enumerate() {
+                                                    w.insert((si, rows[i], col), v);
+                                                }
+                                                drop(w);
+                                                filter_dropdown.set(None);
+                                                s();
+                                            }
+                                        },
+                                        "Sort A-Z"
+                                    }
+                                    button {
+                                        class: "toolbar-btn",
+                                        onclick: {
+                                            let mut s = schedule_save.clone();
+                                            let mut p = push_snapshot.clone();
+                                            move |_| {
+                                                if *loaded.read() { p(); }
+                                                let si = autofilter.read().as_ref().map(|f| f.sheet).unwrap_or(0);
+                                                let (start_row, end_row) = autofilter.read().as_ref().map(|f| (f.start_row, f.end_row)).unwrap_or((0,0));
+                                                let mut pairs: Vec<(u32, String)> = cells.read().iter()
+                                                    .filter(|((sh, r, c), _)| *sh == si && *c == col && *r > start_row && *r <= end_row)
+                                                    .map(|((_, r, _), v)| (*r, v.clone()))
+                                                    .collect();
+                                                let rows: Vec<u32> = pairs.iter().map(|(r, _)| *r).collect();
+                                                pairs.sort_by(|a, b| {
+                                                    let cmp = match (a.1.parse::<f64>(), b.1.parse::<f64>()) {
+                                                        (Ok(an), Ok(bn)) => an.partial_cmp(&bn).unwrap_or(std::cmp::Ordering::Equal),
+                                                        _ => a.1.cmp(&b.1),
+                                                    };
+                                                    cmp.reverse()
+                                                });
+                                                let mut w = cells.write();
+                                                for (i, (_, v)) in pairs.into_iter().enumerate() {
+                                                    w.insert((si, rows[i], col), v);
+                                                }
+                                                drop(w);
+                                                filter_dropdown.set(None);
+                                                s();
+                                            }
+                                        },
+                                        "Sort Z-A"
+                                    }
+                                    button {
+                                        class: "toolbar-btn",
+                                        onclick: move |_| {
+                                            let mut w = autofilter.write();
+                                            if let Some(f) = w.as_mut() {
+                                                f.hidden.remove(&col);
+                                            }
+                                            filter_dropdown.set(None);
+                                        },
+                                        "Clear"
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        rsx! {}
+                    }
+                }
+            }
+
+            if let Some(chart) = chart_view.read().clone() {
+                {
+                    let max = chart.values.iter().cloned().fold(0.0f64, f64::max).max(1.0);
+                    let bar_w = 600.0 / chart.values.len().max(1) as f64;
+                    rsx! {
+                        div { class: "chart-modal",
+                            onclick: move |_| chart_view.set(None),
+                            div { class: "chart-modal-content",
+                                onclick: move |evt: MouseEvent| evt.stop_propagation(),
+                                header { class: "chart-modal-header",
+                                    strong { "{chart.title}" }
+                                    button {
+                                        class: "btn-icon",
+                                        onclick: move |_| chart_view.set(None),
+                                        "\u{2715}"
+                                    }
+                                }
+                                svg {
+                                    width: "640", height: "400",
+                                    rect { x: "0", y: "0", width: "640", height: "400", fill: "white" }
+                                    for (i, v) in chart.values.iter().enumerate() {
+                                        {
+                                            let x = 20.0 + i as f64 * bar_w;
+                                            let h = (v / max * 300.0).max(0.0);
+                                            let y = 350.0 - h;
+                                            let label = chart.labels.get(i).cloned().unwrap_or_default();
+                                            let tx = x + (bar_w - 4.0) / 2.0;
+                                            let ty = y - 4.0;
+                                            let bw = bar_w - 4.0;
+                                            let vv = *v;
+                                            rsx! {
+                                                rect { x: "{x}", y: "{y}", width: "{bw}", height: "{h}", fill: "#2563eb" }
+                                                text {
+                                                    x: "{tx}",
+                                                    y: "360",
+                                                    text_anchor: "middle",
+                                                    font_size: "11",
+                                                    fill: "#1e293b",
+                                                    "{label}"
+                                                }
+                                                text {
+                                                    x: "{tx}",
+                                                    y: "{ty}",
+                                                    text_anchor: "middle",
+                                                    font_size: "10",
+                                                    fill: "#475569",
+                                                    "{vv}"
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

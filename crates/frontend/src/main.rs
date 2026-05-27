@@ -24,6 +24,7 @@ fn App() -> Element {
         Router::<Route> {}
         crate::components::ToastRack {}
         crate::components::post_message::PostMessageBridge {}
+        crate::components::mobile_bar::MobileBar {}
     }
 }
 

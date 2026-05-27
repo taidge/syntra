@@ -4,6 +4,7 @@ pub mod context_menu;
 pub mod file_list;
 pub mod find_dialog;
 pub mod menubar;
+pub mod mobile_bar;
 pub mod modal;
 pub mod navbar;
 pub mod post_message;

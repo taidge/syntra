@@ -211,6 +211,154 @@ fn writer_content_to_plain(content: &serde_json::Value) -> String {
     out
 }
 
+#[derive(Clone, PartialEq)]
+struct ChangeItem {
+    kind: String,
+    text: String,
+    author: String,
+    dom_id: String,
+}
+
+fn insert_tracked_text(text: &str, color: &str, author: &str) {
+    let window = match web_sys::window() { Some(w) => w, None => return };
+    let document = match window.document() { Some(d) => d, None => return };
+    let sel = match document.get_selection().ok().flatten() {
+        Some(s) => s,
+        None => return,
+    };
+    if sel.range_count() == 0 { return; }
+    let range = match sel.get_range_at(0).ok() { Some(r) => r, None => return };
+    let _ = range.delete_contents();
+    let span = match document.create_element("ins") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = span.set_attribute("class", "tracked-ins");
+    let _ = span.set_attribute("data-author", author);
+    let _ = span.set_attribute(
+        "style",
+        &format!("background-color: {color}22; color: {color}; text-decoration: underline;"),
+    );
+    span.set_text_content(Some(text));
+    if range.insert_node(&span).is_err() { return; }
+    let span_node: &web_sys::Node = span.as_ref();
+    let _ = range.set_start_after(span_node);
+    let _ = range.set_end_after(span_node);
+    let _ = sel.remove_all_ranges();
+    let _ = sel.add_range(&range);
+}
+
+fn wrap_selection_as_deleted(author: &str) -> bool {
+    let window = match web_sys::window() { Some(w) => w, None => return false };
+    let document = match window.document() { Some(d) => d, None => return false };
+    let sel = match document.get_selection().ok().flatten() { Some(s) => s, None => return false };
+    if sel.range_count() == 0 { return false; }
+    if sel.is_collapsed() { return false; }
+    let range = match sel.get_range_at(0).ok() { Some(r) => r, None => return false };
+    let text = range.to_string().as_string().unwrap_or_default();
+    if text.is_empty() { return false; }
+    let _ = range.delete_contents();
+    let del = match document.create_element("del") {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    let _ = del.set_attribute("class", "tracked-del");
+    let _ = del.set_attribute("data-author", author);
+    let _ = del.set_attribute("style", "text-decoration: line-through; opacity: 0.7;");
+    del.set_text_content(Some(&text));
+    if range.insert_node(&del).is_err() { return false; }
+    let del_node: &web_sys::Node = del.as_ref();
+    let _ = range.set_start_after(del_node);
+    let _ = range.set_end_after(del_node);
+    let _ = sel.remove_all_ranges();
+    let _ = sel.add_range(&range);
+    true
+}
+
+fn list_pending_changes() -> Vec<ChangeItem> {
+    let document = match web_sys::window().and_then(|w| w.document()) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let body = match document.get_element_by_id(WRITER_BODY_ID) {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let nodes = match body.query_selector_all(".tracked-ins, .tracked-del") {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for i in 0..nodes.length() {
+        let Some(node) = nodes.item(i) else { continue };
+        let Some(el) = node.dyn_ref::<web_sys::Element>() else { continue };
+        let tag = el.tag_name().to_lowercase();
+        let kind = if tag == "ins" { "ins" } else { "del" };
+        let text = el.text_content().unwrap_or_default();
+        let author = el.get_attribute("data-author").unwrap_or_default();
+        let id = el.get_attribute("data-change-id").unwrap_or_else(|| {
+            let new_id = format!("ch-{}-{}", i, (js_sys::Math::random() * 1.0e9) as u64);
+            let _ = el.set_attribute("data-change-id", &new_id);
+            new_id
+        });
+        out.push(ChangeItem {
+            kind: kind.to_string(),
+            text,
+            author,
+            dom_id: id,
+        });
+    }
+    out
+}
+
+fn accept_change(dom_id: &str) {
+    let document = match web_sys::window().and_then(|w| w.document()) { Some(d) => d, None => return };
+    let body = match document.get_element_by_id(WRITER_BODY_ID) { Some(b) => b, None => return };
+    let selector = format!("[data-change-id=\"{dom_id}\"]");
+    let Ok(Some(el)) = body.query_selector(&selector) else { return };
+    let tag = el.tag_name().to_lowercase();
+    let parent = match el.parent_node() { Some(p) => p, None => return };
+    let el_node: &web_sys::Node = el.as_ref();
+    if tag == "ins" {
+        let text = el.text_content().unwrap_or_default();
+        let text_node = document.create_text_node(&text);
+        let text_node_ref: &web_sys::Node = text_node.as_ref();
+        let _ = parent.replace_child(text_node_ref, el_node);
+    } else {
+        let _ = parent.remove_child(el_node);
+    }
+}
+
+fn reject_change(dom_id: &str) {
+    let document = match web_sys::window().and_then(|w| w.document()) { Some(d) => d, None => return };
+    let body = match document.get_element_by_id(WRITER_BODY_ID) { Some(b) => b, None => return };
+    let selector = format!("[data-change-id=\"{dom_id}\"]");
+    let Ok(Some(el)) = body.query_selector(&selector) else { return };
+    let tag = el.tag_name().to_lowercase();
+    let parent = match el.parent_node() { Some(p) => p, None => return };
+    let el_node: &web_sys::Node = el.as_ref();
+    if tag == "ins" {
+        let _ = parent.remove_child(el_node);
+    } else {
+        let text = el.text_content().unwrap_or_default();
+        let text_node = document.create_text_node(&text);
+        let text_node_ref: &web_sys::Node = text_node.as_ref();
+        let _ = parent.replace_child(text_node_ref, el_node);
+    }
+}
+
+fn accept_all_changes() {
+    for ch in list_pending_changes() {
+        accept_change(&ch.dom_id);
+    }
+}
+
+fn reject_all_changes() {
+    for ch in list_pending_changes() {
+        reject_change(&ch.dom_id);
+    }
+}
+
 /// Rich-text document editor (word processor).
 #[component]
 pub fn Writer(id: String) -> Element {
@@ -231,6 +379,9 @@ pub fn Writer(id: String) -> Element {
     let mut ctx_menu = use_signal(|| None::<(f64, f64, Vec<MenuEntry>)>);
     let mut comments_open = use_signal(|| false);
     let mut versions_open = use_signal(|| false);
+    let mut tracking_on = use_signal(|| false);
+    let mut track_pane_open = use_signal(|| false);
+    let mut changes_tick = use_signal(|| 0u32);
 
     let auth = use_context::<Signal<AuthState>>();
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
@@ -391,6 +542,61 @@ pub fn Writer(id: String) -> Element {
                 let _ = ws.close();
             }
         }
+    });
+
+    let username_for_tracking = auth
+        .read()
+        .user
+        .as_ref()
+        .map(|u| u.username.clone())
+        .unwrap_or_else(|| "you".to_string());
+    use_effect(move || {
+        if !*loaded.read() {
+            return;
+        }
+        let Some(window) = web_sys::window() else { return };
+        let Some(document) = window.document() else { return };
+        let Some(body) = document.get_element_by_id(WRITER_BODY_ID) else { return };
+        if body.get_attribute("data-track-bound").is_some() {
+            return;
+        }
+        let _ = body.set_attribute("data-track-bound", "1");
+        let author = username_for_tracking.clone();
+        let mut tracking_on_inner = tracking_on;
+        let mut tick_inner = changes_tick;
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |evt: web_sys::Event| {
+            if !*tracking_on_inner.read() {
+                return;
+            }
+            let input_type = js_sys::Reflect::get(&evt, &"inputType".into())
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
+            if input_type == "insertText" || input_type == "insertCompositionText" {
+                let data = js_sys::Reflect::get(&evt, &"data".into())
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default();
+                if data.is_empty() {
+                    return;
+                }
+                evt.prevent_default();
+                insert_tracked_text(&data, "#2563eb", &author);
+                let v = *tick_inner.read();
+                tick_inner.set(v.wrapping_add(1));
+            } else if input_type.starts_with("delete") {
+                if wrap_selection_as_deleted(&author) {
+                    evt.prevent_default();
+                    let v = *tick_inner.read();
+                    tick_inner.set(v.wrapping_add(1));
+                }
+            }
+        });
+        let _ = body.add_event_listener_with_callback(
+            "beforeinput",
+            cb.as_ref().unchecked_ref(),
+        );
+        cb.forget();
     });
 
     let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
@@ -558,6 +764,12 @@ pub fn Writer(id: String) -> Element {
                                 "version-history" => {
                                     let cur = *versions_open.read();
                                     versions_open.set(!cur);
+                                }
+                                "track-changes" => {
+                                    let cur = *track_pane_open.read();
+                                    track_pane_open.set(!cur);
+                                    let v = *changes_tick.read();
+                                    changes_tick.set(v.wrapping_add(1));
                                 }
                                 "toggle-theme" => {
                                     if let Some(window) = web_sys::window() {
@@ -796,6 +1008,33 @@ pub fn Writer(id: String) -> Element {
                                 },
                             }
                         }
+                        div { class: "toolbar-separator" }
+                        div { class: "toolbar-group",
+                            button {
+                                class: if *tracking_on.read() { "toolbar-btn active" } else { "toolbar-btn" },
+                                title: "Track Changes",
+                                aria_label: "Toggle track changes",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| {
+                                    let cur = *tracking_on.read();
+                                    tracking_on.set(!cur);
+                                },
+                                "TC"
+                            }
+                            button {
+                                class: "toolbar-btn",
+                                title: "Pending changes",
+                                aria_label: "Show pending tracked changes",
+                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
+                                onclick: move |_| {
+                                    let cur = *track_pane_open.read();
+                                    track_pane_open.set(!cur);
+                                    let v = *changes_tick.read();
+                                    changes_tick.set(v.wrapping_add(1));
+                                },
+                                "Changes"
+                            }
+                        }
                     }
                 }
             }
@@ -844,6 +1083,10 @@ pub fn Writer(id: String) -> Element {
                                             char_count.set(cc);
                                             doc_body_text.set(text);
                                             schedule_save();
+                                            if *track_pane_open.read() {
+                                                let v = *changes_tick.read();
+                                                changes_tick.set(v.wrapping_add(1));
+                                            }
                                         }
                                     },
                                 }
@@ -970,6 +1213,88 @@ pub fn Writer(id: String) -> Element {
                         }
                     }
                 },
+            }
+
+            {
+                let _ = changes_tick.read();
+                if *track_pane_open.read() {
+                    let changes = list_pending_changes();
+                    rsx! {
+                        aside { class: "track-changes-pane",
+                            header { class: "track-changes-header",
+                                strong { "Track changes" }
+                                button {
+                                    class: "btn-icon",
+                                    aria_label: "Close track changes",
+                                    onclick: move |_| track_pane_open.set(false),
+                                    "\u{2715}"
+                                }
+                            }
+                            div { class: "track-changes-actions",
+                                button {
+                                    class: "btn btn-sm",
+                                    onclick: move |_| {
+                                        accept_all_changes();
+                                        let v = *changes_tick.read();
+                                        changes_tick.set(v.wrapping_add(1));
+                                    },
+                                    "Accept all"
+                                }
+                                button {
+                                    class: "btn btn-sm",
+                                    onclick: move |_| {
+                                        reject_all_changes();
+                                        let v = *changes_tick.read();
+                                        changes_tick.set(v.wrapping_add(1));
+                                    },
+                                    "Reject all"
+                                }
+                            }
+                            div { class: "track-changes-list",
+                                if changes.is_empty() {
+                                    p { class: "muted", "No pending changes." }
+                                }
+                                for ch in changes.iter().cloned() {
+                                    {
+                                        let accept_id = ch.dom_id.clone();
+                                        let reject_id = ch.dom_id.clone();
+                                        rsx! {
+                                            div { key: "{ch.dom_id}", class: "track-changes-item",
+                                                span { class: "track-changes-kind", "{ch.kind}" }
+                                                span { class: "track-changes-text", "{ch.text}" }
+                                                span { class: "muted", "{ch.author}" }
+                                                div { class: "track-changes-buttons",
+                                                    button {
+                                                        class: "btn-sm",
+                                                        aria_label: "Accept change",
+                                                        onclick: move |_| {
+                                                            accept_change(&accept_id);
+                                                            let v = *changes_tick.read();
+                                                            changes_tick.set(v.wrapping_add(1));
+                                                        },
+                                                        "\u{2713}"
+                                                    }
+                                                    button {
+                                                        class: "btn-sm",
+                                                        aria_label: "Reject change",
+                                                        onclick: move |_| {
+                                                            reject_change(&reject_id);
+                                                            let v = *changes_tick.read();
+                                                            changes_tick.set(v.wrapping_add(1));
+                                                        },
+                                                        "\u{2715}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    rsx! {}
+                }
             }
         }
     }
