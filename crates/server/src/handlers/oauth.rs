@@ -68,28 +68,22 @@ pub async fn oauth_callback(req: &mut Request, depot: &mut Depot, res: &mut Resp
     let provider: String = req.param("provider").unwrap_or_default();
     let code: Option<String> = req.query("code");
 
-    let code = match code {
-        Some(c) => c,
-        None => {
-            res.status_code(StatusCode::BAD_REQUEST);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Validation("Missing authorization code".into()).to_response(),
-            )));
-            return;
-        }
-    };
+    // The authorization code must never be echoed back to the caller (it is a
+    // bearer-equivalent secret). Token exchange / user provisioning is not yet
+    // implemented, so respond honestly with 501 rather than reflecting input or
+    // pretending success. A complete implementation must also persist and
+    // verify the `state` value issued in `oauth_redirect` to prevent CSRF.
+    if code.is_none() {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("Missing authorization code".into()).to_response(),
+        )));
+        return;
+    }
 
-    // In a complete implementation:
-    // 1. Exchange code for access token with provider
-    // 2. Fetch user profile from provider
-    // 3. Find or create user in our DB
-    // 4. Generate JWT
-    // 5. Redirect to frontend with token
-
-    res.status_code(StatusCode::OK);
-    res.render(Json(ApiResponse::ok(serde_json::json!({
-        "provider": provider,
-        "code": code,
-        "message": "OAuth callback received. Token exchange not yet implemented.",
-    }))));
+    res.status_code(StatusCode::NOT_IMPLEMENTED);
+    res.render(Json(ApiResponse::<()>::err(
+        AppError::Validation(format!("OAuth login via {provider} is not yet available"))
+            .to_response(),
+    )));
 }

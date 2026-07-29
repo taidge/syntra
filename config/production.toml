@@ -4,7 +4,7 @@ port = 8080
 cors_origins = []
 
 [database]
-url = "postgres://contrix:contrix@localhost:5432/contrix_office"
+url = "sqlite:///data/contrix.db?mode=rwc"
 max_connections = 20
 
 [auth]
@@ -13,9 +13,16 @@ jwt_expiry_hours = 8
 refresh_expiry_days = 7
 
 [storage]
+backend = "local"
 base_path = "/data/files"
 max_upload_size_mb = 500
 default_quota_mb = 10240
 
 [search]
 index_path = "/data/search_index"
+
+[rate_limit]
+max_requests = 100
+window_seconds = 60
+enabled = true
+trust_forwarded_headers = false

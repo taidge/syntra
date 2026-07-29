@@ -35,7 +35,11 @@ pub async fn notifications_ws(req: &mut Request, depot: &mut Depot, res: &mut Re
         .await;
 }
 
-async fn handle_ws(mut ws: WebSocket, notifications: Arc<crate::services::NotificationBus>, user_id: String) {
+async fn handle_ws(
+    mut ws: WebSocket,
+    notifications: Arc<crate::services::NotificationBus>,
+    user_id: String,
+) {
     let mut rx: broadcast::Receiver<String> = notifications.subscribe(&user_id).await;
     let mut heartbeat = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     heartbeat.tick().await;

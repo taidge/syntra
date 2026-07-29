@@ -456,7 +456,7 @@ pub struct Room {
     pub updated_at: String,
     pub logo_url: Option<String>,
     pub color: Option<String>,
-    pub storage_quota: Option<i32>,
+    pub storage_quota: Option<i64>,
     pub auto_delete_days: Option<i32>,
     pub auto_delete_enabled: bool,
 }
@@ -474,7 +474,7 @@ pub struct NewRoom {
     pub updated_at: String,
     pub logo_url: Option<String>,
     pub color: Option<String>,
-    pub storage_quota: Option<i32>,
+    pub storage_quota: Option<i64>,
     pub auto_delete_days: Option<i32>,
     pub auto_delete_enabled: bool,
 }

@@ -23,6 +23,28 @@ use crate::state::AppState;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Whether `user_id` is a member or the owner of `room_id`. Room owners are not
+/// necessarily present in `room_members`, so both are checked.
+fn is_room_participant(conn: &mut diesel::SqliteConnection, room_id: &str, user_id: &str) -> bool {
+    let is_member = rm::room_members
+        .filter(rm::room_id.eq(room_id))
+        .filter(rm::user_id.eq(user_id))
+        .count()
+        .get_result::<i64>(conn)
+        .unwrap_or(0)
+        > 0;
+    if is_member {
+        return true;
+    }
+    r::rooms
+        .filter(r::id.eq(room_id))
+        .filter(r::owner_id.eq(user_id))
+        .count()
+        .get_result::<i64>(conn)
+        .unwrap_or(0)
+        > 0
+}
+
 fn room_model_to_response(row: Room, member_count: u32) -> RoomResponse {
     RoomResponse {
         id: row.id.parse().unwrap_or_default(),
@@ -41,7 +63,6 @@ fn file_model_to_response(row: File) -> FileResponse {
     FileResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
-        path: row.path,
         mime_type: row.mime_type,
         size: row.size,
         owner_id: row.owner_id.parse().unwrap_or_default(),
@@ -241,7 +262,7 @@ pub async fn list_rooms(depot: &mut Depot, res: &mut Response) {
 #[handler]
 pub async fn get_room(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -271,6 +292,13 @@ pub async fn get_room(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         .optional()
     {
         Ok(Some(room)) => {
+            if !is_room_participant(&mut conn, &room_id_param, &uid) {
+                res.status_code(StatusCode::FORBIDDEN);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::Forbidden("Not a member of this room".into()).to_response(),
+                )));
+                return;
+            }
             let count: i64 = rm::room_members
                 .filter(rm::room_id.eq(&room.id))
                 .count()
@@ -753,7 +781,7 @@ pub async fn remove_member(req: &mut Request, depot: &mut Depot, res: &mut Respo
 #[handler]
 pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -776,6 +804,14 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
             return;
         }
     };
+
+    if !is_room_participant(&mut conn, &room_id_param, &uid) {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Forbidden("Not a member of this room".into()).to_response(),
+        )));
+        return;
+    }
 
     match rm::room_members
         .inner_join(u::users.on(rm::user_id.eq(u::id)))
@@ -887,8 +923,12 @@ pub async fn list_room_files(req: &mut Request, depot: &mut Depot, res: &mut Res
         .load::<File>(&mut conn)
     {
         Ok(rows) => {
-            let file_list: Vec<FileResponse> =
+            let mut file_list: Vec<FileResponse> =
                 rows.into_iter().map(file_model_to_response).collect();
+            for r in &mut file_list {
+                r.shared_with_count =
+                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string());
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
         }
@@ -1082,7 +1122,7 @@ pub async fn set_room_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
     #[derive(serde::Deserialize)]
     struct QuotaBody {
-        storage_quota: Option<i32>,
+        storage_quota: Option<i64>,
     }
 
     let body: QuotaBody = match req.parse_json().await {

@@ -221,18 +221,12 @@ fn sheet_to_xml(sheet: &Sheet, ss_index: &HashMap<String, usize>) -> String {
                 }
                 // Number
                 (CellValue::Number(n), None) => {
-                    xml.push_str(&format!(
-                        "<c r=\"{}\" t=\"n\"><v>{}</v></c>",
-                        cell_ref, n
-                    ));
+                    xml.push_str(&format!("<c r=\"{}\" t=\"n\"><v>{}</v></c>", cell_ref, n));
                 }
                 // Text — reference shared string
                 (CellValue::Text(s), None) => {
                     if let Some(idx) = ss_index.get(s) {
-                        xml.push_str(&format!(
-                            "<c r=\"{}\" t=\"s\"><v>{}</v></c>",
-                            cell_ref, idx
-                        ));
+                        xml.push_str(&format!("<c r=\"{}\" t=\"s\"><v>{}</v></c>", cell_ref, idx));
                     }
                 }
                 // Boolean
@@ -303,9 +297,7 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
     };
 
     for name in &sheet_names {
-        let range = xlsx
-            .worksheet_range(name)
-            .map_err(|e| e.to_string())?;
+        let range = xlsx.worksheet_range(name).map_err(|e| e.to_string())?;
         let mut sheet = Sheet::new(name.clone());
         let start = range.start().unwrap_or((0, 0));
         for (row, col, value) in range.cells() {

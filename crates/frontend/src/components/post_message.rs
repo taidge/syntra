@@ -31,9 +31,15 @@ pub enum HostMessage {
 }
 
 pub fn post_to_host(msg: &HostMessage) {
-    let Some(window) = web_sys::window() else { return; };
-    let Ok(Some(parent)) = window.parent() else { return; };
-    let Ok(payload) = serde_json::to_string(msg) else { return; };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(Some(parent)) = window.parent() else {
+        return;
+    };
+    let Ok(payload) = serde_json::to_string(msg) else {
+        return;
+    };
     let _ = parent.post_message(&payload.into(), "*");
 }
 
@@ -88,8 +94,7 @@ pub fn PostMessageBridge() -> Element {
             }
         });
         if let Some(window) = web_sys::window() {
-            let _ = window
-                .add_event_listener_with_callback("message", cb.as_ref().unchecked_ref());
+            let _ = window.add_event_listener_with_callback("message", cb.as_ref().unchecked_ref());
         }
         cb.forget();
     });

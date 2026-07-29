@@ -7,8 +7,11 @@ use crate::state::{self, AuthState, FileResponse};
 /// Renders the grid/list of files and folders backed by the live API.
 #[component]
 pub fn FileList(
-    current_parent_id: Option<Uuid>,
-    refresh_key: u64,
+    current_parent_id: ReadSignal<Option<Uuid>>,
+    refresh_key: ReadSignal<u64>,
+    /// Case-insensitive name filter applied to the displayed files.
+    #[props(default)]
+    filter: ReadSignal<String>,
     on_open_folder: EventHandler<FileResponse>,
     on_refresh: EventHandler<()>,
 ) -> Element {
@@ -18,10 +21,11 @@ pub fn FileList(
 
     let files = use_resource(move || {
         let token = auth.read().token.clone().unwrap_or_default();
-        let path = current_parent_id
+        let path = current_parent_id()
             .map(|id| format!("/files?parent_id={id}"))
             .unwrap_or_else(|| "/files".to_string());
-        let _refresh_key = refresh_key;
+        // Reading the key makes the resource re-fetch whenever it is bumped.
+        let _refresh_key = refresh_key();
         async move {
             state::api_get::<Vec<FileResponse>>(&path, &token)
                 .await
@@ -34,24 +38,32 @@ pub fn FileList(
             button {
                 class: if *view_mode.read() == "grid" { "toggle-btn active" } else { "toggle-btn" },
                 onclick: move |_| view_mode.set("grid".to_string()),
-                "Grid"
+                {crate::i18n::t("file_list.view_grid")}
             }
             button {
                 class: if *view_mode.read() == "list" { "toggle-btn active" } else { "toggle-btn" },
                 onclick: move |_| view_mode.set("list".to_string()),
-                "List"
+                {crate::i18n::t("file_list.view_list")}
             }
         }
 
         match &*files.read() {
             Some(rows) if rows.is_empty() => rsx! {
                 div { class: "empty-state",
-                    h3 { "This folder is empty" }
-                    p { "Upload files or create a folder to get started." }
+                    h3 { {crate::i18n::t("file_list.empty_title")} }
+                    p { {crate::i18n::t("file_list.empty_hint")} }
                 }
             },
             Some(rows) => {
-                let rows = rows.clone();
+                let needle = filter().trim().to_lowercase();
+                let rows: Vec<FileResponse> = if needle.is_empty() {
+                    rows.clone()
+                } else {
+                    rows.iter()
+                        .filter(|f| f.name.to_lowercase().contains(&needle))
+                        .cloned()
+                        .collect()
+                };
                 if *view_mode.read() == "grid" {
                     rsx! {
                         div { class: "file-grid",
@@ -93,10 +105,10 @@ pub fn FileList(
                         table { class: "file-table",
                             thead {
                                 tr {
-                                    th { "Name" }
-                                    th { "Size" }
-                                    th { "Modified" }
-                                    th { "Actions" }
+                                    th { {crate::i18n::t("file_list.col_name")} }
+                                    th { {crate::i18n::t("file_list.col_size")} }
+                                    th { {crate::i18n::t("file_list.col_modified")} }
+                                    th { {crate::i18n::t("file_list.col_actions")} }
                                 }
                             }
                             tbody {
@@ -110,7 +122,7 @@ pub fn FileList(
             }
             None => rsx! {
                 div { class: "empty-state",
-                    h3 { "Loading files..." }
+                    h3 { {crate::i18n::t("file_list.loading")} }
                 }
             },
         }
@@ -122,7 +134,7 @@ fn file_icon(entry: &FileResponse) -> &'static str {
     if entry.is_folder {
         return "F";
     }
-    match infer_doc_type(entry).as_deref() {
+    match infer_document_type(entry).as_deref() {
         Some("writer") => "W",
         Some("calc") => "C",
         Some("slides") => "S",
@@ -136,7 +148,7 @@ fn icon_class(entry: &FileResponse) -> &'static str {
     if entry.is_folder {
         return "file-icon folder";
     }
-    match infer_doc_type(entry).as_deref() {
+    match infer_document_type(entry).as_deref() {
         Some("writer") => "file-icon writer",
         Some("calc") => "file-icon calc",
         Some("slides") => "file-icon slides",
@@ -145,7 +157,7 @@ fn icon_class(entry: &FileResponse) -> &'static str {
     }
 }
 
-fn infer_doc_type(entry: &FileResponse) -> Option<String> {
+fn infer_document_type(entry: &FileResponse) -> Option<String> {
     let mime = entry.mime_type.as_deref()?;
     if mime.contains("contrix.writer") {
         Some("writer".to_string())
@@ -162,11 +174,12 @@ fn infer_doc_type(entry: &FileResponse) -> Option<String> {
 
 /// Route for opening a file entry, when it maps to an internal Contrix document.
 fn file_route(entry: &FileResponse) -> Option<Route> {
-    if entry.is_folder || infer_doc_type(entry).is_none() {
+    if entry.is_folder || infer_document_type(entry).is_none() {
         return None;
     }
+    let document_id = entry.document_id?;
     Some(Route::DocumentEditor {
-        id: entry.id.to_string(),
+        id: document_id.to_string(),
     })
 }
 
@@ -248,14 +261,15 @@ fn render_rename_button(
     rsx! {
         button {
             class: "btn-icon",
-            title: "Rename",
+            title: crate::i18n::t("file_list.rename"),
             onclick: move |_| {
                 let Some(window) = web_sys::window() else {
                     return;
                 };
-                let Ok(Some(new_name)) =
-                    window.prompt_with_message_and_default("Rename item", &file.name)
-                else {
+                let Ok(Some(new_name)) = window.prompt_with_message_and_default(
+                    &crate::i18n::t("file_list.rename_prompt"),
+                    &file.name,
+                ) else {
                     return;
                 };
                 let trimmed = new_name.trim().to_string();
@@ -279,7 +293,7 @@ fn render_rename_button(
                     }
                 });
             },
-            "Rename"
+            {crate::i18n::t("file_list.rename")}
         }
     }
 }
@@ -290,9 +304,9 @@ fn render_delete_button(
     on_refresh: EventHandler<()>,
 ) -> Element {
     let label = if file.is_folder {
-        "Trash Folder"
+        crate::i18n::t("file_list.trash_folder")
     } else {
-        "Trash File"
+        crate::i18n::t("file_list.trash_file")
     };
 
     rsx! {
@@ -303,10 +317,9 @@ fn render_delete_button(
                 let Some(window) = web_sys::window() else {
                     return;
                 };
-                let Ok(confirmed) = window.confirm_with_message(&format!(
-                    "Move \"{}\" to trash?",
-                    file.name
-                )) else {
+                let Ok(confirmed) = window.confirm_with_message(
+                    &crate::i18n::t("file_list.confirm_trash").replace("{name}", &file.name),
+                ) else {
                     return;
                 };
                 if !confirmed {
@@ -324,7 +337,7 @@ fn render_delete_button(
                     }
                 });
             },
-            "Delete"
+            {crate::i18n::t("file_list.delete")}
         }
     }
 }

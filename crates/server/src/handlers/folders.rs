@@ -8,8 +8,12 @@ use uuid::Uuid;
 use contrix_core::dto::{ApiResponse, CreateFolderRequest, FileResponse};
 use contrix_core::error::AppError;
 use contrix_core::models::{File, NewFile};
+use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::files::dsl as f;
 
+use crate::handlers::access::{
+    authorize_file_access, check_room_access, load_accessible_folder, load_accessible_target_folder,
+};
 use crate::middleware::auth::get_user_id;
 use crate::state::AppState;
 
@@ -17,79 +21,15 @@ use crate::state::AppState;
 // POST /folders
 // ---------------------------------------------------------------------------
 
-fn check_room_access(
-    conn: &mut diesel::SqliteConnection,
-    user_id: &str,
-    room_id: &str,
-    required_role: &str,
-) -> Result<(), AppError> {
-    use contrix_core::schema::room_members::dsl as rm;
-
-    let member = rm::room_members
-        .filter(rm::room_id.eq(room_id))
-        .filter(rm::user_id.eq(user_id))
-        .select(rm::role)
+fn document_id_for_file(conn: &mut diesel::SqliteConnection, file_id: &str) -> Option<Uuid> {
+    d::documents
+        .filter(d::file_id.eq(file_id))
+        .select(d::id)
         .first::<String>(conn)
         .optional()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-    match member {
-        Some(role) => {
-            let allowed = match required_role {
-                "viewer" => true,
-                "editor" => role == "owner" || role == "editor" || role == "admin",
-                "admin" => role == "owner" || role == "admin",
-                _ => false,
-            };
-            if allowed {
-                Ok(())
-            } else {
-                Err(AppError::Forbidden("Insufficient room permissions".into()))
-            }
-        }
-        None => Err(AppError::Forbidden("Not a member of this room".into())),
-    }
-}
-
-fn authorize_folder_access(
-    conn: &mut diesel::SqliteConnection,
-    row: &File,
-    user_id: &str,
-    required_role: &str,
-) -> Result<(), AppError> {
-    if !row.is_folder {
-        return Err(AppError::Validation("Target is not a folder".into()));
-    }
-
-    if let Some(room_id) = row.room_id.as_deref() {
-        check_room_access(conn, user_id, room_id, required_role)
-    } else if row.owner_id == user_id {
-        Ok(())
-    } else {
-        Err(AppError::NotFound("Folder not found".into()))
-    }
-}
-
-fn load_accessible_folder(
-    conn: &mut diesel::SqliteConnection,
-    folder_id: &str,
-    user_id: &str,
-    required_role: &str,
-) -> Result<Option<File>, AppError> {
-    let row = f::files
-        .filter(f::id.eq(folder_id))
-        .filter(f::is_folder.eq(true))
-        .first::<File>(conn)
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-    match row {
-        Some(row) => {
-            authorize_folder_access(conn, &row, user_id, required_role)?;
-            Ok(Some(row))
-        }
-        None => Ok(None),
-    }
+        .ok()
+        .flatten()
+        .and_then(|id| id.parse().ok())
 }
 
 #[handler]
@@ -135,7 +75,7 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
     };
 
     let room_id_for_new_folder = if let Some(parent_id) = parent_id_str.as_deref() {
-        match load_accessible_folder(&mut conn, parent_id, &uid, "editor") {
+        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
             Ok(Some(parent)) => {
                 if let Some(requested_room_id) = requested_room_id.as_deref() {
                     if parent.room_id.as_deref() != Some(requested_room_id) {
@@ -203,7 +143,6 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
             let resp = FileResponse {
                 id: folder_id,
                 name: body.name,
-                path: path_val,
                 mime_type: None,
                 size: 0,
                 owner_id: uid.parse().unwrap_or_default(),
@@ -261,10 +200,11 @@ pub async fn get_folder(req: &mut Request, depot: &mut Depot, res: &mut Response
 
     match load_accessible_folder(&mut conn, &folder_id_param, &uid, "viewer") {
         Ok(Some(row)) => {
+            let shared_with_count =
+                crate::handlers::access::count_shares_for_file(&mut conn, &row.id);
             let resp = FileResponse {
                 id: row.id.parse().unwrap_or_default(),
                 name: row.name,
-                path: row.path,
                 mime_type: None,
                 size: 0,
                 owner_id: uid.parse().unwrap_or_default(),
@@ -274,7 +214,7 @@ pub async fn get_folder(req: &mut Request, depot: &mut Depot, res: &mut Response
                 trashed_at: None,
                 created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
                 updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
-                shared_with_count: 0,
+                shared_with_count,
                 document_id: None,
             };
             res.status_code(StatusCode::OK);
@@ -359,25 +299,29 @@ pub async fn list_folder_children(req: &mut Request, depot: &mut Depot, res: &mu
         Ok(rows) => {
             let children: Vec<FileResponse> = rows
                 .into_iter()
-                .map(|row| FileResponse {
-                    id: row.id.parse().unwrap_or_default(),
-                    name: row.name,
-                    path: row.path,
-                    mime_type: row.mime_type,
-                    size: row.size,
-                    owner_id: row.owner_id.parse().unwrap_or_default(),
-                    parent_id: row.parent_id.as_deref().and_then(|s| s.parse().ok()),
-                    is_folder: row.is_folder,
-                    is_trashed: row.is_trashed,
-                    trashed_at: row
-                        .trashed_at
-                        .as_deref()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .map(|d| d.with_timezone(&Utc)),
-                    created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
-                    updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
-                    shared_with_count: 0,
-                    document_id: None,
+                .map(|row| {
+                    let document_id = document_id_for_file(&mut conn, &row.id);
+                    let shared_with_count =
+                        crate::handlers::access::count_shares_for_file(&mut conn, &row.id);
+                    FileResponse {
+                        id: row.id.parse().unwrap_or_default(),
+                        name: row.name,
+                        mime_type: row.mime_type,
+                        size: row.size,
+                        owner_id: row.owner_id.parse().unwrap_or_default(),
+                        parent_id: row.parent_id.as_deref().and_then(|s| s.parse().ok()),
+                        is_folder: row.is_folder,
+                        is_trashed: row.is_trashed,
+                        trashed_at: row
+                            .trashed_at
+                            .as_deref()
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|d| d.with_timezone(&Utc)),
+                        created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
+                        updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+                        shared_with_count,
+                        document_id,
+                    }
                 })
                 .collect();
             res.status_code(StatusCode::OK);
@@ -626,7 +570,7 @@ pub async fn get_folder_path(req: &mut Request, depot: &mut Depot, res: &mut Res
 
         match folder {
             Ok(Some(row)) => {
-                if authorize_folder_access(&mut conn, &row, &uid, "viewer").is_err() {
+                if authorize_file_access(&mut conn, &row, &uid, "viewer").is_err() {
                     break;
                 }
                 let fid = row.id;

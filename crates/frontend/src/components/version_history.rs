@@ -32,18 +32,15 @@ pub fn VersionHistory(props: VersionHistoryProps) -> Element {
     let token = auth.read().token.clone().unwrap_or_default();
     let doc_id_for_fetch = props.doc_id.clone();
     let token_for_fetch = token.clone();
-    let mut refresh_tick = use_signal(|| 0u32);
+    let refresh_tick = use_signal(|| 0u32);
 
     let versions = use_resource(move || {
         let _ = refresh_tick.read();
         let id = doc_id_for_fetch.clone();
         let t = token_for_fetch.clone();
         async move {
-            crate::state::api_get::<Vec<VersionItem>>(
-                &format!("/documents/{id}/versions"),
-                &t,
-            )
-            .await
+            crate::state::api_get::<Vec<VersionItem>>(&format!("/documents/{id}/versions"), &t)
+                .await
         }
     });
 
@@ -93,11 +90,11 @@ pub fn VersionHistory(props: VersionHistoryProps) -> Element {
                                     let did = restore_id.clone();
                                     let t = restore_token.clone();
                                     let bus = toast_bus;
-                                    let mut tick = refresh_tick;
+                                    let tick = refresh_tick;
                                     rsx! {
                                         button {
                                             class: "btn btn-outline btn-sm",
-                                            aria_label: "Restore version {v.version_number}",
+                                            aria_label: crate::i18n::t("versions.restore_version").replace("{n}", &v.version_number.to_string()),
                                             onclick: move |_| {
                                                 let vid = vid.clone();
                                                 let did = did.clone();

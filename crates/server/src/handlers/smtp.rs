@@ -196,19 +196,11 @@ pub async fn test_smtp(depot: &mut Depot, res: &mut Response) {
     };
 
     // Verify that SMTP settings exist before attempting a test.
-    match smtp::smtp_settings
+    let settings = match smtp::smtp_settings
         .first::<SmtpSettings>(&mut conn)
         .optional()
     {
-        Ok(Some(_settings)) => {
-            // In a full implementation we would open an SMTP connection here and
-            // send a test message. For now, we validate that settings are present
-            // and return success.
-            res.status_code(StatusCode::OK);
-            res.render(Json(ApiResponse::ok(serde_json::json!({
-                "message": "SMTP settings validated successfully. Test email dispatch is not yet implemented."
-            }))));
-        }
+        Ok(Some(s)) => s,
         Ok(None) => {
             res.status_code(StatusCode::BAD_REQUEST);
             res.render(Json(ApiResponse::<()>::err(
@@ -217,11 +209,49 @@ pub async fn test_smtp(depot: &mut Depot, res: &mut Response) {
                 )
                 .to_response(),
             )));
+            return;
         }
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+    drop(conn);
+
+    // Actually attempt to deliver a test message so the admin gets a real
+    // result. lettre's transport is blocking, so run it off the async runtime.
+    let pool = state.db.clone();
+    let to = settings.from_email.clone();
+    let send_result = tokio::task::spawn_blocking(move || {
+        crate::services::EmailService::send(
+            &pool,
+            &to,
+            "Contrix Office SMTP test",
+            "<p>This is a test email confirming your SMTP settings work.</p>",
+        )
+    })
+    .await;
+
+    match send_result {
+        Ok(Ok(())) => {
+            res.status_code(StatusCode::OK);
+            res.render(Json(ApiResponse::ok(serde_json::json!({
+                "message": format!("Test email sent to {}", settings.from_email)
+            }))));
+        }
+        Ok(Err(e)) => {
+            res.status_code(StatusCode::BAD_GATEWAY);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Internal(format!("SMTP test failed: {e}")).to_response(),
+            )));
+        }
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Internal(format!("SMTP test task failed: {e}")).to_response(),
             )));
         }
     }

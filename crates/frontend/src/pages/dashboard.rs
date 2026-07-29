@@ -2,6 +2,19 @@ use dioxus::prelude::*;
 
 use crate::Route;
 use crate::components::navbar::Navbar;
+use crate::state::{UserProfile, api_get};
+
+fn format_size(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
 
 /// Main dashboard displayed after the user logs in.
 #[component]
@@ -19,15 +32,21 @@ pub fn Dashboard() -> Element {
         }
     });
 
+    let me = use_resource(move || {
+        let token = auth.read().token.clone().unwrap_or_default();
+        async move { api_get::<UserProfile>("/auth/me", &token).await }
+    });
+
     let welcome = crate::i18n::t("nav.dashboard");
     let recent_label = crate::i18n::t("dashboard.recent");
+    let loading_label = crate::i18n::t("common.loading");
+    let empty_recent_label = crate::i18n::t("dashboard.recent_empty");
     let new_writer = crate::i18n::t("dashboard.new_writer");
     let new_calc = crate::i18n::t("dashboard.new_calc");
     let new_slides = crate::i18n::t("dashboard.new_slides");
     let new_whiteboard = crate::i18n::t("dashboard.new_whiteboard");
     let template_label = crate::i18n::t("dashboard.from_template");
     let activity_label = crate::i18n::t("dashboard.activity");
-    let storage_text = crate::i18n::t("dashboard.storage_text");
     let storage_label = crate::i18n::t("profile.storage");
 
     rsx! {
@@ -106,44 +125,13 @@ pub fn Dashboard() -> Element {
                                 }
                             }
                         },
-                        // Fallback: show placeholder cards while loading or if empty
+                        // Still loading: show a neutral loading hint.
+                        None => rsx! {
+                            p { class: "doc-meta", "{loading_label}" }
+                        },
+                        // Loaded but empty: honest empty state, no fabricated docs.
                         _ => rsx! {
-                            div { class: "doc-card",
-                                div { class: "doc-card-preview writer-preview",
-                                    span { "W" }
-                                }
-                                div { class: "doc-card-info",
-                                    h4 { "Project Proposal" }
-                                    p { class: "doc-meta", "Modified 2 hours ago" }
-                                }
-                            }
-                            div { class: "doc-card",
-                                div { class: "doc-card-preview calc-preview",
-                                    span { "C" }
-                                }
-                                div { class: "doc-card-info",
-                                    h4 { "Budget 2026" }
-                                    p { class: "doc-meta", "Modified yesterday" }
-                                }
-                            }
-                            div { class: "doc-card",
-                                div { class: "doc-card-preview slides-preview",
-                                    span { "S" }
-                                }
-                                div { class: "doc-card-info",
-                                    h4 { "Q1 Review" }
-                                    p { class: "doc-meta", "Modified 3 days ago" }
-                                }
-                            }
-                            div { class: "doc-card",
-                                div { class: "doc-card-preview whiteboard-preview",
-                                    span { "B" }
-                                }
-                                div { class: "doc-card-info",
-                                    h4 { "Architecture Diagram" }
-                                    p { class: "doc-meta", "Modified last week" }
-                                }
-                            }
+                            p { class: "doc-meta", "{empty_recent_label}" }
                         },
                     }
                 }
@@ -152,11 +140,34 @@ pub fn Dashboard() -> Element {
             // Storage usage
             div { class: "storage-info",
                 h3 { "{storage_label}" }
-                div { class: "storage-details",
-                    div { class: "storage-bar-large",
-                        div { class: "storage-fill", style: "width: 12%" }
-                    }
-                    p { class: "storage-text", "{storage_text}" }
+                match me.read().as_ref() {
+                    None => rsx! {
+                        p { class: "storage-text", "{loading_label}" }
+                    },
+                    Some(Err(_)) => rsx! {
+                        p { class: "storage-text", {crate::i18n::t("dashboard.storage_unavailable")} }
+                    },
+                    Some(Ok(profile)) => {
+                        let pct = if profile.storage_quota > 0 {
+                            ((profile.storage_used as f64 / profile.storage_quota as f64) * 100.0)
+                                .clamp(0.0, 100.0)
+                        } else {
+                            0.0
+                        };
+                        let used = format_size(profile.storage_used);
+                        let quota = format_size(profile.storage_quota);
+                        let usage = crate::i18n::t("dashboard.storage_usage")
+                            .replace("{used}", &used)
+                            .replace("{quota}", &quota);
+                        rsx! {
+                            div { class: "storage-details",
+                                div { class: "storage-bar-large",
+                                    div { class: "storage-fill", style: "width: {pct}%" }
+                                }
+                                p { class: "storage-text", "{usage}" }
+                            }
+                        }
+                    },
                 }
             }
 
@@ -168,35 +179,26 @@ pub fn Dashboard() -> Element {
                     match &*recent_docs.read() {
                         Some(docs) if !docs.is_empty() => rsx! {
                             for doc in docs.iter().take(5) {
-                                div { class: "activity-item",
-                                    span { class: "activity-dot" }
-                                    span { "You edited " }
-                                    strong { "{doc.name}" }
-                                    span { class: "activity-time", " - {doc.updated_at}" }
+                                {
+                                    let edited = crate::i18n::t("dashboard.activity_edited")
+                                        .replace("{name}", &doc.name);
+                                    let modified = crate::i18n::t("dashboard.modified")
+                                        .replace("{when}", &doc.updated_at);
+                                    rsx! {
+                                        div { class: "activity-item",
+                                            span { class: "activity-dot" }
+                                            span { "{edited}" }
+                                            span { class: "activity-time", "{modified}" }
+                                        }
+                                    }
                                 }
                             }
                         },
-                        // Fallback: show placeholder activity while loading
+                        None => rsx! {
+                            p { class: "doc-meta", "{loading_label}" }
+                        },
                         _ => rsx! {
-                            div { class: "activity-item",
-                                span { class: "activity-dot" }
-                                span { "You edited " }
-                                strong { "Project Proposal" }
-                                span { class: "activity-time", " - 2 hours ago" }
-                            }
-                            div { class: "activity-item",
-                                span { class: "activity-dot" }
-                                span { "You created " }
-                                strong { "Budget 2026" }
-                                span { class: "activity-time", " - yesterday" }
-                            }
-                            div { class: "activity-item",
-                                span { class: "activity-dot" }
-                                span { "You shared " }
-                                strong { "Q1 Review" }
-                                span { " with 3 people" }
-                                span { class: "activity-time", " - 3 days ago" }
-                            }
+                            p { class: "doc-meta", {crate::i18n::t("dashboard.activity_empty")} }
                         },
                     }
                 }

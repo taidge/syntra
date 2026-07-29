@@ -167,8 +167,14 @@ pub async fn set_user_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
     };
 
     let target_user_id = body.user_id.to_string();
-    // Convert MB to bytes
-    let quota_bytes: i64 = body.storage_quota_mb * 1024 * 1024;
+    let quota_bytes = body.storage_quota;
+    if quota_bytes < 0 {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("storage_quota must be non-negative bytes".into()).to_response(),
+        )));
+        return;
+    }
 
     let mut conn = match state.db.get() {
         Ok(c) => c,

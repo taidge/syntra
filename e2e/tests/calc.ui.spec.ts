@@ -36,7 +36,7 @@ async function createCalcDoc(request: APIRequestContext): Promise<CalcFixture> {
     // 2. Create a calc document for that user.
     const doc = await request.post(`${API_BASE}/documents`, {
         headers: { Authorization: `Bearer ${token}` },
-        data: { name: 'E2E Calc', doc_type: 'calc' },
+        data: { name: 'E2E Calc', document_type: 'calc' },
     });
     expect(doc.ok()).toBeTruthy();
     const docBody = await doc.json();

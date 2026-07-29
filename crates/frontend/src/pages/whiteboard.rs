@@ -1,14 +1,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use dioxus::prelude::*;
-use gloo_timers::callback::Timeout;
-use serde::Deserialize;
 use crate::Route;
 use crate::components::menubar::Menubar;
 use crate::components::navbar::Navbar;
 use crate::components::toast::{Toast, ToastKind, push_toast};
 use crate::state::{AuthState, api_get, api_put, export_document};
+use dioxus::prelude::*;
+use gloo_timers::callback::Timeout;
+use serde::Deserialize;
 
 const VIEW_W: f64 = 1920.0;
 const VIEW_H: f64 = 1080.0;
@@ -110,10 +110,18 @@ fn element_bbox(e: &serde_json::Value) -> Option<(f64, f64, f64, f64)> {
                     if arr.len() == 2 {
                         let x = arr[0].as_f64().unwrap_or(0.0);
                         let y = arr[1].as_f64().unwrap_or(0.0);
-                        if x < min_x { min_x = x; }
-                        if y < min_y { min_y = y; }
-                        if x > max_x { max_x = x; }
-                        if y > max_y { max_y = y; }
+                        if x < min_x {
+                            min_x = x;
+                        }
+                        if y < min_y {
+                            min_y = y;
+                        }
+                        if x > max_x {
+                            max_x = x;
+                        }
+                        if y > max_y {
+                            max_y = y;
+                        }
                     }
                 }
             }
@@ -127,7 +135,11 @@ fn element_bbox(e: &serde_json::Value) -> Option<(f64, f64, f64, f64)> {
             let x = e.get("x")?.as_f64()?;
             let y = e.get("y")?.as_f64()?;
             let s = e.get("size").and_then(|v| v.as_f64()).unwrap_or(16.0);
-            let len = e.get("content").and_then(|v| v.as_str()).map(|c| c.chars().count()).unwrap_or(1) as f64;
+            let len = e
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|c| c.chars().count())
+                .unwrap_or(1) as f64;
             Some((x, y - s, x + s * 0.6 * len, y + 2.0))
         }
         _ => None,
@@ -150,32 +162,61 @@ fn find_element_at(elements: &[serde_json::Value], x: f64, y: f64) -> Option<usi
 }
 
 fn move_element(el: &mut serde_json::Value, dx: f64, dy: f64) {
-    let ty = el.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
-    let obj = match el.as_object_mut() { Some(o) => o, None => return };
+    let ty = el
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let obj = match el.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
     fn shift(v: &mut serde_json::Value, d: f64) {
-        if let Some(n) = v.as_f64() { *v = serde_json::json!(n + d); }
+        if let Some(n) = v.as_f64() {
+            *v = serde_json::json!(n + d);
+        }
     }
     match ty.as_str() {
         "rect" | "text" => {
-            if let Some(x) = obj.get_mut("x") { shift(x, dx); }
-            if let Some(y) = obj.get_mut("y") { shift(y, dy); }
+            if let Some(x) = obj.get_mut("x") {
+                shift(x, dx);
+            }
+            if let Some(y) = obj.get_mut("y") {
+                shift(y, dy);
+            }
         }
         "circle" => {
-            if let Some(x) = obj.get_mut("cx") { shift(x, dx); }
-            if let Some(y) = obj.get_mut("cy") { shift(y, dy); }
+            if let Some(x) = obj.get_mut("cx") {
+                shift(x, dx);
+            }
+            if let Some(y) = obj.get_mut("cy") {
+                shift(y, dy);
+            }
         }
         "line" => {
-            if let Some(x) = obj.get_mut("x1") { shift(x, dx); }
-            if let Some(y) = obj.get_mut("y1") { shift(y, dy); }
-            if let Some(x) = obj.get_mut("x2") { shift(x, dx); }
-            if let Some(y) = obj.get_mut("y2") { shift(y, dy); }
+            if let Some(x) = obj.get_mut("x1") {
+                shift(x, dx);
+            }
+            if let Some(y) = obj.get_mut("y1") {
+                shift(y, dy);
+            }
+            if let Some(x) = obj.get_mut("x2") {
+                shift(x, dx);
+            }
+            if let Some(y) = obj.get_mut("y2") {
+                shift(y, dy);
+            }
         }
         "pen" => {
             if let Some(points) = obj.get_mut("points").and_then(|p| p.as_array_mut()) {
                 for p in points {
                     if let Some(arr) = p.as_array_mut() {
-                        if let Some(x) = arr.get_mut(0) { shift(x, dx); }
-                        if let Some(y) = arr.get_mut(1) { shift(y, dy); }
+                        if let Some(x) = arr.get_mut(0) {
+                            shift(x, dx);
+                        }
+                        if let Some(y) = arr.get_mut(1) {
+                            shift(y, dy);
+                        }
                     }
                 }
             }
@@ -199,18 +240,30 @@ fn xml_escape(input: &str) -> String {
     s
 }
 
-fn build_svg_string(elements: &[serde_json::Value]) -> String {
+fn build_svg_string(elements: &[serde_json::Value], background_color: &str) -> String {
     let mut s = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1920 1080\" width=\"1920\" height=\"1080\">",
     );
-    s.push_str(r#"<rect width="100%" height="100%" fill="white"/>"#);
+    s.push_str(&format!(
+        r#"<rect width="100%" height="100%" fill="{background_color}"/>"#
+    ));
     for el in elements {
         let ty = el.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let stroke = el.get("stroke").and_then(|v| v.as_str()).unwrap_or("#000000");
-        let sw = el.get("stroke_width").and_then(|v| v.as_f64()).unwrap_or(2.0);
+        let stroke = el
+            .get("stroke")
+            .and_then(|v| v.as_str())
+            .unwrap_or("#000000");
+        let sw = el
+            .get("stroke_width")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(2.0);
         match ty {
             "pen" => {
-                let points = el.get("points").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let points = el
+                    .get("points")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 if points.is_empty() {
                     continue;
                 }
@@ -260,7 +313,10 @@ fn build_svg_string(elements: &[serde_json::Value]) -> String {
                 let x = el.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let y = el.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let content = el.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let col = el.get("color").and_then(|v| v.as_str()).unwrap_or("#000000");
+                let col = el
+                    .get("color")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("#000000");
                 let size = el.get("size").and_then(|v| v.as_f64()).unwrap_or(16.0);
                 s.push_str(&format!(
                     r#"<text x="{x}" y="{y}" fill="{col}" font-size="{size}" font-family="sans-serif">{}</text>"#,
@@ -276,15 +332,24 @@ fn build_svg_string(elements: &[serde_json::Value]) -> String {
 
 fn trigger_download(filename: &str, mime: &str, data: &[u8]) {
     use wasm_bindgen::JsCast;
-    let Some(window) = web_sys::window() else { return };
-    let Some(document) = window.document() else { return };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
     let array = js_sys::Uint8Array::from(data);
     let parts = js_sys::Array::new();
     parts.push(&array.buffer());
     let blob_props = web_sys::BlobPropertyBag::new();
     blob_props.set_type(mime);
-    let Ok(blob) = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &blob_props) else { return };
-    let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else { return };
+    let Ok(blob) = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &blob_props)
+    else {
+        return;
+    };
+    let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+        return;
+    };
     let Ok(anchor_el) = document.create_element("a") else {
         let _ = web_sys::Url::revoke_object_url(&url);
         return;
@@ -304,12 +369,24 @@ fn svg_to_png_and_download(svg_str: &str, filename: &str) {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
-    let Some(window) = web_sys::window() else { return };
-    let Some(document) = window.document() else { return };
-    let Ok(img_el) = document.create_element("img") else { return };
-    let Ok(img) = img_el.dyn_into::<HtmlImageElement>() else { return };
-    let Ok(canvas_el) = document.create_element("canvas") else { return };
-    let Ok(canvas) = canvas_el.dyn_into::<HtmlCanvasElement>() else { return };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Ok(img_el) = document.create_element("img") else {
+        return;
+    };
+    let Ok(img) = img_el.dyn_into::<HtmlImageElement>() else {
+        return;
+    };
+    let Ok(canvas_el) = document.create_element("canvas") else {
+        return;
+    };
+    let Ok(canvas) = canvas_el.dyn_into::<HtmlCanvasElement>() else {
+        return;
+    };
     canvas.set_width(1920);
     canvas.set_height(1080);
     let svg_b64 = base64::engine::general_purpose::STANDARD.encode(svg_str.as_bytes());
@@ -318,13 +395,25 @@ fn svg_to_png_and_download(svg_str: &str, filename: &str) {
     let canvas_for_load = canvas.clone();
     let img_for_load = img.clone();
     let onload = Closure::once_into_js(move || {
-        let Ok(Some(ctx_raw)) = canvas_for_load.get_context("2d") else { return };
-        let Ok(ctx) = ctx_raw.dyn_into::<CanvasRenderingContext2d>() else { return };
+        let Ok(Some(ctx_raw)) = canvas_for_load.get_context("2d") else {
+            return;
+        };
+        let Ok(ctx) = ctx_raw.dyn_into::<CanvasRenderingContext2d>() else {
+            return;
+        };
         let _ = ctx.draw_image_with_html_image_element(&img_for_load, 0.0, 0.0);
-        let Ok(url) = canvas_for_load.to_data_url_with_type("image/png") else { return };
-        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
-        let Ok(anchor_el) = document.create_element("a") else { return };
-        let Ok(anchor) = anchor_el.dyn_into::<web_sys::HtmlAnchorElement>() else { return };
+        let Ok(url) = canvas_for_load.to_data_url_with_type("image/png") else {
+            return;
+        };
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let Ok(anchor_el) = document.create_element("a") else {
+            return;
+        };
+        let Ok(anchor) = anchor_el.dyn_into::<web_sys::HtmlAnchorElement>() else {
+            return;
+        };
         anchor.set_href(&url);
         anchor.set_download(&filename);
         anchor.click();
@@ -336,10 +425,20 @@ fn svg_to_png_and_download(svg_str: &str, filename: &str) {
 fn sanitize_filename(title: &str) -> String {
     let s: String = title
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let trimmed = s.trim();
-    if trimmed.is_empty() { "whiteboard".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "whiteboard".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[component]
@@ -347,6 +446,7 @@ pub fn Whiteboard(id: String) -> Element {
     let _ = use_context::<Signal<String>>().read();
     let mut tool = use_signal(|| "pen".to_string());
     let mut color = use_signal(|| "#000000".to_string());
+    let mut bg_color = use_signal(|| "#ffffff".to_string());
     let mut stroke_width = use_signal(|| 2.0f64);
     let mut doc_title = use_signal(|| crate::i18n::t("editor.whiteboard.untitled"));
     let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
@@ -368,9 +468,7 @@ pub fn Whiteboard(id: String) -> Element {
     let doc_resource = use_resource(move || {
         let id = id_for_resource.clone();
         let token = auth.read().token.clone().unwrap_or_default();
-        async move {
-            api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await
-        }
+        async move { api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await }
     });
 
     use_effect(move || {
@@ -387,10 +485,9 @@ pub fn Whiteboard(id: String) -> Element {
                 flat.extend(wb.elements);
                 elements.set(flat);
                 if let Some(bg) = wb.background_color {
-                    let _ = bg;
+                    bg_color.set(bg);
                 }
             }
-            let _ = undo_stack;
             loaded.set(true);
         }
     });
@@ -398,7 +495,10 @@ pub fn Whiteboard(id: String) -> Element {
     let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
 
     let serialize_whiteboard = move || -> serde_json::Value {
-        serde_json::json!({ "elements": elements.read().clone() })
+        serde_json::json!({
+            "elements": elements.read().clone(),
+            "background_color": bg_color.read().clone(),
+        })
     };
 
     let perform_save = {
@@ -408,9 +508,12 @@ pub fn Whiteboard(id: String) -> Element {
             status.set(crate::i18n::t("common.saving"));
             wasm_bindgen_futures::spawn_local(async move {
                 let req = serde_json::json!({ "content": body });
-                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
+                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token)
+                    .await
+                {
                     Ok(_) => status.set(crate::i18n::t("common.saved")),
-                    Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
+                    Err(e) => status
+                        .set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
                 }
             });
         }
@@ -528,16 +631,16 @@ pub fn Whiteboard(id: String) -> Element {
             }
 
             {
-                let mut flush_for_menu = flush_save.clone();
+                let flush_for_menu = flush_save.clone();
                 let mut schedule_for_menu = schedule_save.clone();
                 let id_for_menu = id.clone();
-                let mut bus_for_menu = toast_bus;
+                let bus_for_menu = toast_bus;
                 let nav_for_menu = nav;
                 rsx! {
                     Menubar {
-                        doc_type: "whiteboard".to_string(),
+                        document_type: "whiteboard".to_string(),
                         on_command: move |cmd: String| {
-                            let mut bus = bus_for_menu;
+                            let bus = bus_for_menu;
                             match cmd.as_str() {
                                 "save" => flush_for_menu(),
                                 "back" => { nav_for_menu.push(Route::Dashboard {}); }
@@ -569,7 +672,7 @@ pub fn Whiteboard(id: String) -> Element {
                                     };
                                     let id = id_for_menu.clone();
                                     let token = auth.read().token.clone().unwrap_or_default();
-                                    let mut bus2 = bus;
+                                    let bus2 = bus;
                                     let fmt_owned = format.to_string();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match export_document(&id, &fmt_owned, &token).await {
@@ -613,6 +716,19 @@ pub fn Whiteboard(id: String) -> Element {
                         class: "toolbar-color",
                         value: "{color}",
                         oninput: move |e| color.set(e.value()),
+                    }
+                    label { class: "toolbar-label", {crate::i18n::t("editor.whiteboard.bg_label")} }
+                    input {
+                        r#type: "color",
+                        class: "toolbar-color",
+                        value: "{bg_color}",
+                        oninput: {
+                            let mut schedule_save = schedule_save.clone();
+                            move |e: FormEvent| {
+                                bg_color.set(e.value());
+                                schedule_save();
+                            }
+                        },
                     }
                     label { class: "toolbar-label", {crate::i18n::t("editor.whiteboard.size_label")} }
                     input {
@@ -711,7 +827,7 @@ pub fn Whiteboard(id: String) -> Element {
                         title: crate::i18n::t("editor.whiteboard.export_png"),
                         onclick: move |_| {
                             let els = elements.read().clone();
-                            let svg = build_svg_string(&els);
+                            let svg = build_svg_string(&els, &bg_color.read());
                             let base = sanitize_filename(&doc_title.read());
                             let filename = format!("{base}.png");
                             svg_to_png_and_download(&svg, &filename);
@@ -724,7 +840,7 @@ pub fn Whiteboard(id: String) -> Element {
                         title: crate::i18n::t("editor.whiteboard.export_svg"),
                         onclick: move |_| {
                             let els = elements.read().clone();
-                            let svg = build_svg_string(&els);
+                            let svg = build_svg_string(&els, &bg_color.read());
                             let base = sanitize_filename(&doc_title.read());
                             let filename = format!("{base}.svg");
                             trigger_download(&filename, "image/svg+xml", svg.as_bytes());
@@ -745,6 +861,7 @@ pub fn Whiteboard(id: String) -> Element {
                 svg {
                     id: "{SVG_ID}",
                     class: "{canvas_cursor_class}",
+                    style: "background-color: {bg_color};",
                     width: "100%",
                     height: "100%",
                     view_box: "0 0 1920 1080",

@@ -13,10 +13,7 @@ fn current_theme() -> String {
 
 fn set_theme(value: &str) {
     if let Some(window) = web_sys::window() {
-        if let Some(el) = window
-            .document()
-            .and_then(|d| d.document_element())
-        {
+        if let Some(el) = window.document().and_then(|d| d.document_element()) {
             let _ = el.set_attribute("data-theme", value);
         }
         if let Ok(Some(storage)) = window.local_storage() {
@@ -75,6 +72,11 @@ pub fn Navbar() -> Element {
                         r#type: "search",
                         placeholder: "{search_placeholder}",
                         class: "search-input",
+                        onkeydown: move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter {
+                                nav.push(Route::FileManager {});
+                            }
+                        },
                     }
                 }
                 div { class: "navbar-user",

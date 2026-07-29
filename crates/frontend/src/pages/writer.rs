@@ -9,7 +9,9 @@ use wasm_bindgen::closure::Closure;
 use web_sys::WebSocket;
 
 use crate::Route;
-use crate::collab_client::{CollabHandle, CollabMessage, ConnectionState, RemoteCursor, connect_with_reconnect};
+use crate::collab_client::{
+    CollabHandle, CollabMessage, ConnectionState, RemoteCursor, connect_with_reconnect,
+};
 use crate::components::comments_pane::CommentsPane;
 use crate::components::context_menu::{ContextMenu, MenuEntry};
 use crate::components::find_dialog::FindDialog;
@@ -220,14 +222,25 @@ struct ChangeItem {
 }
 
 fn insert_tracked_text(text: &str, color: &str, author: &str) {
-    let window = match web_sys::window() { Some(w) => w, None => return };
-    let document = match window.document() { Some(d) => d, None => return };
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return,
+    };
+    let document = match window.document() {
+        Some(d) => d,
+        None => return,
+    };
     let sel = match document.get_selection().ok().flatten() {
         Some(s) => s,
         None => return,
     };
-    if sel.range_count() == 0 { return; }
-    let range = match sel.get_range_at(0).ok() { Some(r) => r, None => return };
+    if sel.range_count() == 0 {
+        return;
+    }
+    let range = match sel.get_range_at(0).ok() {
+        Some(r) => r,
+        None => return,
+    };
     let _ = range.delete_contents();
     let span = match document.create_element("ins") {
         Ok(s) => s,
@@ -240,7 +253,9 @@ fn insert_tracked_text(text: &str, color: &str, author: &str) {
         &format!("background-color: {color}22; color: {color}; text-decoration: underline;"),
     );
     span.set_text_content(Some(text));
-    if range.insert_node(&span).is_err() { return; }
+    if range.insert_node(&span).is_err() {
+        return;
+    }
     let span_node: &web_sys::Node = span.as_ref();
     let _ = range.set_start_after(span_node);
     let _ = range.set_end_after(span_node);
@@ -249,14 +264,32 @@ fn insert_tracked_text(text: &str, color: &str, author: &str) {
 }
 
 fn wrap_selection_as_deleted(author: &str) -> bool {
-    let window = match web_sys::window() { Some(w) => w, None => return false };
-    let document = match window.document() { Some(d) => d, None => return false };
-    let sel = match document.get_selection().ok().flatten() { Some(s) => s, None => return false };
-    if sel.range_count() == 0 { return false; }
-    if sel.is_collapsed() { return false; }
-    let range = match sel.get_range_at(0).ok() { Some(r) => r, None => return false };
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return false,
+    };
+    let document = match window.document() {
+        Some(d) => d,
+        None => return false,
+    };
+    let sel = match document.get_selection().ok().flatten() {
+        Some(s) => s,
+        None => return false,
+    };
+    if sel.range_count() == 0 {
+        return false;
+    }
+    if sel.is_collapsed() {
+        return false;
+    }
+    let range = match sel.get_range_at(0).ok() {
+        Some(r) => r,
+        None => return false,
+    };
     let text = range.to_string().as_string().unwrap_or_default();
-    if text.is_empty() { return false; }
+    if text.is_empty() {
+        return false;
+    }
     let _ = range.delete_contents();
     let del = match document.create_element("del") {
         Ok(d) => d,
@@ -266,7 +299,9 @@ fn wrap_selection_as_deleted(author: &str) -> bool {
     let _ = del.set_attribute("data-author", author);
     let _ = del.set_attribute("style", "text-decoration: line-through; opacity: 0.7;");
     del.set_text_content(Some(&text));
-    if range.insert_node(&del).is_err() { return false; }
+    if range.insert_node(&del).is_err() {
+        return false;
+    }
     let del_node: &web_sys::Node = del.as_ref();
     let _ = range.set_start_after(del_node);
     let _ = range.set_end_after(del_node);
@@ -291,7 +326,9 @@ fn list_pending_changes() -> Vec<ChangeItem> {
     let mut out = Vec::new();
     for i in 0..nodes.length() {
         let Some(node) = nodes.item(i) else { continue };
-        let Some(el) = node.dyn_ref::<web_sys::Element>() else { continue };
+        let Some(el) = node.dyn_ref::<web_sys::Element>() else {
+            continue;
+        };
         let tag = el.tag_name().to_lowercase();
         let kind = if tag == "ins" { "ins" } else { "del" };
         let text = el.text_content().unwrap_or_default();
@@ -312,12 +349,23 @@ fn list_pending_changes() -> Vec<ChangeItem> {
 }
 
 fn accept_change(dom_id: &str) {
-    let document = match web_sys::window().and_then(|w| w.document()) { Some(d) => d, None => return };
-    let body = match document.get_element_by_id(WRITER_BODY_ID) { Some(b) => b, None => return };
+    let document = match web_sys::window().and_then(|w| w.document()) {
+        Some(d) => d,
+        None => return,
+    };
+    let body = match document.get_element_by_id(WRITER_BODY_ID) {
+        Some(b) => b,
+        None => return,
+    };
     let selector = format!("[data-change-id=\"{dom_id}\"]");
-    let Ok(Some(el)) = body.query_selector(&selector) else { return };
+    let Ok(Some(el)) = body.query_selector(&selector) else {
+        return;
+    };
     let tag = el.tag_name().to_lowercase();
-    let parent = match el.parent_node() { Some(p) => p, None => return };
+    let parent = match el.parent_node() {
+        Some(p) => p,
+        None => return,
+    };
     let el_node: &web_sys::Node = el.as_ref();
     if tag == "ins" {
         let text = el.text_content().unwrap_or_default();
@@ -330,12 +378,23 @@ fn accept_change(dom_id: &str) {
 }
 
 fn reject_change(dom_id: &str) {
-    let document = match web_sys::window().and_then(|w| w.document()) { Some(d) => d, None => return };
-    let body = match document.get_element_by_id(WRITER_BODY_ID) { Some(b) => b, None => return };
+    let document = match web_sys::window().and_then(|w| w.document()) {
+        Some(d) => d,
+        None => return,
+    };
+    let body = match document.get_element_by_id(WRITER_BODY_ID) {
+        Some(b) => b,
+        None => return,
+    };
     let selector = format!("[data-change-id=\"{dom_id}\"]");
-    let Ok(Some(el)) = body.query_selector(&selector) else { return };
+    let Ok(Some(el)) = body.query_selector(&selector) else {
+        return;
+    };
     let tag = el.tag_name().to_lowercase();
-    let parent = match el.parent_node() { Some(p) => p, None => return };
+    let parent = match el.parent_node() {
+        Some(p) => p,
+        None => return,
+    };
     let el_node: &web_sys::Node = el.as_ref();
     if tag == "ins" {
         let _ = parent.remove_child(el_node);
@@ -357,6 +416,11 @@ fn reject_all_changes() {
     for ch in list_pending_changes() {
         reject_change(&ch.dom_id);
     }
+}
+
+/// Rough page estimate for the status bar: ~3000 characters per A4 page.
+fn estimate_page_count(char_count: u32) -> u32 {
+    (char_count / 3000) + 1
 }
 
 /// Rich-text document editor (word processor).
@@ -395,9 +459,7 @@ pub fn Writer(id: String) -> Element {
     let doc_resource = use_resource(move || {
         let id = id_for_resource.clone();
         let token = auth.read().token.clone().unwrap_or_default();
-        async move {
-            api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await
-        }
+        async move { api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await }
     });
 
     use_effect(move || {
@@ -427,7 +489,7 @@ pub fn Writer(id: String) -> Element {
             doc_body_text.set(text);
             word_count.set(wc);
             char_count.set(cc);
-            let _ = page_count;
+            page_count.set(estimate_page_count(cc));
             loaded.set(true);
         }
     });
@@ -445,49 +507,61 @@ pub fn Writer(id: String) -> Element {
         let doc_id = doc_id_for_effect.clone();
         let self_id = local_user_id_for_effect.clone();
         let mut presence_for_msg = presence;
-        let on_message = move |msg: CollabMessage| {
-            match msg {
-                CollabMessage::UserJoined { user_id, username, color } => {
+        let on_message = move |msg: CollabMessage| match msg {
+            CollabMessage::UserJoined {
+                user_id,
+                username,
+                color,
+            } => {
+                let mut list = presence_for_msg.write();
+                if !list.iter().any(|c| c.user_id == user_id) {
+                    list.push(RemoteCursor {
+                        user_id,
+                        username,
+                        color,
+                        position: None,
+                    });
+                }
+            }
+            CollabMessage::UserLeft { user_id } => {
+                let mut list = presence_for_msg.write();
+                list.retain(|c| c.user_id != user_id);
+            }
+            CollabMessage::CursorUpdate(payload) => {
+                if let Ok(parsed) = serde_json::from_value::<CursorPosLite>(payload) {
+                    let Some(uid) = cursor_user_id(&parsed.user_id) else {
+                        return;
+                    };
+                    if uid == self_id {
+                        return;
+                    }
+                    let off = parsed.position.as_ref().and_then(cursor_offset);
                     let mut list = presence_for_msg.write();
-                    if !list.iter().any(|c| c.user_id == user_id) {
+                    if let Some(existing) = list.iter_mut().find(|c| c.user_id == uid) {
+                        if off.is_some() {
+                            existing.position = off;
+                        }
+                        if let Some(u) = parsed.username {
+                            if existing.username.is_empty() {
+                                existing.username = u;
+                            }
+                        }
+                        if let Some(c) = parsed.color {
+                            if existing.color.is_empty() {
+                                existing.color = c;
+                            }
+                        }
+                    } else {
                         list.push(RemoteCursor {
-                            user_id,
-                            username,
-                            color,
-                            is_active: true,
-                            position: None,
+                            user_id: uid,
+                            username: parsed.username.unwrap_or_default(),
+                            color: parsed.color.unwrap_or_else(|| "#888".into()),
+                            position: off,
                         });
                     }
                 }
-                CollabMessage::UserLeft { user_id } => {
-                    let mut list = presence_for_msg.write();
-                    list.retain(|c| c.user_id != user_id);
-                }
-                CollabMessage::CursorUpdate(payload) => {
-                    if let Ok(parsed) = serde_json::from_value::<CursorPosLite>(payload) {
-                        let Some(uid) = cursor_user_id(&parsed.user_id) else { return; };
-                        if uid == self_id {
-                            return;
-                        }
-                        let off = parsed.position.as_ref().and_then(cursor_offset);
-                        let mut list = presence_for_msg.write();
-                        if let Some(existing) = list.iter_mut().find(|c| c.user_id == uid) {
-                            if off.is_some() { existing.position = off; }
-                            if let Some(u) = parsed.username { if existing.username.is_empty() { existing.username = u; } }
-                            if let Some(c) = parsed.color { if existing.color.is_empty() { existing.color = c; } }
-                        } else {
-                            list.push(RemoteCursor {
-                                user_id: uid,
-                                username: parsed.username.unwrap_or_default(),
-                                color: parsed.color.unwrap_or_else(|| "#888".into()),
-                                is_active: true,
-                                position: off,
-                            });
-                        }
-                    }
-                }
-                _ => {}
             }
+            _ => {}
         };
         let on_state = move |s: ConnectionState| {
             conn_state.set(s);
@@ -499,15 +573,23 @@ pub fn Writer(id: String) -> Element {
     let ws_for_selection = ws_handle;
     let user_id_for_selection = local_user_id.clone();
     use_effect(move || {
-        let Some(window) = web_sys::window() else { return; };
-        let Some(document) = window.document() else { return; };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(document) = window.document() else {
+            return;
+        };
         let last_sent: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
         let perf = window.performance();
         let self_id = user_id_for_selection.clone();
         let ws_signal = ws_for_selection;
         let cb = Closure::<dyn FnMut()>::new(move || {
-            let Some(handle) = ws_signal.read().clone() else { return; };
-            let Some(ws) = handle.current_ws() else { return; };
+            let Some(handle) = ws_signal.read().clone() else {
+                return;
+            };
+            let Some(ws) = handle.current_ws() else {
+                return;
+            };
             if ws.ready_state() != WebSocket::OPEN {
                 return;
             }
@@ -519,7 +601,9 @@ pub fn Writer(id: String) -> Element {
                 }
                 *last = now;
             }
-            let Some(off) = caret_offset_in_body() else { return; };
+            let Some(off) = caret_offset_in_body() else {
+                return;
+            };
             let payload = serde_json::json!({
                 "type": "CursorUpdate",
                 "user_id": self_id,
@@ -555,15 +639,21 @@ pub fn Writer(id: String) -> Element {
         if !*loaded.read() {
             return;
         }
-        let Some(window) = web_sys::window() else { return };
-        let Some(document) = window.document() else { return };
-        let Some(body) = document.get_element_by_id(WRITER_BODY_ID) else { return };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(document) = window.document() else {
+            return;
+        };
+        let Some(body) = document.get_element_by_id(WRITER_BODY_ID) else {
+            return;
+        };
         if body.get_attribute("data-track-bound").is_some() {
             return;
         }
         let _ = body.set_attribute("data-track-bound", "1");
         let author = username_for_tracking.clone();
-        let mut tracking_on_inner = tracking_on;
+        let tracking_on_inner = tracking_on;
         let mut tick_inner = changes_tick;
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |evt: web_sys::Event| {
             if !*tracking_on_inner.read() {
@@ -593,10 +683,7 @@ pub fn Writer(id: String) -> Element {
                 }
             }
         });
-        let _ = body.add_event_listener_with_callback(
-            "beforeinput",
-            cb.as_ref().unchecked_ref(),
-        );
+        let _ = body.add_event_listener_with_callback("beforeinput", cb.as_ref().unchecked_ref());
         cb.forget();
     });
 
@@ -609,9 +696,12 @@ pub fn Writer(id: String) -> Element {
             status.set(crate::i18n::t("common.saving"));
             wasm_bindgen_futures::spawn_local(async move {
                 let req = serde_json::json!({ "content": body });
-                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
+                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token)
+                    .await
+                {
                     Ok(_) => status.set(crate::i18n::t("common.saved")),
-                    Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
+                    Err(e) => status
+                        .set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
                 }
             });
         }
@@ -678,7 +768,7 @@ pub fn Writer(id: String) -> Element {
             class: "editor-container",
             tabindex: "0",
             onkeydown: {
-                let mut flush_save = flush_save.clone();
+                let flush_save = flush_save.clone();
                 let mut schedule_save = schedule_save.clone();
                 move |evt: KeyboardEvent| {
                     let modifiers = evt.modifiers();
@@ -735,18 +825,18 @@ pub fn Writer(id: String) -> Element {
             },
             // Menubar
             {
-                let mut flush_for_menu = flush_save.clone();
+                let flush_for_menu = flush_save.clone();
                 let mut schedule_for_menu = schedule_save.clone();
                 let id_for_menu = id.clone();
-                let mut bus_for_menu = toast_bus;
+                let bus_for_menu = toast_bus;
                 let nav_for_menu = nav;
                 let mut find_open_menu = find_open;
                 let mut show_sidebar_menu = show_sidebar;
                 rsx! {
                     Menubar {
-                        doc_type: "writer".to_string(),
+                        document_type: "writer".to_string(),
                         on_command: move |cmd: String| {
-                            let mut bus = bus_for_menu;
+                            let bus = bus_for_menu;
                             match cmd.as_str() {
                                 "save" => flush_for_menu(),
                                 "undo" => { exec_cmd("undo", None); schedule_for_menu(); }
@@ -800,7 +890,7 @@ pub fn Writer(id: String) -> Element {
                                     };
                                     let id = id_for_menu.clone();
                                     let token = auth.read().token.clone().unwrap_or_default();
-                                    let mut bus2 = bus;
+                                    let bus2 = bus;
                                     let fmt_owned = format.to_string();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match export_document(&id, &fmt_owned, &token).await {
@@ -1106,6 +1196,7 @@ pub fn Writer(id: String) -> Element {
                                             let cc = text.len() as u32;
                                             word_count.set(wc);
                                             char_count.set(cc);
+                                            page_count.set(estimate_page_count(cc));
                                             doc_body_text.set(text);
                                             schedule_save();
                                             if *track_pane_open.read() {
@@ -1147,9 +1238,8 @@ pub fn Writer(id: String) -> Element {
 
             // Status bar
             {
-                let page_str = crate::i18n::t("editor.writer.page")
-                    .replace("{cur}", &page_count.read().to_string())
-                    .replace("{total}", &page_count.read().to_string());
+                let page_str = crate::i18n::t("editor.writer.pages")
+                    .replace("{n}", &page_count.read().to_string());
                 let words_str = crate::i18n::t("editor.writer.words").replace("{n}", &word_count.read().to_string());
                 let chars_str = crate::i18n::t("editor.writer.characters").replace("{n}", &char_count.read().to_string());
                 let id_str = crate::i18n::t("editor.writer.document_id").replace("{id}", &id);
@@ -1189,7 +1279,7 @@ pub fn Writer(id: String) -> Element {
                 },
                 on_replace: {
                     let mut schedule_save = schedule_save.clone();
-                    let mut bus = toast_bus;
+                    let bus = toast_bus;
                     move |(find, replace): (String, String)| {
                         if find.is_empty() { return; }
                         if window_find(&find, false) {
@@ -1204,7 +1294,7 @@ pub fn Writer(id: String) -> Element {
                 },
                 on_replace_all: {
                     let mut schedule_save = schedule_save.clone();
-                    let mut bus = toast_bus;
+                    let bus = toast_bus;
                     move |(find, replace): (String, String)| {
                         if find.is_empty() { return; }
                         let mut count = 0u32;
@@ -1228,7 +1318,7 @@ pub fn Writer(id: String) -> Element {
             ContextMenu {
                 state: ctx_menu,
                 on_command: {
-                    let mut bus = toast_bus;
+                    let bus = toast_bus;
                     move |cmd: String| {
                         match cmd.as_str() {
                             "cut" => exec_cmd("cut", None),

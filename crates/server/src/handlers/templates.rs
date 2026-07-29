@@ -31,7 +31,7 @@ fn template_to_response(row: Template) -> TemplateResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
         description: row.description,
-        doc_type: DocumentType::from_str(&row.doc_type),
+        document_type: DocumentType::from_str(&row.doc_type),
         content,
         thumbnail_url: row.thumbnail_url,
         is_global: row.is_global,
@@ -102,7 +102,7 @@ pub async fn create_template(req: &mut Request, depot: &mut Depot, res: &mut Res
         id: template_id.to_string(),
         name: body.name.clone(),
         description: body.description.clone(),
-        doc_type: body.doc_type.as_str().to_string(),
+        doc_type: body.document_type.as_str().to_string(),
         content: content_str,
         thumbnail_url: None,
         is_global,
@@ -126,7 +126,7 @@ pub async fn create_template(req: &mut Request, depot: &mut Depot, res: &mut Res
         id: template_id,
         name: body.name,
         description: body.description,
-        doc_type: body.doc_type,
+        document_type: body.document_type,
         content: body.content,
         thumbnail_url: None,
         is_global,
@@ -489,6 +489,29 @@ pub async fn create_document_from_template(
         }
     };
 
+    // Validate the optional parent folder and inherit its room.
+    let room_id_for_new_file = if let Some(parent_id) = body.parent_id.as_deref() {
+        match crate::handlers::access::load_accessible_target_folder(
+            &mut conn, parent_id, &uid, "editor",
+        ) {
+            Ok(Some(parent)) => parent.room_id,
+            Ok(None) => {
+                res.status_code(StatusCode::NOT_FOUND);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::NotFound("Parent folder not found".into()).to_response(),
+                )));
+                return;
+            }
+            Err(e) => {
+                res.status_code(StatusCode::FORBIDDEN);
+                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let doc_type = DocumentType::from_str(&template.doc_type);
     let doc_name = body
         .name
@@ -516,7 +539,7 @@ pub async fn create_document_from_template(
         trashed_at: None,
         created_at: now.to_rfc3339(),
         updated_at: now.to_rfc3339(),
-        room_id: None,
+        room_id: room_id_for_new_file,
         thumbnail_path: None,
         sort_order: 0,
     };
@@ -558,7 +581,7 @@ pub async fn create_document_from_template(
         id: doc_id_val,
         file_id: file_id_val,
         name: doc_name,
-        doc_type,
+        document_type: doc_type,
         content,
         version: 1,
         owner_id: uid.parse().unwrap_or_default(),

@@ -1,46 +1,42 @@
-use std::path::Path;
+use std::io::Cursor;
 
 use image::imageops::FilterType;
 
 use contrix_core::error::AppError;
 
+use crate::services::StorageBackend;
+
 /// Service that generates thumbnails for uploaded image files.
-///
-/// Thumbnails are stored in a `thumbnails/` subdirectory under the storage base
-/// path. Each thumbnail is a 200x200 JPEG named after the file's UUID.
-pub struct ThumbnailService {
-    base_path: String,
-}
+pub struct ThumbnailService;
 
 impl ThumbnailService {
-    /// Create a new thumbnail service. Ensures the thumbnails directory exists.
-    pub fn new(base_path: &str) -> Self {
-        let thumb_dir = format!("{}/thumbnails", base_path);
-        let _ = std::fs::create_dir_all(&thumb_dir);
-        Self {
-            base_path: base_path.to_string(),
-        }
+    pub fn new() -> Self {
+        Self
     }
 
     /// Generate a thumbnail for an image file.
     ///
     /// `file_path` is the relative storage path (e.g. `<owner>/<file>`).
     /// Returns the relative path to the generated thumbnail.
-    pub fn generate_thumbnail(
+    pub async fn generate_thumbnail(
         &self,
+        storage: &StorageBackend,
         file_path: &str,
         file_id: &str,
     ) -> Result<String, AppError> {
-        let full_path = Path::new(&self.base_path).join(file_path);
-        let img = image::open(&full_path)
+        let source = storage.read_file(file_path).await?;
+        let img = image::load_from_memory(&source)
             .map_err(|e| AppError::Storage(format!("Cannot open image: {e}")))?;
         let thumb = img.resize(200, 200, FilterType::Lanczos3);
 
         let thumb_rel = format!("thumbnails/{}.jpg", file_id);
-        let thumb_path = Path::new(&self.base_path).join(&thumb_rel);
+        let mut output = Cursor::new(Vec::new());
         thumb
-            .save(&thumb_path)
-            .map_err(|e| AppError::Storage(format!("Cannot save thumbnail: {e}")))?;
+            .write_to(&mut output, image::ImageFormat::Jpeg)
+            .map_err(|e| AppError::Storage(format!("Cannot encode thumbnail: {e}")))?;
+        storage
+            .write_file(&thumb_rel, &output.into_inner(), "image/jpeg")
+            .await?;
 
         Ok(thumb_rel)
     }

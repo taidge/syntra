@@ -10,21 +10,31 @@ struct MenuItem {
 
 impl MenuItem {
     const fn new(label_key: &'static str, cmd: &'static str, shortcut: &'static str) -> Self {
-        Self { label_key, cmd, shortcut, separator_after: false }
+        Self {
+            label_key,
+            cmd,
+            shortcut,
+            separator_after: false,
+        }
     }
     const fn sep(label_key: &'static str, cmd: &'static str, shortcut: &'static str) -> Self {
-        Self { label_key, cmd, shortcut, separator_after: true }
+        Self {
+            label_key,
+            cmd,
+            shortcut,
+            separator_after: true,
+        }
     }
 }
 
-fn file_items(doc_type: &str) -> Vec<MenuItem> {
-    let export_key = match doc_type {
+fn file_items(document_type: &str) -> Vec<MenuItem> {
+    let export_key = match document_type {
         "writer" => "menu.file.export_docx",
         "calc" => "menu.file.export_xlsx",
         "slides" => "menu.file.export_pptx",
         _ => "menu.file.export_html",
     };
-    let export_cmd = match doc_type {
+    let export_cmd = match document_type {
         "writer" => "export-docx",
         "calc" => "export-xlsx",
         "slides" => "export-pptx",
@@ -36,7 +46,12 @@ fn file_items(doc_type: &str) -> Vec<MenuItem> {
         MenuItem::new("menu.file.save", "save", "Ctrl+S"),
         MenuItem::sep("menu.file.save_as", "save-as", "Ctrl+Shift+S"),
         MenuItem::new("menu.file.export_pdf", "export-pdf", ""),
-        MenuItem { label_key: export_key, cmd: export_cmd, shortcut: "", separator_after: false },
+        MenuItem {
+            label_key: export_key,
+            cmd: export_cmd,
+            shortcut: "",
+            separator_after: false,
+        },
         MenuItem::sep("menu.file.export_html", "export-html", ""),
         MenuItem::new("menu.file.print", "print", "Ctrl+P"),
         MenuItem::new("menu.file.close", "back", ""),
@@ -65,8 +80,8 @@ fn view_items() -> Vec<MenuItem> {
     ]
 }
 
-fn insert_items(doc_type: &str) -> Vec<MenuItem> {
-    match doc_type {
+fn insert_items(document_type: &str) -> Vec<MenuItem> {
+    match document_type {
         "writer" => vec![
             MenuItem::new("menu.insert.image", "insert-image", ""),
             MenuItem::new("menu.insert.table", "insert-table", ""),
@@ -94,8 +109,8 @@ fn insert_items(doc_type: &str) -> Vec<MenuItem> {
     }
 }
 
-fn format_items(doc_type: &str) -> Vec<MenuItem> {
-    match doc_type {
+fn format_items(document_type: &str) -> Vec<MenuItem> {
+    match document_type {
         "writer" => vec![
             MenuItem::new("menu.format.bold", "format-bold", "Ctrl+B"),
             MenuItem::new("menu.format.italic", "format-italic", "Ctrl+I"),
@@ -121,15 +136,19 @@ fn format_items(doc_type: &str) -> Vec<MenuItem> {
     }
 }
 
-fn tools_items(doc_type: &str) -> Vec<MenuItem> {
+fn tools_items(document_type: &str) -> Vec<MenuItem> {
     let mut v = Vec::new();
-    if doc_type == "writer" {
+    if document_type == "writer" {
         v.push(MenuItem::new("menu.tools.word_count", "word-count", ""));
         v.push(MenuItem::new("menu.tools.spell_check", "spell-check", ""));
     }
     v.push(MenuItem::sep("menu.tools.statistics", "statistics", ""));
     v.push(MenuItem::new("menu.tools.comments", "toggle-comments", ""));
-    v.push(MenuItem::new("menu.tools.version_history", "version-history", ""));
+    v.push(MenuItem::new(
+        "menu.tools.version_history",
+        "version-history",
+        "",
+    ));
     v
 }
 
@@ -142,7 +161,7 @@ fn help_items() -> Vec<MenuItem> {
 
 #[derive(Props, Clone, PartialEq)]
 pub struct MenubarProps {
-    pub doc_type: String,
+    pub document_type: String,
     pub on_command: EventHandler<String>,
 }
 
@@ -151,14 +170,14 @@ pub fn Menubar(props: MenubarProps) -> Element {
     let _ = use_context::<Signal<String>>().read();
     let mut open = use_signal(|| None::<String>);
 
-    let doc_type = props.doc_type.clone();
+    let document_type = props.document_type.clone();
     let menus: Vec<(&'static str, &'static str, Vec<MenuItem>)> = vec![
-        ("File", "menubar.file", file_items(&doc_type)),
+        ("File", "menubar.file", file_items(&document_type)),
         ("Edit", "menubar.edit", edit_items()),
         ("View", "menubar.view", view_items()),
-        ("Insert", "menubar.insert", insert_items(&doc_type)),
-        ("Format", "menubar.format", format_items(&doc_type)),
-        ("Tools", "menubar.tools", tools_items(&doc_type)),
+        ("Insert", "menubar.insert", insert_items(&document_type)),
+        ("Format", "menubar.format", format_items(&document_type)),
+        ("Tools", "menubar.tools", tools_items(&document_type)),
         ("Help", "menubar.help", help_items()),
     ];
 

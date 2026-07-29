@@ -10,6 +10,7 @@ use contrix_core::config::{
     ServerConfig, StorageConfig, TrashConfig,
 };
 use contrix_server::routes::create_router;
+use contrix_server::services::{NotificationBus, StorageBackend, WopiSessionStore};
 use contrix_server::state::AppState;
 use salvo::conn::Acceptor;
 use salvo::prelude::*;
@@ -149,13 +150,17 @@ impl TestServer {
         }
 
         let db_clone = db.clone();
+        let storage = Arc::new(StorageBackend::from_config(&config.storage).unwrap());
         let state = Arc::new(AppState {
             db: db_clone,
             config,
+            storage,
             collab: CollabManager::new(),
             started_at: chrono::Utc::now(),
             search: None,
             thumbnail: None,
+            notifications: Arc::new(NotificationBus::new()),
+            wopi_sessions: Arc::new(WopiSessionStore::new()),
         });
 
         let router = create_router(state);
@@ -255,12 +260,12 @@ impl TestServer {
         &self,
         token: &str,
         name: &str,
-        doc_type: &str,
+        document_type: &str,
         parent_id: Option<&str>,
     ) -> (String, String, serde_json::Value) {
         let mut payload = serde_json::json!({
             "name": name,
-            "doc_type": doc_type,
+            "document_type": document_type,
         });
         if let Some(pid) = parent_id {
             payload["parent_id"] = serde_json::Value::String(pid.to_string());

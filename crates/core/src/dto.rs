@@ -91,7 +91,6 @@ pub struct MoveFileRequest {
 pub struct FileResponse {
     pub id: Uuid,
     pub name: String,
-    pub path: String,
     pub mime_type: Option<String>,
     pub size: i64,
     pub owner_id: Uuid,
@@ -114,7 +113,7 @@ pub struct FileResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateDocumentRequest {
     pub name: String,
-    pub doc_type: DocumentType,
+    pub document_type: DocumentType,
     pub parent_id: Option<Uuid>,
     pub room_id: Option<Uuid>,
 }
@@ -131,7 +130,7 @@ pub struct DocumentResponse {
     pub id: Uuid,
     pub file_id: Uuid,
     pub name: String,
-    pub doc_type: DocumentType,
+    pub document_type: DocumentType,
     pub content: serde_json::Value,
     pub version: i32,
     pub owner_id: Uuid,
@@ -147,10 +146,10 @@ pub struct DocumentResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateShareRequest {
     pub file_id: Uuid,
-    pub shared_with: Option<Uuid>,
+    pub shared_with_user_id: Option<Uuid>,
     pub permission: SharePermission,
     pub expires_at: Option<DateTime<Utc>>,
-    pub shared_with_group: Option<Uuid>,
+    pub shared_with_group_id: Option<Uuid>,
     pub password: Option<String>,
 }
 
@@ -159,13 +158,13 @@ pub struct CreateShareRequest {
 pub struct ShareResponse {
     pub id: Uuid,
     pub file_id: Uuid,
-    pub shared_by: Uuid,
-    pub shared_with: Option<Uuid>,
+    pub shared_by_user_id: Uuid,
+    pub shared_with_user_id: Option<Uuid>,
     pub permission: SharePermission,
     pub public_token: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-    pub shared_with_group: Option<Uuid>,
+    pub shared_with_group_id: Option<Uuid>,
     pub is_password_protected: bool,
 }
 
@@ -206,7 +205,7 @@ pub struct CommentResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
-    pub doc_type: Option<DocumentType>,
+    pub document_type: Option<DocumentType>,
     pub from_date: Option<DateTime<Utc>>,
     pub to_date: Option<DateTime<Utc>>,
     pub page: u32,
@@ -218,7 +217,7 @@ pub struct SearchRequest {
 pub struct SearchResult {
     pub id: Uuid,
     pub name: String,
-    pub doc_type: DocumentType,
+    pub document_type: DocumentType,
     /// Highlighted text snippet from the matching content
     pub snippet: String,
     /// Relevance score assigned by the search engine
@@ -276,7 +275,7 @@ pub struct CreateRoomRequest {
     pub room_type: Option<RoomType>,
     pub logo_url: Option<String>,
     pub color: Option<String>,
-    pub storage_quota: Option<i32>,
+    pub storage_quota: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,7 +538,7 @@ pub struct BrandingResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupResponse {
     pub id: String,
-    pub file_path: String,
+    pub file_name: String,
     pub size: i64,
     pub created_at: DateTime<Utc>,
 }
@@ -559,7 +558,7 @@ pub struct QuotaResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateQuotaRequest {
     pub user_id: Uuid,
-    pub storage_quota_mb: i64,
+    pub storage_quota: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +569,7 @@ pub struct UpdateQuotaRequest {
 pub struct CreateTemplateRequest {
     pub name: String,
     pub description: Option<String>,
-    pub doc_type: DocumentType,
+    pub document_type: DocumentType,
     pub content: Option<serde_json::Value>,
     pub is_global: Option<bool>,
 }
@@ -587,7 +586,7 @@ pub struct TemplateResponse {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
-    pub doc_type: DocumentType,
+    pub document_type: DocumentType,
     pub content: Option<serde_json::Value>,
     pub thumbnail_url: Option<String>,
     pub is_global: bool,

@@ -9,16 +9,16 @@ use contrix_core::dto::{
     ApiResponse, CreateDocumentRequest, DocumentResponse, UpdateDocumentRequest,
 };
 use contrix_core::error::AppError;
-use contrix_core::models::{DocumentType, File, NewDocument, NewFile, NewVersion};
+use contrix_core::models::{DocumentType, NewDocument, NewFile, NewVersion};
 use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::room_members::dsl as rm;
 use contrix_core::schema::users::dsl as u;
 use contrix_core::schema::versions::dsl as v;
 use contrix_export::ExportFormat;
 
+use crate::handlers::access::{check_room_access, load_accessible_target_folder};
 use crate::middleware::auth::get_user_id;
-use crate::services::StorageService;
+use crate::services::{StorageBackend, StorageService};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -76,11 +76,15 @@ fn mime_for_doc_type(dt: &DocumentType) -> &'static str {
 }
 
 fn document_storage_name(name: &str) -> String {
-    format!("{name}.contrix.json")
+    // Sanitize the user-supplied document name before it becomes part of a
+    // storage file name. `save_file` sanitizes again, but doing it here keeps
+    // the stored path predictable and removes any ambiguity for other backends.
+    let safe = StorageService::sanitize_file_name(name);
+    format!("{safe}.contrix.json")
 }
 
-fn persist_document_blob(
-    base_path: &str,
+async fn persist_document_blob(
+    storage: &StorageBackend,
     owner_id: &str,
     storage_name: &str,
     content: &str,
@@ -88,80 +92,19 @@ fn persist_document_blob(
     let owner_uuid: Uuid = owner_id
         .parse()
         .map_err(|_| AppError::Validation("Invalid owner id".into()))?;
-    let storage = StorageService::new(base_path);
-    let path = storage.save_file(&owner_uuid, storage_name, content.as_bytes())?;
+    let path = storage
+        .save_file(&owner_uuid, storage_name, content.as_bytes())
+        .await?;
     Ok((path, content.len() as i64))
 }
 
-fn delete_previous_blob_if_safe(base_path: &str, old_path: &str) {
+async fn delete_previous_blob_if_safe(storage: &StorageBackend, old_path: &str) {
     let path = std::path::Path::new(old_path);
     if old_path.is_empty() || path.is_absolute() {
         return;
     }
 
-    let storage = StorageService::new(base_path);
-    let _ = storage.delete_file(old_path);
-}
-
-fn check_room_access(
-    conn: &mut diesel::SqliteConnection,
-    user_id: &str,
-    room_id: &str,
-    required_role: &str,
-) -> Result<(), AppError> {
-    let member = rm::room_members
-        .filter(rm::room_id.eq(room_id))
-        .filter(rm::user_id.eq(user_id))
-        .select(rm::role)
-        .first::<String>(conn)
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-    match member {
-        Some(role) => {
-            let allowed = match required_role {
-                "viewer" => true,
-                "editor" => role == "owner" || role == "editor" || role == "admin",
-                "admin" => role == "owner" || role == "admin",
-                _ => false,
-            };
-            if allowed {
-                Ok(())
-            } else {
-                Err(AppError::Forbidden("Insufficient room permissions".into()))
-            }
-        }
-        None => Err(AppError::Forbidden("Not a member of this room".into())),
-    }
-}
-
-fn load_accessible_folder(
-    conn: &mut diesel::SqliteConnection,
-    folder_id: &str,
-    user_id: &str,
-    required_role: &str,
-) -> Result<Option<File>, AppError> {
-    let row = f::files
-        .filter(f::id.eq(folder_id))
-        .filter(f::is_folder.eq(true))
-        .filter(f::is_trashed.eq(false))
-        .first::<File>(conn)
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-    match row {
-        Some(folder) => {
-            if let Some(room_id) = folder.room_id.as_deref() {
-                check_room_access(conn, user_id, room_id, required_role)?;
-                Ok(Some(folder))
-            } else if folder.owner_id == user_id {
-                Ok(Some(folder))
-            } else {
-                Err(AppError::Forbidden("Access denied".into()))
-            }
-        }
-        None => Ok(None),
-    }
+    let _ = storage.delete_file(old_path).await;
 }
 
 fn resolve_document_id(
@@ -169,7 +112,7 @@ fn resolve_document_id(
     identifier: &str,
 ) -> Result<Option<String>, AppError> {
     d::documents
-        .filter(d::id.eq(identifier).or(d::file_id.eq(identifier)))
+        .filter(d::id.eq(identifier))
         .select(d::id)
         .first::<String>(conn)
         .optional()
@@ -210,22 +153,18 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let now = Utc::now();
     let parent_id_str = body.parent_id.map(|pid| pid.to_string());
     let requested_room_id = body.room_id.map(|rid| rid.to_string());
-    let content = default_content(&body.doc_type, &body.name);
+    let content = default_content(&body.document_type, &body.name);
     let content_str = serde_json::to_string(&content).unwrap_or_default();
     let storage_name = document_storage_name(&body.name);
-    let (path_val, size_val) = match persist_document_blob(
-        &state.config.storage.base_path,
-        &uid,
-        &storage_name,
-        &content_str,
-    ) {
-        Ok(result) => result,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
-            return;
-        }
-    };
+    let (path_val, size_val) =
+        match persist_document_blob(&state.storage, &uid, &storage_name, &content_str).await {
+            Ok(result) => result,
+            Err(e) => {
+                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                return;
+            }
+        };
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -239,7 +178,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
 
     let room_id_for_new_document = if let Some(parent_id) = parent_id_str.as_deref() {
-        match load_accessible_folder(&mut conn, parent_id, &uid, "editor") {
+        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
             Ok(Some(parent)) => {
                 if let Some(requested_room_id) = requested_room_id.as_deref() {
                     if parent.room_id.as_deref() != Some(requested_room_id) {
@@ -286,7 +225,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         id: file_id_val.to_string(),
         name: body.name.clone(),
         path: path_val.clone(),
-        mime_type: Some(mime_for_doc_type(&body.doc_type).to_string()),
+        mime_type: Some(mime_for_doc_type(&body.document_type).to_string()),
         size: size_val,
         owner_id: uid.clone(),
         parent_id: parent_id_str,
@@ -319,7 +258,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let new_doc = NewDocument {
         id: doc_id_val.to_string(),
         file_id: file_id_val.to_string(),
-        doc_type: body.doc_type.as_str().to_string(),
+        doc_type: body.document_type.as_str().to_string(),
         content: Some(content_str.clone()),
         version: 1,
         created_at: now.to_rfc3339(),
@@ -343,7 +282,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         &body.name,
         &doc_id_val.to_string(),
         &content_str,
-        body.doc_type.as_str(),
+        body.document_type.as_str(),
         &uid,
     );
 
@@ -355,7 +294,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             "file_id": file_id_val.to_string(),
             "name": body.name,
             "owner_id": uid,
-            "doc_type": body.doc_type.as_str(),
+            "document_type": body.document_type.as_str(),
             "created_at": now.to_rfc3339(),
         }),
     );
@@ -364,7 +303,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         id: doc_id_val,
         file_id: file_id_val,
         name: body.name,
-        doc_type: body.doc_type,
+        document_type: body.document_type,
         content,
         version: 1,
         owner_id: uid.parse().unwrap_or_default(),
@@ -472,7 +411,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
                 id: id_val.parse().unwrap_or_default(),
                 file_id: file_id_val.parse().unwrap_or_default(),
                 name: name_val,
-                doc_type,
+                document_type: doc_type,
                 content,
                 version: version_val,
                 owner_id: owner_val.parse().unwrap_or_default(),
@@ -542,7 +481,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     // Fetch current version and backing file details.
     let current = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
-        .filter(d::id.eq(&doc_id_param).or(d::file_id.eq(&doc_id_param)))
+        .filter(d::id.eq(&doc_id_param))
         .filter(f::owner_id.eq(&uid))
         .select((
             d::id,
@@ -600,19 +539,15 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let now = Utc::now();
     let content_str = serde_json::to_string(&body.content).unwrap_or_default();
     let storage_name = document_storage_name(&file_name);
-    let (new_path, new_size) = match persist_document_blob(
-        &state.config.storage.base_path,
-        &owner_id,
-        &storage_name,
-        &content_str,
-    ) {
-        Ok(result) => result,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
-            return;
-        }
-    };
+    let (new_path, new_size) =
+        match persist_document_blob(&state.storage, &owner_id, &storage_name, &content_str).await {
+            Ok(result) => result,
+            Err(e) => {
+                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                return;
+            }
+        };
     let size_diff = new_size - old_size;
 
     // Create a version snapshot of the old content.
@@ -649,7 +584,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             let _ = diesel::update(u::users.filter(u::id.eq(&owner_id)))
                 .set(u::storage_used.eq(u::storage_used + size_diff))
                 .execute(&mut conn);
-            delete_previous_blob_if_safe(&state.config.storage.base_path, &old_path);
+            delete_previous_blob_if_safe(&state.storage, &old_path).await;
 
             // Best-effort search index update.
             update_search_index(
@@ -669,7 +604,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
                     "file_id": file_id_val,
                     "name": file_name,
                     "owner_id": owner_id,
-                    "doc_type": doc_type_str,
+                    "document_type": doc_type_str,
                     "version": new_version,
                     "updated_at": now.to_rfc3339(),
                 }),
@@ -1002,6 +937,24 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
                 Err(e) => Err(format!("Failed to parse workbook: {e}")),
             }
         }
+        (DocumentType::Writer, ExportFormat::Docx) => {
+            match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
+                Ok(doc) => contrix_export::docx::writer_to_docx(&doc),
+                Err(e) => Err(format!("Failed to parse writer document: {e}")),
+            }
+        }
+        (DocumentType::Calc, ExportFormat::Xlsx) => {
+            match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
+                Ok(wb) => contrix_export::xlsx::workbook_to_xlsx(&wb),
+                Err(e) => Err(format!("Failed to parse workbook: {e}")),
+            }
+        }
+        (DocumentType::Slides, ExportFormat::Pptx) => {
+            match serde_json::from_value::<contrix_doc_engine::Presentation>(content) {
+                Ok(pres) => contrix_export::pptx::presentation_to_pptx(&pres),
+                Err(e) => Err(format!("Failed to parse presentation: {e}")),
+            }
+        }
         (_, ExportFormat::Json) => Ok(content_str.into_bytes()),
         _ => Err(format!(
             "Export format '{format_str}' not supported for document type '{doc_type_str}'"
@@ -1010,16 +963,17 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
 
     match exported {
         Ok(data) => {
-            let out_name = format!("{}.{}", file_name, export_format.extension());
+            // Sanitize the name before it goes into the header to avoid header
+            // injection (CR/LF/quote) and parse panics on odd characters.
+            let safe_stem = StorageService::sanitize_file_name(&file_name);
+            let out_name = format!("{}.{}", safe_stem, export_format.extension());
             res.status_code(StatusCode::OK);
-            res.headers_mut()
-                .insert("content-type", export_format.mime_type().parse().unwrap());
-            res.headers_mut().insert(
-                "content-disposition",
-                format!("attachment; filename=\"{out_name}\"")
-                    .parse()
-                    .unwrap(),
-            );
+            if let Ok(ct) = export_format.mime_type().parse() {
+                res.headers_mut().insert("content-type", ct);
+            }
+            if let Ok(cd) = format!("attachment; filename=\"{out_name}\"").parse() {
+                res.headers_mut().insert("content-disposition", cd);
+            }
             res.body(salvo::http::body::ResBody::Once(bytes::Bytes::from(data)));
         }
         Err(msg) => {
@@ -1176,7 +1130,7 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
     // Verify ownership and get current version.
     let current = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
-        .filter(d::id.eq(&doc_id_param).or(d::file_id.eq(&doc_id_param)))
+        .filter(d::id.eq(&doc_id_param))
         .filter(f::owner_id.eq(&uid))
         .select((
             d::id,
@@ -1257,19 +1211,17 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
     let new_version = current_version + 1;
     let restored_string = restored_content.clone().unwrap_or_default();
     let storage_name = document_storage_name(&file_name);
-    let (new_path, new_size) = match persist_document_blob(
-        &state.config.storage.base_path,
-        &owner_id,
-        &storage_name,
-        &restored_string,
-    ) {
-        Ok(result) => result,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
-            return;
-        }
-    };
+    let (new_path, new_size) =
+        match persist_document_blob(&state.storage, &owner_id, &storage_name, &restored_string)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                return;
+            }
+        };
     let size_diff = new_size - old_size;
 
     // Snapshot current content before restoring.
@@ -1304,7 +1256,7 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
     let _ = diesel::update(u::users.filter(u::id.eq(&owner_id)))
         .set(u::storage_used.eq(u::storage_used + size_diff))
         .execute(&mut conn);
-    delete_previous_blob_if_safe(&state.config.storage.base_path, &old_path);
+    delete_previous_blob_if_safe(&state.storage, &old_path).await;
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(serde_json::json!({

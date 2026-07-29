@@ -1659,7 +1659,8 @@ impl Sheet {
             return CellValue::Error("LEN requires 1 argument".into());
         }
         let s = self.eval_expr(&args[0]).as_text();
-        CellValue::Number(s.len() as f64)
+        // Excel LEN counts characters, not UTF-8 bytes.
+        CellValue::Number(s.chars().count() as f64)
     }
 
     fn fn_left(&self, args: &[Expr]) -> CellValue {
@@ -1828,7 +1829,7 @@ impl Sheet {
 
     fn fn_sumif(&self, args: &[Expr]) -> CellValue {
         // SUMIF(range, criteria, [sum_range])
-        if args.is_empty() || args.len() > 3 {
+        if args.len() < 2 || args.len() > 3 {
             return CellValue::Error("SUMIF requires 2 or 3 arguments".into());
         }
         let (start, end) = match &args[0] {

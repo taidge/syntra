@@ -18,8 +18,19 @@ use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::sessions::dsl as sess;
 use contrix_core::schema::users::dsl as u;
 
-use crate::middleware::auth::get_user_role;
+use crate::middleware::auth::{get_user_id, get_user_role};
 use crate::state::AppState;
+
+/// Extract `(ip_address, user_agent)` from a request for audit logging.
+fn request_context(req: &Request) -> (Option<String>, Option<String>) {
+    let ip = req.remote_addr().ip().map(|i| i.to_string());
+    let ua = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    (ip, ua)
+}
 
 /// Verify the caller has admin role; returns `false` and writes a 403 if not.
 fn require_admin(depot: &Depot, res: &mut Response) -> bool {
@@ -276,6 +287,8 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let user_id_param: String = req.param("id").unwrap_or_default();
+    let actor = get_user_id(depot).unwrap_or_default();
+    let (audit_ip, audit_ua) = request_context(req);
 
     #[derive(serde::Deserialize)]
     struct UpdateUserReq {
@@ -302,6 +315,18 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
         return;
     }
 
+    // Restrict role to a known set so arbitrary strings can't be written.
+    const VALID_ROLES: &[&str] = &["admin", "editor", "viewer", "disabled"];
+    if let Some(role) = body.role.as_deref() {
+        if !VALID_ROLES.contains(&role) {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation("Invalid role".into()).to_response(),
+            )));
+            return;
+        }
+    }
+
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
@@ -312,6 +337,35 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
             return;
         }
     };
+
+    // Prevent removing the last remaining admin (downgrade or disable), which
+    // would otherwise lock everyone out of admin functions.
+    if let Some(new_role) = body.role.as_deref() {
+        if new_role != "admin" {
+            let is_target_admin = u::users
+                .filter(u::id.eq(&user_id_param))
+                .filter(u::role.eq("admin"))
+                .count()
+                .get_result::<i64>(&mut conn)
+                .unwrap_or(0)
+                > 0;
+            if is_target_admin {
+                let admin_count = u::users
+                    .filter(u::role.eq("admin"))
+                    .count()
+                    .get_result::<i64>(&mut conn)
+                    .unwrap_or(0);
+                if admin_count <= 1 {
+                    res.status_code(StatusCode::BAD_REQUEST);
+                    res.render(Json(ApiResponse::<()>::err(
+                        AppError::Validation("Cannot remove the last administrator".into())
+                            .to_response(),
+                    )));
+                    return;
+                }
+            }
+        }
+    }
 
     let now = Utc::now().to_rfc3339();
 
@@ -347,6 +401,17 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
             )));
         }
         Ok(_) => {
+            let details = body.role.as_deref().map(|r| format!("role={r}"));
+            crate::services::AuditService::log(
+                &mut conn,
+                &actor,
+                "user.update",
+                "user",
+                &user_id_param,
+                details.as_deref(),
+                audit_ip.as_deref(),
+                audit_ua.as_deref(),
+            );
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
                 serde_json::json!({ "message": "User updated" }),
@@ -414,6 +479,8 @@ pub async fn disable_user(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let user_id_param: String = req.param("id").unwrap_or_default();
+    let actor = get_user_id(depot).unwrap_or_default();
+    let (ip, ua) = request_context(req);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -439,6 +506,20 @@ pub async fn disable_user(req: &mut Request, depot: &mut Depot, res: &mut Respon
             )));
         }
         Ok(_) => {
+            // Revoke active sessions so the disabled user cannot keep using a
+            // server-side session, and record the action in the audit log.
+            let _ = diesel::delete(sess::sessions.filter(sess::user_id.eq(&user_id_param)))
+                .execute(&mut conn);
+            crate::services::AuditService::log(
+                &mut conn,
+                &actor,
+                "user.disable",
+                "user",
+                &user_id_param,
+                None,
+                ip.as_deref(),
+                ua.as_deref(),
+            );
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
                 serde_json::json!({ "message": "User disabled" }),

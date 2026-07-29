@@ -13,23 +13,24 @@ use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::file_read_status::dsl as frs;
 use contrix_core::schema::file_tags::dsl as ft;
 use contrix_core::schema::files::dsl as f;
+use contrix_core::schema::tags::dsl as t;
 
+use crate::handlers::access::{load_accessible_file, load_accessible_target_folder};
 use crate::middleware::auth::get_user_id;
-use crate::services::StorageService;
+use crate::services::StorageBackend;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn read_file_with_document_fallback(
+async fn read_file_with_document_fallback(
     conn: &mut diesel::SqliteConnection,
-    base_path: &str,
+    storage: &StorageBackend,
     file_id: &str,
     file_path: &str,
 ) -> Result<Vec<u8>, AppError> {
-    let storage = StorageService::new(base_path);
-    match storage.read_file(file_path) {
+    match storage.read_file(file_path).await {
         Ok(data) => Ok(data),
         Err(storage_err) => {
             let document_content = d::documents
@@ -214,20 +215,40 @@ pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
 
+    let target_folder =
+        match load_accessible_target_folder(&mut conn, &body.target_folder_id, &uid, "editor") {
+            Ok(Some(folder)) => folder,
+            Ok(None) => {
+                res.status_code(StatusCode::NOT_FOUND);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::NotFound("Target folder not found".into()).to_response(),
+                )));
+                return;
+            }
+            Err(e) => {
+                res.status_code(StatusCode::FORBIDDEN);
+                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                return;
+            }
+        };
+
     let now = Utc::now();
     let mut moved_count: usize = 0;
 
     for file_id in &body.file_ids {
-        match diesel::update(
-            f::files
-                .filter(f::id.eq(file_id))
-                .filter(f::owner_id.eq(&uid)),
-        )
-        .set((
-            f::parent_id.eq(&body.target_folder_id),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
+        // Skip files the user cannot edit; move the rest.
+        match load_accessible_file(&mut conn, file_id, &uid, "editor") {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => continue,
+        }
+
+        match diesel::update(f::files.filter(f::id.eq(file_id)))
+            .set((
+                f::parent_id.eq(&body.target_folder_id),
+                f::room_id.eq(target_folder.room_id.clone()),
+                f::updated_at.eq(now.to_rfc3339()),
+            ))
+            .execute(&mut conn)
         {
             Ok(n) => moved_count += n,
             Err(e) => {
@@ -254,7 +275,7 @@ pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response
 #[handler]
 pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -295,10 +316,41 @@ pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response)
         }
     };
 
+    // The tag itself must belong to the requesting user.
+    match t::tags
+        .filter(t::id.eq(&body.tag_id))
+        .filter(t::owner_id.eq(&uid))
+        .select(t::id)
+        .first::<String>(&mut conn)
+        .optional()
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("Tag not found".into()).to_response(),
+            )));
+            return;
+        }
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    }
+
     let now = Utc::now();
     let mut tagged_count: usize = 0;
 
     for file_id in &body.file_ids {
+        // Skip files the user cannot edit.
+        match load_accessible_file(&mut conn, file_id, &uid, "editor") {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => continue,
+        }
+
         let new_file_tag = NewFileTag {
             id: Uuid::new_v4().to_string(),
             file_id: file_id.clone(),
@@ -395,10 +447,12 @@ pub async fn batch_download(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
         let data = match read_file_with_document_fallback(
             &mut conn,
-            &state.config.storage.base_path,
+            &state.storage,
             &resolved_file_id,
             &file_path,
-        ) {
+        )
+        .await
+        {
             Ok(d) => d,
             Err(_) => continue, // Skip unreadable files
         };
@@ -583,7 +637,6 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
 
     let now = Utc::now();
     let owner_uuid: Uuid = uid.parse().unwrap_or_default();
-    let storage = StorageService::new(&state.config.storage.base_path);
     let mut duplicated_ids: Vec<String> = Vec::new();
 
     for file_id in &body.file_ids {
@@ -592,11 +645,27 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
             .filter(f::id.eq(file_id))
             .filter(f::owner_id.eq(&uid))
             .filter(f::is_folder.eq(false))
-            .select((f::id, f::name, f::path, f::mime_type, f::size, f::parent_id))
-            .first::<(String, String, String, Option<String>, i64, Option<String>)>(&mut conn)
+            .select((
+                f::id,
+                f::name,
+                f::path,
+                f::mime_type,
+                f::size,
+                f::parent_id,
+                f::room_id,
+            ))
+            .first::<(
+                String,
+                String,
+                String,
+                Option<String>,
+                i64,
+                Option<String>,
+                Option<String>,
+            )>(&mut conn)
             .optional();
 
-        let (resolved_file_id, original_name, original_path, mime_type, _size, parent_id) =
+        let (resolved_file_id, original_name, original_path, mime_type, _size, parent_id, room_id) =
             match file_row {
                 Ok(Some(r)) => r,
                 Ok(None) => continue,
@@ -606,10 +675,12 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
         // Read the original file data.
         let data = match read_file_with_document_fallback(
             &mut conn,
-            &state.config.storage.base_path,
+            &state.storage,
             &resolved_file_id,
             &original_path,
-        ) {
+        )
+        .await
+        {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -618,7 +689,11 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
         let copy_name = format!("Copy of {}", original_name);
         let new_file_id = Uuid::new_v4();
 
-        let storage_path = match storage.save_file(&owner_uuid, &copy_name, &data) {
+        let storage_path = match state
+            .storage
+            .save_file(&owner_uuid, &copy_name, &data)
+            .await
+        {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -636,7 +711,7 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
             trashed_at: None,
             created_at: now.to_rfc3339(),
             updated_at: now.to_rfc3339(),
-            room_id: None,
+            room_id,
             thumbnail_path: None,
             sort_order: 0,
         };

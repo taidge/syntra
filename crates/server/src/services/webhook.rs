@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use chrono::Utc;
 use diesel::SqliteConnection;
 use diesel::prelude::*;
@@ -100,6 +102,60 @@ impl WebhookService {
     }
 }
 
+/// Whether an IP address points at a private/internal range that webhook
+/// delivery must never reach (SSRF protection).
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.octets()[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Unique-local fc00::/7
+                || (v6.octets()[0] & 0xfe) == 0xfc
+                // Link-local fe80::/10
+                || (seg[0] & 0xffc0) == 0xfe80
+                // IPv4-mapped — re-check the embedded v4 address
+                || v6.to_ipv4_mapped().map(IpAddr::V4).is_some_and(is_blocked_ip)
+        }
+    }
+}
+
+/// Validate that a webhook target URL is safe to call: an http(s) URL whose
+/// host is not localhost or an internal/private IP. This is a best-effort SSRF
+/// guard; IP-literal hosts are checked directly, hostnames are checked against
+/// obvious internal suffixes (it does not resolve DNS, so DNS-rebinding is out
+/// of scope).
+fn is_safe_webhook_url(raw: &str) -> bool {
+    let url = match reqwest::Url::parse(raw) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let host = match url.host_str() {
+        Some(h) => h,
+        None => return false,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return !is_blocked_ip(ip);
+    }
+    let lower = host.to_ascii_lowercase();
+    !(lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal"))
+}
+
 /// Compute a signature for the payload using SHA-256(secret + payload).
 fn compute_signature(secret: &str, payload: &str) -> String {
     let mut hasher = Sha256::new();
@@ -118,7 +174,19 @@ async fn deliver_with_retry(
     event: String,
     payload: String,
 ) {
-    let client = reqwest::Client::new();
+    // Reject internal/private targets before issuing any request (SSRF guard),
+    // and never follow redirects that could bounce into internal hosts.
+    if !is_safe_webhook_url(&hook.url) {
+        let msg = format!("Refused delivery to unsafe webhook URL: {}", hook.url);
+        tracing::warn!("WebhookService: {msg}");
+        update_delivery(&pool, &delivery_id, None, Some(&msg), false);
+        return;
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     for attempt in 0..MAX_ATTEMPTS {
         tracing::info!(
@@ -135,10 +203,10 @@ async fn deliver_with_retry(
             .header("Content-Type", "application/json")
             .header("X-Webhook-Event", &event);
 
-        // Attach the secret header if a secret is configured.
+        // Attach only the HMAC signature derived from the secret. The raw
+        // secret is never transmitted — receivers verify via the signature.
         if let Some(ref secret) = hook.secret {
             if !secret.is_empty() {
-                request = request.header("X-Webhook-Secret", secret);
                 let signature = compute_signature(secret, &payload);
                 request = request.header("X-Webhook-Signature", signature);
             }

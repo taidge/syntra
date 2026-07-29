@@ -13,6 +13,7 @@ jwt_expiry_hours = 24
 refresh_expiry_days = 30
 
 [storage]
+backend = "local"
 base_path = "data/files"
 max_upload_size_mb = 100
 default_quota_mb = 5120
@@ -30,6 +31,7 @@ index_path = "data/search_index"
 max_requests = 100
 window_seconds = 60
 enabled = true
+trust_forwarded_headers = false
 
 [oauth]
 # google_client_id = ""

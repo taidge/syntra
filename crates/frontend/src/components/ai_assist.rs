@@ -27,7 +27,8 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
     let _ = use_context::<Signal<String>>().read();
     let mut open = use_signal(|| false);
-    let mut prompt = use_signal(|| crate::i18n::t("ai.placeholder"));
+    let mut prompt = use_signal(String::new);
+    let prompt_placeholder = crate::i18n::t("ai.placeholder");
     let mut mode = use_signal(|| String::from("summarize"));
     let mut answer = use_signal(String::new);
     let mut loading = use_signal(|| false);
@@ -55,7 +56,11 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
                     answer.set(r.answer);
                     push_toast(bus, ToastKind::Success, crate::i18n::t("ai.received"));
                 }
-                Err(e) => push_toast(bus, ToastKind::Error, crate::i18n::t("ai.error").replace("{err}", &e.to_string())),
+                Err(e) => push_toast(
+                    bus,
+                    ToastKind::Error,
+                    crate::i18n::t("ai.error").replace("{err}", &e.to_string()),
+                ),
             }
             loading.set(false);
         });
@@ -87,6 +92,7 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
                 textarea {
                     class: "form-input ai-prompt",
                     rows: 3,
+                    placeholder: "{prompt_placeholder}",
                     value: "{prompt}",
                     oninput: move |e| prompt.set(e.value()),
                 }

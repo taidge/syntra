@@ -58,9 +58,13 @@ fn parse_cell_ref(s: &str) -> Option<(u32, u32)> {
             break;
         }
     }
-    if row_start == 0 { return None; }
+    if row_start == 0 {
+        return None;
+    }
     let row: u32 = s[row_start..].parse().ok()?;
-    if row == 0 || col == 0 { return None; }
+    if row == 0 || col == 0 {
+        return None;
+    }
     Some((row - 1, col - 1))
 }
 
@@ -73,7 +77,15 @@ struct CellBorders {
 }
 
 #[derive(Clone, Copy)]
-enum BorderOp { All, None, Outline, Top, Right, Bottom, Left }
+enum BorderOp {
+    All,
+    None,
+    Outline,
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct CellStyle {
@@ -82,6 +94,39 @@ struct CellStyle {
     underline: bool,
     number_format: String,
     borders: CellBorders,
+    /// Horizontal alignment: "", "left", "center" or "right".
+    align: String,
+    /// Background colour as a CSS hex string (empty = none).
+    fill_color: String,
+    /// Text colour as a CSS hex string (empty = default).
+    text_color: String,
+    /// Font family name (empty = default).
+    font_family: String,
+    /// Font size in points as a string (empty = default).
+    font_size: String,
+}
+
+impl CellStyle {
+    /// Build the inline CSS for the visual style fields, or an empty string.
+    fn inline_css(&self) -> String {
+        let mut css = String::new();
+        if !self.align.is_empty() {
+            css.push_str(&format!("text-align:{};", self.align));
+        }
+        if !self.fill_color.is_empty() {
+            css.push_str(&format!("background-color:{};", self.fill_color));
+        }
+        if !self.text_color.is_empty() {
+            css.push_str(&format!("color:{};", self.text_color));
+        }
+        if !self.font_family.is_empty() {
+            css.push_str(&format!("font-family:{};", self.font_family));
+        }
+        if !self.font_size.is_empty() {
+            css.push_str(&format!("font-size:{}px;", self.font_size));
+        }
+        css
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -186,6 +231,17 @@ fn style_to_json(style: &CellStyle) -> Option<serde_json::Value> {
         bo.insert("left".to_string(), serde_json::Value::Bool(b.left));
         obj.insert("borders".to_string(), serde_json::Value::Object(bo));
     }
+    for (key, val) in [
+        ("align", &style.align),
+        ("fill_color", &style.fill_color),
+        ("text_color", &style.text_color),
+        ("font_family", &style.font_family),
+        ("font_size", &style.font_size),
+    ] {
+        if !val.is_empty() {
+            obj.insert(key.to_string(), serde_json::Value::String(val.clone()));
+        }
+    }
     Some(serde_json::Value::Object(obj))
 }
 
@@ -204,10 +260,7 @@ fn cell_value_to_string(v: &serde_json::Value) -> String {
             .map(|b| if b { "TRUE" } else { "FALSE" }.to_string())
             .unwrap_or_default(),
         "Date" => inner.and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        "Error" => format!(
-            "#ERR: {}",
-            inner.and_then(|x| x.as_str()).unwrap_or("")
-        ),
+        "Error" => format!("#ERR: {}", inner.and_then(|x| x.as_str()).unwrap_or("")),
         _ => String::new(),
     }
 }
@@ -225,14 +278,29 @@ fn style_from_json(v: &serde_json::Value) -> CellStyle {
     CellStyle {
         bold: v.get("bold").and_then(|b| b.as_bool()).unwrap_or(false),
         italic: v.get("italic").and_then(|b| b.as_bool()).unwrap_or(false),
-        underline: v.get("underline").and_then(|b| b.as_bool()).unwrap_or(false),
+        underline: v
+            .get("underline")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false),
         number_format: v
             .get("number_format")
             .and_then(|s| s.as_str())
             .unwrap_or("general")
             .to_string(),
         borders,
+        align: string_field(v, "align"),
+        fill_color: string_field(v, "fill_color"),
+        text_color: string_field(v, "text_color"),
+        font_family: string_field(v, "font_family"),
+        font_size: string_field(v, "font_size"),
     }
+}
+
+fn string_field(v: &serde_json::Value, key: &str) -> String {
+    v.get(key)
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn hydrate_workbook(
@@ -257,8 +325,12 @@ fn hydrate_workbook(
         // pairs because CellRef is not a string. Handle both shapes.
         if let Some(arr) = sheet.cells.as_array() {
             for pair in arr {
-                let Some(pair_arr) = pair.as_array() else { continue };
-                if pair_arr.len() != 2 { continue; }
+                let Some(pair_arr) = pair.as_array() else {
+                    continue;
+                };
+                if pair_arr.len() != 2 {
+                    continue;
+                }
                 let cref = &pair_arr[0];
                 let cell = &pair_arr[1];
                 let row = cref.get("row").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
@@ -351,12 +423,6 @@ fn cell_ref(row: u32, col: u32) -> String {
     format!("{}{}", col_letter(col), row + 1)
 }
 
-/// Return the display value for a cell.  Formulas (starting with `=`) are
-/// shown verbatim for now — evaluation will happen server-side on save.
-fn display_value(raw: &str) -> &str {
-    raw
-}
-
 fn format_number_default(n: f64) -> String {
     if n.is_nan() {
         "#ERR".to_string()
@@ -443,14 +509,46 @@ mod eval {
                 continue;
             }
             match b {
-                b'+' => { out.push(Token::Plus); i += 1; continue; }
-                b'-' => { out.push(Token::Minus); i += 1; continue; }
-                b'*' => { out.push(Token::Star); i += 1; continue; }
-                b'/' => { out.push(Token::Slash); i += 1; continue; }
-                b'(' => { out.push(Token::LParen); i += 1; continue; }
-                b')' => { out.push(Token::RParen); i += 1; continue; }
-                b',' => { out.push(Token::Comma); i += 1; continue; }
-                b':' => { out.push(Token::Colon); i += 1; continue; }
+                b'+' => {
+                    out.push(Token::Plus);
+                    i += 1;
+                    continue;
+                }
+                b'-' => {
+                    out.push(Token::Minus);
+                    i += 1;
+                    continue;
+                }
+                b'*' => {
+                    out.push(Token::Star);
+                    i += 1;
+                    continue;
+                }
+                b'/' => {
+                    out.push(Token::Slash);
+                    i += 1;
+                    continue;
+                }
+                b'(' => {
+                    out.push(Token::LParen);
+                    i += 1;
+                    continue;
+                }
+                b')' => {
+                    out.push(Token::RParen);
+                    i += 1;
+                    continue;
+                }
+                b',' => {
+                    out.push(Token::Comma);
+                    i += 1;
+                    continue;
+                }
+                b':' => {
+                    out.push(Token::Colon);
+                    i += 1;
+                    continue;
+                }
                 _ => {}
             }
             if b.is_ascii_digit() || b == b'.' {
@@ -466,7 +564,9 @@ mod eval {
                 continue;
             }
             if b == b'$' || b.is_ascii_alphabetic() {
-                if b == b'$' { i += 1; }
+                if b == b'$' {
+                    i += 1;
+                }
                 let letters_start = i;
                 while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
                     i += 1;
@@ -475,7 +575,9 @@ mod eval {
                 if letters.is_empty() {
                     return Err(EvalError::Parse("lone $".into()));
                 }
-                if i < bytes.len() && bytes[i] == b'$' { i += 1; }
+                if i < bytes.len() && bytes[i] == b'$' {
+                    i += 1;
+                }
                 let digit_start = i;
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
                     i += 1;
@@ -511,9 +613,17 @@ mod eval {
     }
 
     #[derive(Debug, Clone, Copy)]
-    pub enum BinOp { Add, Sub, Mul, Div }
+    pub enum BinOp {
+        Add,
+        Sub,
+        Mul,
+        Div,
+    }
     #[derive(Debug, Clone, Copy)]
-    pub enum UnOp { Neg, Pos }
+    pub enum UnOp {
+        Neg,
+        Pos,
+    }
 
     struct Parser {
         tokens: Vec<Token>,
@@ -521,10 +631,14 @@ mod eval {
     }
 
     impl Parser {
-        fn peek(&self) -> Option<&Token> { self.tokens.get(self.pos) }
+        fn peek(&self) -> Option<&Token> {
+            self.tokens.get(self.pos)
+        }
         fn bump(&mut self) -> Option<Token> {
             let t = self.tokens.get(self.pos).cloned();
-            if t.is_some() { self.pos += 1; }
+            if t.is_some() {
+                self.pos += 1;
+            }
             t
         }
 
@@ -536,8 +650,16 @@ mod eval {
             let mut left = self.parse_muldiv()?;
             loop {
                 match self.peek() {
-                    Some(Token::Plus) => { self.bump(); let r = self.parse_muldiv()?; left = Expr::Binary(BinOp::Add, Box::new(left), Box::new(r)); }
-                    Some(Token::Minus) => { self.bump(); let r = self.parse_muldiv()?; left = Expr::Binary(BinOp::Sub, Box::new(left), Box::new(r)); }
+                    Some(Token::Plus) => {
+                        self.bump();
+                        let r = self.parse_muldiv()?;
+                        left = Expr::Binary(BinOp::Add, Box::new(left), Box::new(r));
+                    }
+                    Some(Token::Minus) => {
+                        self.bump();
+                        let r = self.parse_muldiv()?;
+                        left = Expr::Binary(BinOp::Sub, Box::new(left), Box::new(r));
+                    }
                     _ => break,
                 }
             }
@@ -548,8 +670,16 @@ mod eval {
             let mut left = self.parse_unary()?;
             loop {
                 match self.peek() {
-                    Some(Token::Star) => { self.bump(); let r = self.parse_unary()?; left = Expr::Binary(BinOp::Mul, Box::new(left), Box::new(r)); }
-                    Some(Token::Slash) => { self.bump(); let r = self.parse_unary()?; left = Expr::Binary(BinOp::Div, Box::new(left), Box::new(r)); }
+                    Some(Token::Star) => {
+                        self.bump();
+                        let r = self.parse_unary()?;
+                        left = Expr::Binary(BinOp::Mul, Box::new(left), Box::new(r));
+                    }
+                    Some(Token::Slash) => {
+                        self.bump();
+                        let r = self.parse_unary()?;
+                        left = Expr::Binary(BinOp::Div, Box::new(left), Box::new(r));
+                    }
                     _ => break,
                 }
             }
@@ -558,14 +688,24 @@ mod eval {
 
         fn parse_unary(&mut self) -> Result<Expr, EvalError> {
             match self.peek() {
-                Some(Token::Minus) => { self.bump(); let e = self.parse_unary()?; Ok(Expr::Unary(UnOp::Neg, Box::new(e))) }
-                Some(Token::Plus) => { self.bump(); let e = self.parse_unary()?; Ok(Expr::Unary(UnOp::Pos, Box::new(e))) }
+                Some(Token::Minus) => {
+                    self.bump();
+                    let e = self.parse_unary()?;
+                    Ok(Expr::Unary(UnOp::Neg, Box::new(e)))
+                }
+                Some(Token::Plus) => {
+                    self.bump();
+                    let e = self.parse_unary()?;
+                    Ok(Expr::Unary(UnOp::Pos, Box::new(e)))
+                }
                 _ => self.parse_primary(),
             }
         }
 
         fn parse_primary(&mut self) -> Result<Expr, EvalError> {
-            let tok = self.bump().ok_or_else(|| EvalError::Parse("unexpected end".into()))?;
+            let tok = self
+                .bump()
+                .ok_or_else(|| EvalError::Parse("unexpected end".into()))?;
             match tok {
                 Token::Number(n) => Ok(Expr::Number(n)),
                 Token::LParen => {
@@ -596,7 +736,9 @@ mod eval {
                         loop {
                             args.push(self.parse_expr()?);
                             match self.peek() {
-                                Some(Token::Comma) => { self.bump(); }
+                                Some(Token::Comma) => {
+                                    self.bump();
+                                }
                                 _ => break,
                             }
                         }
@@ -637,7 +779,9 @@ mod eval {
         if visit.contains(&key) {
             return Err(EvalError::Cycle);
         }
-        let Some(raw) = cells.get(&key) else { return Ok(0.0); };
+        let Some(raw) = cells.get(&key) else {
+            return Ok(0.0);
+        };
         if raw.is_empty() {
             return Ok(0.0);
         }
@@ -699,15 +843,25 @@ mod eval {
         cells: &HashMap<(usize, u32, u32), String>,
     ) -> bool {
         let key = (sheet_idx, r, c);
-        let Some(raw) = cells.get(&key) else { return false; };
-        if raw.is_empty() { return false; }
+        let Some(raw) = cells.get(&key) else {
+            return false;
+        };
+        if raw.is_empty() {
+            return false;
+        }
         if let Some(expr_src) = raw.strip_prefix('=') {
             let mut v: HashSet<(usize, u32, u32)> = HashSet::new();
             v.insert(key);
-            let Ok(tokens) = lex(expr_src) else { return false; };
+            let Ok(tokens) = lex(expr_src) else {
+                return false;
+            };
             let mut parser = Parser { tokens, pos: 0 };
-            let Ok(expr) = parser.parse_expr() else { return false; };
-            if parser.pos != parser.tokens.len() { return false; }
+            let Ok(expr) = parser.parse_expr() else {
+                return false;
+            };
+            if parser.pos != parser.tokens.len() {
+                return false;
+            }
             eval_expr(&expr, sheet_idx, cells, &mut v).is_ok()
         } else {
             raw.parse::<f64>().is_ok()
@@ -738,7 +892,10 @@ mod eval {
             Expr::Range(_, _, _, _) => Err(EvalError::Parse("range not allowed here".into())),
             Expr::Unary(op, x) => {
                 let v = eval_expr(x, sheet_idx, cells, visit)?;
-                Ok(match op { UnOp::Neg => -v, UnOp::Pos => v })
+                Ok(match op {
+                    UnOp::Neg => -v,
+                    UnOp::Pos => v,
+                })
             }
             Expr::Binary(op, l, r) => {
                 let lv = eval_expr(l, sheet_idx, cells, visit)?;
@@ -748,7 +905,9 @@ mod eval {
                     BinOp::Sub => lv - rv,
                     BinOp::Mul => lv * rv,
                     BinOp::Div => {
-                        if rv == 0.0 { return Err(EvalError::DivByZero); }
+                        if rv == 0.0 {
+                            return Err(EvalError::DivByZero);
+                        }
                         lv / rv
                     }
                 })
@@ -785,18 +944,30 @@ mod eval {
                                 }
                             }
                         }
-                        if count == 0 { Err(EvalError::DivByZero) } else { Ok(sum / count as f64) }
+                        if count == 0 {
+                            Err(EvalError::DivByZero)
+                        } else {
+                            Ok(sum / count as f64)
+                        }
                     }
                     "MIN" => {
                         let vals = expand_args(args, sheet_idx, cells, visit)?;
                         let mut m = f64::INFINITY;
-                        for (_, v) in &vals { if *v < m { m = *v; } }
+                        for (_, v) in &vals {
+                            if *v < m {
+                                m = *v;
+                            }
+                        }
                         if m.is_infinite() { Ok(0.0) } else { Ok(m) }
                     }
                     "MAX" => {
                         let vals = expand_args(args, sheet_idx, cells, visit)?;
                         let mut m = f64::NEG_INFINITY;
-                        for (_, v) in &vals { if *v > m { m = *v; } }
+                        for (_, v) in &vals {
+                            if *v > m {
+                                m = *v;
+                            }
+                        }
                         if m.is_infinite() { Ok(0.0) } else { Ok(m) }
                     }
                     "COUNT" => {
@@ -942,7 +1113,7 @@ pub fn Calc(id: String) -> Element {
     let mut filter_dropdown = use_signal(|| None::<u32>);
     let mut chart_view = use_signal(|| None::<ChartData>);
 
-    let mut push_snapshot = move || {
+    let push_snapshot = move || {
         let snap = CalcSnapshot {
             cells: cells.read().clone(),
             styles: cell_styles.read().clone(),
@@ -965,9 +1136,7 @@ pub fn Calc(id: String) -> Element {
     let doc_resource = use_resource(move || {
         let id = id_for_resource.clone();
         let token = auth.read().token.clone().unwrap_or_default();
-        async move {
-            api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await
-        }
+        async move { api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await }
     });
 
     use_effect(move || {
@@ -993,14 +1162,17 @@ pub fn Calc(id: String) -> Element {
         let doc_id = doc_id_for_ws.clone();
         let mut presence_for_msg = presence;
         let on_message = move |msg: CollabMessage| match msg {
-            CollabMessage::UserJoined { user_id, username, color } => {
+            CollabMessage::UserJoined {
+                user_id,
+                username,
+                color,
+            } => {
                 let mut list = presence_for_msg.write();
                 if !list.iter().any(|c| c.user_id == user_id) {
                     list.push(RemoteCursor {
                         user_id,
                         username,
                         color,
-                        is_active: true,
                         position: None,
                     });
                 }
@@ -1074,7 +1246,9 @@ pub fn Calc(id: String) -> Element {
             if emitted.contains(&(*si, *r, *c)) {
                 continue;
             }
-            let Some(style_json) = style_to_json(style) else { continue };
+            let Some(style_json) = style_to_json(style) else {
+                continue;
+            };
             let cref = serde_json::json!({ "row": r, "col": c });
             let cell = serde_json::json!({
                 "formula": serde_json::Value::Null,
@@ -1098,9 +1272,12 @@ pub fn Calc(id: String) -> Element {
             status.set(crate::i18n::t("common.saving"));
             wasm_bindgen_futures::spawn_local(async move {
                 let req = serde_json::json!({ "content": body });
-                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
+                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token)
+                    .await
+                {
                     Ok(_) => status.set(crate::i18n::t("common.saved")),
-                    Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
+                    Err(e) => status
+                        .set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
                 }
             });
         }
@@ -1238,7 +1415,7 @@ pub fn Calc(id: String) -> Element {
             // ── Keyboard navigation ──────────────────────────────────────
             onkeydown: {
                 let mut schedule_save = schedule_save.clone();
-                let mut flush_save = flush_save.clone();
+                let flush_save = flush_save.clone();
                 let mut commit_formula_bar = commit_formula_bar.clone();
                 let mut push_snapshot = push_snapshot.clone();
                 move |evt: KeyboardEvent| {
@@ -1543,16 +1720,16 @@ pub fn Calc(id: String) -> Element {
 
             // ── Menubar ──────────────────────────────────────────────────
             {
-                let mut flush_for_menu = flush_save.clone();
+                let flush_for_menu = flush_save.clone();
                 let id_for_menu = id.clone();
-                let mut bus_for_menu = toast_bus;
+                let bus_for_menu = toast_bus;
                 let nav_for_menu = nav;
                 let mut find_open_menu = find_open;
                 rsx! {
                     Menubar {
-                        doc_type: "calc".to_string(),
+                        document_type: "calc".to_string(),
                         on_command: move |cmd: String| {
-                            let mut bus = bus_for_menu;
+                            let bus = bus_for_menu;
                             match cmd.as_str() {
                                 "save" => flush_for_menu(),
                                 "find" => { find_open_menu.set(true); }
@@ -1588,7 +1765,7 @@ pub fn Calc(id: String) -> Element {
                                     };
                                     let id = id_for_menu.clone();
                                     let token = auth.read().token.clone().unwrap_or_default();
-                                    let mut bus2 = bus;
+                                    let bus2 = bus;
                                     let fmt_owned = format.to_string();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match export_document(&id, &fmt_owned, &token).await {
@@ -1668,6 +1845,42 @@ pub fn Calc(id: String) -> Element {
                         }
                     }
                 };
+                // Generic visual-style applier (alignment / colours / fonts).
+                // The mutation is a zero-capture fn pointer so the closure can
+                // be cheaply cloned across multiple controls.
+                let mut push_snapshot_v = push_snapshot.clone();
+                let mut schedule_save_v = schedule_save.clone();
+                let apply_visual = move |mutate: fn(&mut CellStyle, &str), arg: &str| {
+                    if *loaded.read() {
+                        push_snapshot_v();
+                    }
+                    let active = *active_cell.read();
+                    let sel_s = *selection_start.read();
+                    let sel_e = *selection_end.read();
+                    let extra = extra_selection.read().clone();
+                    let targets = current_selection_cells(active, sel_s, sel_e, &extra);
+                    let si = *active_sheet.read();
+                    {
+                        let mut w = cell_styles.write();
+                        for (r, c) in targets {
+                            let entry = w.entry((si, r, c)).or_default();
+                            mutate(entry, arg);
+                            if entry == &CellStyle::default() {
+                                w.remove(&(si, r, c));
+                            }
+                        }
+                    }
+                    schedule_save_v();
+                };
+                let apply_align = apply_visual.clone();
+                let apply_align_c = apply_visual.clone();
+                let apply_align_r = apply_visual.clone();
+                let apply_fill = apply_visual.clone();
+                let apply_text_color = apply_visual.clone();
+                let apply_font = apply_visual.clone();
+                let apply_font_size = apply_visual.clone();
+                let mut push_snapshot_sort = push_snapshot.clone();
+                let mut schedule_save_sort = schedule_save.clone();
                 let apply_toggle_b = apply_toggle.clone();
                 let apply_toggle_i = apply_toggle.clone();
                 let apply_toggle_u = apply_toggle.clone();
@@ -1734,7 +1947,6 @@ pub fn Calc(id: String) -> Element {
                 let pct_label = crate::i18n::t("editor.calc.percent");
                 let dec0_label = crate::i18n::t("editor.calc.dec_decimal");
                 let dec2_label = crate::i18n::t("editor.calc.inc_decimal");
-                let merge_label = crate::i18n::t("editor.calc.merge");
                 let borders_label = crate::i18n::t("editor.calc.borders");
                 let fill_label = crate::i18n::t("editor.calc.fill_color");
                 let textcol_label = crate::i18n::t("editor.text_color");
@@ -1755,12 +1967,23 @@ pub fn Calc(id: String) -> Element {
                 rsx! {
                     div { class: "toolbar",
                         div { class: "toolbar-group",
-                            select { class: "toolbar-select font-family",
-                                option { "Arial" }
-                                option { "Times New Roman" }
-                                option { "Courier New" }
+                            select {
+                                class: "toolbar-select font-family",
+                                onchange: move |e: FormEvent| {
+                                    let mut f = apply_font.clone();
+                                    f(|s, a| s.font_family = a.to_string(), &e.value());
+                                },
+                                option { value: "", "Default" }
+                                option { value: "Arial", "Arial" }
+                                option { value: "Times New Roman", "Times New Roman" }
+                                option { value: "Courier New", "Courier New" }
                             }
-                            select { class: "toolbar-select font-size",
+                            select {
+                                class: "toolbar-select font-size",
+                                onchange: move |e: FormEvent| {
+                                    let mut f = apply_font_size.clone();
+                                    f(|s, a| s.font_size = a.to_string(), &e.value());
+                                },
                                 option { value: "10", "10" }
                                 option { value: "11", selected: true, "11" }
                                 option { value: "12", "12" }
@@ -1859,7 +2082,6 @@ pub fn Calc(id: String) -> Element {
                         }
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
-                            button { class: "toolbar-btn", title: "{merge_label}", "{merge_label}" }
                             div { style: "position: relative;",
                                 button {
                                     class: "toolbar-btn",
@@ -1881,18 +2103,136 @@ pub fn Calc(id: String) -> Element {
                                     }
                                 }
                             }
-                            input { r#type: "color", class: "toolbar-color", title: "{fill_label}", value: "#ffffff" }
-                            input { r#type: "color", class: "toolbar-color", title: "{textcol_label}", value: "#000000" }
+                            input {
+                                r#type: "color",
+                                class: "toolbar-color",
+                                title: "{fill_label}",
+                                value: "#ffffff",
+                                oninput: move |e: FormEvent| {
+                                    let mut f = apply_fill.clone();
+                                    f(|s, a| s.fill_color = a.to_string(), &e.value());
+                                },
+                            }
+                            input {
+                                r#type: "color",
+                                class: "toolbar-color",
+                                title: "{textcol_label}",
+                                value: "#000000",
+                                oninput: move |e: FormEvent| {
+                                    let mut f = apply_text_color.clone();
+                                    f(|s, a| s.text_color = a.to_string(), &e.value());
+                                },
+                            }
                         }
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
-                            button { class: "toolbar-btn", title: "{alignl_label}", "L" }
-                            button { class: "toolbar-btn", title: "{alignc_label}", "C" }
-                            button { class: "toolbar-btn", title: "{alignr_label}", "R" }
+                            button {
+                                class: "toolbar-btn",
+                                title: "{alignl_label}",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_align.clone();
+                                    f(|s, a| s.align = a.to_string(), "left");
+                                },
+                                "L"
+                            }
+                            button {
+                                class: "toolbar-btn",
+                                title: "{alignc_label}",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_align_c.clone();
+                                    f(|s, a| s.align = a.to_string(), "center");
+                                },
+                                "C"
+                            }
+                            button {
+                                class: "toolbar-btn",
+                                title: "{alignr_label}",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let mut f = apply_align_r.clone();
+                                    f(|s, a| s.align = a.to_string(), "right");
+                                },
+                                "R"
+                            }
                         }
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
-                            button { class: "toolbar-btn", title: "{sortaz_label}", "{sortaz_label}" }
+                            button {
+                                class: "toolbar-btn",
+                                title: "{sortaz_label}",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let (Some(s), Some(e)) = (*selection_start.read(), *selection_end.read()) else {
+                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.range_select_first"));
+                                        return;
+                                    };
+                                    let (r1, r2) = (s.0.min(e.0), s.0.max(e.0));
+                                    let (c1, c2) = (s.1.min(e.1), s.1.max(e.1));
+                                    if r2 == r1 {
+                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.range_needs_two_rows"));
+                                        return;
+                                    }
+                                    if *loaded.read() {
+                                        push_snapshot_sort();
+                                    }
+                                    let si = *active_sheet.read();
+                                    // Snapshot the selected block (cells + styles) per row.
+                                    let mut rows: Vec<(u32, Vec<(u32, String)>, Vec<(u32, CellStyle)>)> = Vec::new();
+                                    {
+                                        let cur = cells.read();
+                                        let cur_styles = cell_styles.read();
+                                        for r in r1..=r2 {
+                                            let mut row_cells = Vec::new();
+                                            let mut row_styles = Vec::new();
+                                            for c in c1..=c2 {
+                                                if let Some(v) = cur.get(&(si, r, c)) {
+                                                    row_cells.push((c, v.clone()));
+                                                }
+                                                if let Some(st) = cur_styles.get(&(si, r, c)) {
+                                                    row_styles.push((c, st.clone()));
+                                                }
+                                            }
+                                            rows.push((r, row_cells, row_styles));
+                                        }
+                                    }
+                                    // Sort by the value in the leftmost selected column (numeric-aware).
+                                    rows.sort_by(|a, b| {
+                                        let key = |row: &(u32, Vec<(u32, String)>, Vec<(u32, CellStyle)>)| {
+                                            row.1.iter().find(|(c, _)| *c == c1).map(|(_, v)| v.clone()).unwrap_or_default()
+                                        };
+                                        let ka = key(a);
+                                        let kb = key(b);
+                                        match (ka.parse::<f64>(), kb.parse::<f64>()) {
+                                            (Ok(na), Ok(nb)) => na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal),
+                                            _ => ka.to_lowercase().cmp(&kb.to_lowercase()),
+                                        }
+                                    });
+                                    // Write the sorted block back over the same row range.
+                                    {
+                                        let mut wc = cells.write();
+                                        let mut ws = cell_styles.write();
+                                        for r in r1..=r2 {
+                                            for c in c1..=c2 {
+                                                wc.remove(&(si, r, c));
+                                                ws.remove(&(si, r, c));
+                                            }
+                                        }
+                                        for (offset, (_orig_r, row_cells, row_styles)) in rows.into_iter().enumerate() {
+                                            let target_r = r1 + offset as u32;
+                                            for (c, v) in row_cells {
+                                                wc.insert((si, target_r, c), v);
+                                            }
+                                            for (c, st) in row_styles {
+                                                ws.insert((si, target_r, c), st);
+                                            }
+                                        }
+                                    }
+                                    schedule_save_sort();
+                                },
+                                "{sortaz_label}"
+                            }
                             button {
                                 class: "toolbar-btn",
                                 title: "{filter_label}",
@@ -1926,7 +2266,20 @@ pub fn Calc(id: String) -> Element {
                                 },
                                 "\u{25BD}"
                             }
-                            button { class: "toolbar-btn", title: "{fn_label}", "f(x)" }
+                            button {
+                                class: "toolbar-btn",
+                                title: "{fn_label}",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| {
+                                    let current = formula_bar.read().clone();
+                                    if !current.starts_with('=') {
+                                        formula_bar.set(format!("={current}"));
+                                    }
+                                    is_editing.set(true);
+                                    focus_formula_input();
+                                },
+                                "f(x)"
+                            }
                             button {
                                 class: "toolbar-btn",
                                 title: "{chart_label}",
@@ -2178,6 +2531,7 @@ pub fn Calc(id: String) -> Element {
                                         if style.borders.bottom { style_classes.push_str(" border-b"); }
                                         if style.borders.left { style_classes.push_str(" border-l"); }
                                         let class_str = format!("{base_class}{style_classes}");
+                                        let inline_style = style.inline_css();
                                         let evaluated = evaluate_cell_display(&cell_value, si, &cells.read());
                                         let display = if style.number_format.is_empty() || style.number_format == "general" {
                                             evaluated
@@ -2189,6 +2543,7 @@ pub fn Calc(id: String) -> Element {
                                         rsx! {
                                             td {
                                                 class: "{class_str}",
+                                                style: "{inline_style}",
 
                                                 onmousedown: move |evt: MouseEvent| {
                                                     if *is_editing.read() {
@@ -2402,8 +2757,8 @@ pub fn Calc(id: String) -> Element {
 
             if let Some((kind, idx, mx, my)) = *header_menu.read() {
                 {
-                    let mut schedule_save_hm = schedule_save.clone();
-                    let mut push_snapshot_hm = push_snapshot.clone();
+                    let schedule_save_hm = schedule_save.clone();
+                    let push_snapshot_hm = push_snapshot.clone();
                     let si = *active_sheet.read();
                     rsx! {
                         div {
@@ -2713,8 +3068,8 @@ pub fn Calc(id: String) -> Element {
 
             if let Some((sidx, mx, my)) = *sheet_menu.read() {
                 {
-                    let mut schedule_save_sm = schedule_save.clone();
-                    let mut push_snapshot_sm = push_snapshot.clone();
+                    let schedule_save_sm = schedule_save.clone();
+                    let push_snapshot_sm = push_snapshot.clone();
                     let cur_name = sheets.read().get(sidx).cloned().unwrap_or_default();
                     rsx! {
                         div {
@@ -3112,7 +3467,7 @@ pub fn Calc(id: String) -> Element {
                 on_replace: {
                     let mut schedule_save = schedule_save.clone();
                     let mut push_snapshot = push_snapshot.clone();
-                    let mut bus = toast_bus;
+                    let bus = toast_bus;
                     move |(find, replace): (String, String)| {
                         if find.is_empty() { return; }
                         let matches = find_matches.read().clone();
@@ -3136,7 +3491,7 @@ pub fn Calc(id: String) -> Element {
                 on_replace_all: {
                     let mut schedule_save = schedule_save.clone();
                     let mut push_snapshot = push_snapshot.clone();
-                    let mut bus = toast_bus;
+                    let bus = toast_bus;
                     move |(find, replace): (String, String)| {
                         if find.is_empty() { return; }
                         if *loaded.read() { push_snapshot(); }
@@ -3168,7 +3523,7 @@ pub fn Calc(id: String) -> Element {
             ContextMenu {
                 state: ctx_menu,
                 on_command: {
-                    let mut bus = toast_bus;
+                    let bus = toast_bus;
                     move |cmd: String| {
                         match cmd.as_str() {
                             "copy" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_c")),
@@ -3195,7 +3550,7 @@ pub fn Calc(id: String) -> Element {
 
 #[cfg(test)]
 mod eval_tests {
-    use super::eval::{evaluate, EvalError};
+    use super::eval::{EvalError, evaluate};
     use std::collections::HashMap;
 
     fn make(items: &[((usize, u32, u32), &str)]) -> HashMap<(usize, u32, u32), String> {
@@ -3265,7 +3620,10 @@ mod eval_tests {
     fn unary_and_div_by_zero() {
         let cells = HashMap::new();
         assert_eq!(evaluate("-2+5", 0, &cells).unwrap(), 3.0);
-        assert!(matches!(evaluate("1/0", 0, &cells), Err(EvalError::DivByZero)));
+        assert!(matches!(
+            evaluate("1/0", 0, &cells),
+            Err(EvalError::DivByZero)
+        ));
     }
 
     #[test]

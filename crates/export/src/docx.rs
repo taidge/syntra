@@ -33,6 +33,8 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
 </Types>"#
     )
     .map_err(|e| e.to_string())?;
@@ -45,7 +47,21 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
 </Relationships>"#
+    )
+    .map_err(|e| e.to_string())?;
+
+    // docProps/core.xml — carries the title
+    zip.start_file("docProps/core.xml", options)
+        .map_err(|e| e.to_string())?;
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>{}</dc:title>
+</cp:coreProperties>"#,
+        escape_xml(&doc.title)
     )
     .map_err(|e| e.to_string())?;
 
@@ -57,6 +73,7 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
 </Relationships>"#
     )
     .map_err(|e| e.to_string())?;
@@ -72,7 +89,33 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
   <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="48"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="36"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading4"><w:name w:val="heading 4"/><w:pPr><w:outlineLvl w:val="3"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading5"><w:name w:val="heading 5"/><w:pPr><w:outlineLvl w:val="4"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading6"><w:name w:val="heading 6"/><w:pPr><w:outlineLvl w:val="5"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/></w:style>
 </w:styles>"#
+    )
+    .map_err(|e| e.to_string())?;
+
+    // word/numbering.xml — bullet (numId 1) and decimal (numId 2) definitions,
+    // each with two indent levels, so exported lists are real Word lists.
+    zip.start_file("word/numbering.xml", options)
+        .map_err(|e| e.to_string())?;
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl>
+    <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="◦"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>
+  </w:abstractNum>
+  <w:abstractNum w:abstractNumId="1">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl>
+    <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>"#
     )
     .map_err(|e| e.to_string())?;
 
@@ -143,44 +186,32 @@ fn heading_to_xml(h: &Heading, xml: &mut String) {
 }
 
 fn list_to_xml(list: &List, xml: &mut String) {
-    for (i, item) in list.items.iter().enumerate() {
-        list_item_to_xml(item, list.ordered, i, xml);
+    for item in &list.items {
+        list_item_to_xml(item, list.ordered, xml);
     }
 }
 
-fn list_item_to_xml(item: &ListItem, ordered: bool, index: usize, xml: &mut String) {
-    xml.push_str("<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/></w:numPr></w:pPr>");
-    let prefix = if ordered {
-        format!("{}. ", index + 1)
-    } else {
-        "\u{2022} ".to_string()
-    };
+fn list_item_to_xml(item: &ListItem, ordered: bool, xml: &mut String) {
+    // Real Word list: reference the numbering definition (numId 2 = decimal,
+    // numId 1 = bullet) defined in numbering.xml, at the given indent level.
+    let num_id = if ordered { 2 } else { 1 };
+
+    list_item_paragraph(item, num_id, 0, xml);
+
+    // Nested items render at indent level 1 of the same numbering definition.
+    for nested in &item.children {
+        list_item_paragraph(nested, num_id, 1, xml);
+    }
+}
+
+fn list_item_paragraph(item: &ListItem, num_id: u32, ilvl: u32, xml: &mut String) {
     xml.push_str(&format!(
-        "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
-        escape_xml(&prefix)
+        "<w:p><w:pPr><w:pStyle w:val=\"ListParagraph\"/><w:numPr><w:ilvl w:val=\"{ilvl}\"/><w:numId w:val=\"{num_id}\"/></w:numPr></w:pPr>"
     ));
     for run in &item.runs {
         run_to_xml(run, xml);
     }
     xml.push_str("</w:p>");
-
-    // Nested items as indented paragraphs
-    for (i, nested) in item.children.iter().enumerate() {
-        xml.push_str("<w:p><w:pPr><w:ind w:left=\"720\"/></w:pPr>");
-        let nested_prefix = if ordered {
-            format!("{}. ", i + 1)
-        } else {
-            "\u{2022} ".to_string()
-        };
-        xml.push_str(&format!(
-            "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
-            escape_xml(&nested_prefix)
-        ));
-        for run in &nested.runs {
-            run_to_xml(run, xml);
-        }
-        xml.push_str("</w:p>");
-    }
 }
 
 fn table_to_xml(table: &Table, xml: &mut String) {
@@ -323,7 +354,9 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
     Ok(doc)
 }
 
-fn read_core_title<R: std::io::Read + std::io::Seek>(archive: &mut ZipArchive<R>) -> Option<String> {
+fn read_core_title<R: std::io::Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Option<String> {
     let mut file = archive.by_name("docProps/core.xml").ok()?;
     let mut s = String::new();
     file.read_to_string(&mut s).ok()?;
@@ -680,7 +713,11 @@ mod tests {
 
         // Verify document.xml contains our text
         let mut doc_xml = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").unwrap(), &mut doc_xml).unwrap();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("word/document.xml").unwrap(),
+            &mut doc_xml,
+        )
+        .unwrap();
         assert!(doc_xml.contains("Some text content"));
     }
 

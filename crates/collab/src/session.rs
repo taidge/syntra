@@ -175,13 +175,12 @@ impl CollabSession {
     /// that was applied *after* the client's last known version (inferred
     /// from the operation's counter).
     pub fn apply_operation(&mut self, mut op: Operation) -> Result<u64, String> {
-        // Transform against any operations the client has not yet seen.
-        let client_version = op.id.counter as usize;
-        let ops_to_transform = if client_version < self.operations.len() {
-            &self.operations[client_version..]
-        } else {
-            &[]
-        };
+        // Transform against every operation applied after the version this op
+        // was generated against. `base_version` is the server version the
+        // client had seen — NOT the per-client Lamport counter, which bears no
+        // relation to positions in the global `operations` log.
+        let base = (op.base_version as usize).min(self.operations.len());
+        let ops_to_transform = &self.operations[base..];
 
         for concurrent in ops_to_transform {
             op = op.transform(concurrent);

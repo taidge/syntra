@@ -24,7 +24,7 @@ test.describe('Shares API @api', () => {
       headers: authHeaders(token),
       data: {
         file_id: fileId,
-        shared_with: user2.userId,
+        shared_with_user_id: user2.userId,
         permission: 'read',
         expires_at: null,
       },
@@ -33,7 +33,7 @@ test.describe('Shares API @api', () => {
     const body = await response.json();
     expect(body.success).toBe(true);
     expect(body.data.file_id).toBe(fileId);
-    expect(body.data.shared_with).toBe(user2.userId);
+    expect(body.data.shared_with_user_id).toBe(user2.userId);
     expect(body.data.permission).toBe('read');
     expect(body.data.public_token).toBeNull();
   });
@@ -43,14 +43,14 @@ test.describe('Shares API @api', () => {
       headers: authHeaders(token),
       data: {
         file_id: fileId,
-        shared_with: null,
+        shared_with_user_id: null,
         permission: 'read',
         expires_at: null,
       },
     });
     expect(response.status()).toBe(201);
     const body = await response.json();
-    expect(body.data.shared_with).toBeNull();
+    expect(body.data.shared_with_user_id).toBeNull();
     expect(body.data.public_token).toBeTruthy();
     expect(typeof body.data.public_token).toBe('string');
   });
@@ -62,7 +62,7 @@ test.describe('Shares API @api', () => {
       headers: authHeaders(token),
       data: {
         file_id: fileId,
-        shared_with: user2.userId,
+        shared_with_user_id: user2.userId,
         permission: 'write',
         expires_at: null,
       },
@@ -79,7 +79,7 @@ test.describe('Shares API @api', () => {
       headers: authHeaders(token),
       data: {
         file_id: fileId,
-        shared_with: user2.userId,
+        shared_with_user_id: user2.userId,
         permission: 'read',
         expires_at: null,
       },
@@ -103,11 +103,11 @@ test.describe('Shares API @api', () => {
     // Create two shares
     await request.post('/api/v1/shares', {
       headers: authHeaders(token),
-      data: { file_id: fileId, shared_with: user2.userId, permission: 'read', expires_at: null },
+      data: { file_id: fileId, shared_with_user_id: user2.userId, permission: 'read', expires_at: null },
     });
     await request.post('/api/v1/shares', {
       headers: authHeaders(token),
-      data: { file_id: fileId, shared_with: user3.userId, permission: 'write', expires_at: null },
+      data: { file_id: fileId, shared_with_user_id: user3.userId, permission: 'write', expires_at: null },
     });
 
     const response = await request.get(`/api/v1/shares/file/${fileId}`, {
@@ -123,7 +123,7 @@ test.describe('Shares API @api', () => {
 
     const createResp = await request.post('/api/v1/shares', {
       headers: authHeaders(token),
-      data: { file_id: fileId, shared_with: user2.userId, permission: 'read', expires_at: null },
+      data: { file_id: fileId, shared_with_user_id: user2.userId, permission: 'read', expires_at: null },
     });
     const created = await createResp.json();
     const shareId = created.data.id;
@@ -147,7 +147,7 @@ test.describe('Shares API @api', () => {
 
     const createResp = await request.post('/api/v1/shares', {
       headers: authHeaders(token),
-      data: { file_id: fileId, shared_with: user2.userId, permission: 'read', expires_at: null },
+      data: { file_id: fileId, shared_with_user_id: user2.userId, permission: 'read', expires_at: null },
     });
     const created = await createResp.json();
     const shareId = created.data.id;
@@ -170,7 +170,7 @@ test.describe('Shares API @api', () => {
       headers: authHeaders(token),
       data: {
         file_id: fakeFileId,
-        shared_with: null,
+        shared_with_user_id: null,
         permission: 'read',
         expires_at: null,
       },

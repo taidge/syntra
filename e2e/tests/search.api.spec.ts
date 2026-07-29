@@ -30,13 +30,13 @@ test.describe('Search API @api', () => {
     await createDocument(request, token, 'Gamma Report', 'writer');
     await createDocument(request, token, 'Gamma Sheet', 'calc');
 
-    const response = await request.get('/api/v1/search?q=Gamma&type=writer', {
+    const response = await request.get('/api/v1/search?q=Gamma&document_type=writer', {
       headers: authHeaders(token),
     });
     expect(response.status()).toBe(200);
     const body = await response.json();
     expect(body.data.results.length).toBe(1);
-    expect(body.data.results[0].doc_type).toBe('writer');
+    expect(body.data.results[0].document_type).toBe('writer');
   });
 
   test('should return empty results for non-matching query', async ({ request }) => {

@@ -34,6 +34,7 @@ pub fn FileManager() -> Element {
         }]
     });
     let mut is_dragging = use_signal(|| false);
+    let mut search_query = use_signal(String::new);
 
     rsx! {
         Navbar {}
@@ -217,6 +218,8 @@ pub fn FileManager() -> Element {
                         r#type: "search",
                         class: "file-search",
                         placeholder: crate::i18n::t("file_mgr.search_files"),
+                        value: "{search_query}",
+                        oninput: move |e| search_query.set(e.value()),
                     }
                 }
 
@@ -228,6 +231,7 @@ pub fn FileManager() -> Element {
                 FileList {
                     current_parent_id: *current_parent_id.read(),
                     refresh_key: *refresh_key.read(),
+                    filter: search_query(),
                     on_open_folder: move |folder: FileResponse| {
                         current_parent_id.set(Some(folder.id));
                         let mut next = breadcrumb.read().clone();

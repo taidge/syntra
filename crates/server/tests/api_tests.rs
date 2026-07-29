@@ -297,7 +297,7 @@ async fn test_create_writer_document() {
 
     assert!(!doc_id.is_empty());
     assert_eq!(body["success"], true);
-    assert_eq!(body["data"]["doc_type"], "writer");
+    assert_eq!(body["data"]["document_type"], "writer");
     assert_eq!(body["data"]["name"], "My Writer Doc");
     assert_eq!(body["data"]["version"], 1);
 }
@@ -314,7 +314,7 @@ async fn test_create_calc_document() {
         .await;
 
     assert_eq!(body["success"], true);
-    assert_eq!(body["data"]["doc_type"], "calc");
+    assert_eq!(body["data"]["document_type"], "calc");
     assert_eq!(body["data"]["name"], "My Spreadsheet");
 }
 
@@ -330,7 +330,7 @@ async fn test_create_slides_document() {
         .await;
 
     assert_eq!(body["success"], true);
-    assert_eq!(body["data"]["doc_type"], "slides");
+    assert_eq!(body["data"]["document_type"], "slides");
 }
 
 #[tokio::test]
@@ -345,7 +345,7 @@ async fn test_create_whiteboard_document() {
         .await;
 
     assert_eq!(body["success"], true);
-    assert_eq!(body["data"]["doc_type"], "whiteboard");
+    assert_eq!(body["data"]["document_type"], "whiteboard");
 }
 
 #[tokio::test]
@@ -636,7 +636,7 @@ async fn test_create_user_share() {
         .headers(server.auth_header(&token_owner))
         .json(&serde_json::json!({
             "file_id": file_id,
-            "shared_with": viewer_id,
+            "shared_with_user_id": viewer_id,
             "permission": "read"
         }))
         .send()
@@ -647,7 +647,7 @@ async fn test_create_user_share() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["permission"], "read");
-    assert_eq!(body["data"]["shared_with"], viewer_id);
+    assert_eq!(body["data"]["shared_with_user_id"], viewer_id);
     // User share should not have a public_token.
     assert!(body["data"]["public_token"].is_null());
 }
@@ -679,7 +679,7 @@ async fn test_create_public_link() {
     assert_eq!(body["success"], true);
     // Public link should have a token.
     assert!(body["data"]["public_token"].is_string());
-    assert!(body["data"]["shared_with"].is_null());
+    assert!(body["data"]["shared_with_user_id"].is_null());
 }
 
 #[tokio::test]
@@ -704,7 +704,7 @@ async fn test_list_file_shares() {
         .headers(server.auth_header(&token))
         .json(&serde_json::json!({
             "file_id": file_id,
-            "shared_with": viewer_id,
+            "shared_with_user_id": viewer_id,
             "permission": "read"
         }))
         .send()
@@ -1070,7 +1070,7 @@ async fn test_search_with_type_filter() {
 
     let resp = server
         .client
-        .get(server.url("/api/v1/search?q=Budget&type=calc"))
+        .get(server.url("/api/v1/search?q=Budget&document_type=calc"))
         .headers(server.auth_header(&token))
         .send()
         .await
@@ -1080,7 +1080,7 @@ async fn test_search_with_type_filter() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let results = body["data"]["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0]["doc_type"], "calc");
+    assert_eq!(results[0]["document_type"], "calc");
 }
 
 // ===========================================================================
@@ -1339,9 +1339,12 @@ async fn test_admin_activity_log() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
-    // Activity log should be empty initially.
+    // The successful admin login is recorded in the audit log.
     let logs = body["data"].as_array().unwrap();
-    assert!(logs.is_empty());
+    assert!(
+        logs.iter().any(|entry| entry["action"] == "auth.login"),
+        "expected an auth.login entry in the activity log, got: {logs:?}"
+    );
 }
 
 // ===========================================================================
@@ -1600,8 +1603,12 @@ async fn test_file_move_to_folder() {
 #[tokio::test]
 async fn test_user_cannot_see_other_users_documents() {
     let server = TestServer::new().await;
-    let (token1, _) = server.register("user1", "user1@test.com", "pass1").await;
-    let (token2, _) = server.register("user2", "user2@test.com", "pass2").await;
+    let (token1, _) = server
+        .register("user1", "user1@test.com", "password1")
+        .await;
+    let (token2, _) = server
+        .register("user2", "user2@test.com", "password2")
+        .await;
 
     let (doc_id, _, _) = server
         .create_document(&token1, "Private", "writer", None)
@@ -1622,8 +1629,12 @@ async fn test_user_cannot_see_other_users_documents() {
 #[tokio::test]
 async fn test_user_cannot_see_other_users_files() {
     let server = TestServer::new().await;
-    let (token1, _) = server.register("user1", "user1@test.com", "pass1").await;
-    let (token2, _) = server.register("user2", "user2@test.com", "pass2").await;
+    let (token1, _) = server
+        .register("user1", "user1@test.com", "password1")
+        .await;
+    let (token2, _) = server
+        .register("user2", "user2@test.com", "password2")
+        .await;
 
     // User1 uploads a file.
     let part = reqwest::multipart::Part::bytes(b"secret".to_vec())
@@ -1729,6 +1740,28 @@ async fn test_document_download_uses_backing_file() {
     assert!(json.is_object());
 }
 
+/// Exchange a JWT for a short-lived WOPI session token via the host page,
+/// the same way a WOPI client obtains it.
+async fn wopi_session_token(server: &TestServer, jwt: &str, file_id: &str) -> String {
+    let wopi_src = server.url(&format!("/api/v1/wopi/files/{file_id}"));
+    let resp = server
+        .client
+        .get(server.url("/api/v1/wopi/host/writer/edit"))
+        .query(&[("access_token", jwt), ("WOPISrc", wopi_src.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let html = resp.text().await.unwrap();
+    let marker = "const wopiSessionToken = \"";
+    let start = html
+        .find(marker)
+        .expect("host page should embed a WOPI session token")
+        + marker.len();
+    let end = start + html[start..].find('"').unwrap();
+    html[start..end].to_string()
+}
+
 #[tokio::test]
 async fn test_wopi_discovery_and_check_file_info_are_protocol_shaped() {
     let server = TestServer::new().await;
@@ -1738,6 +1771,7 @@ async fn test_wopi_discovery_and_check_file_info_are_protocol_shaped() {
     let (_, file_id, _) = server
         .create_document(&token, "Wopi Doc", "writer", None)
         .await;
+    let wopi_token = wopi_session_token(&server, &token, &file_id).await;
 
     let discovery_resp = server
         .client
@@ -1754,7 +1788,7 @@ async fn test_wopi_discovery_and_check_file_info_are_protocol_shaped() {
     let info_resp = server
         .client
         .get(server.url(&format!("/api/v1/wopi/files/{}", file_id)))
-        .query(&[("access_token", token.as_str())])
+        .query(&[("access_token", wopi_token.as_str())])
         .send()
         .await
         .unwrap();
@@ -1778,15 +1812,16 @@ async fn test_wopi_put_file_syncs_document_and_rename_file_updates_name() {
     let (token, _) = server
         .register("user1", "user1@test.com", "password123")
         .await;
-    let (_, file_id, _) = server
+    let (doc_id, file_id, _) = server
         .create_document(&token, "Editable Doc", "writer", None)
         .await;
+    let wopi_token = wopi_session_token(&server, &token, &file_id).await;
     let lock_token = "wopi-lock-token";
 
     let lock_resp = server
         .client
         .post(server.url(&format!("/api/v1/wopi/files/{}", file_id)))
-        .query(&[("access_token", token.as_str())])
+        .query(&[("access_token", wopi_token.as_str())])
         .header("X-WOPI-Override", "LOCK")
         .header("X-WOPI-Lock", lock_token)
         .send()
@@ -1805,7 +1840,7 @@ async fn test_wopi_put_file_syncs_document_and_rename_file_updates_name() {
     let put_resp = server
         .client
         .post(server.url(&format!("/api/v1/wopi/files/{}/contents", file_id)))
-        .query(&[("access_token", token.as_str())])
+        .query(&[("access_token", wopi_token.as_str())])
         .header("X-WOPI-Lock", lock_token)
         .header("Content-Type", "application/json")
         .body(new_content.to_string())
@@ -1818,7 +1853,7 @@ async fn test_wopi_put_file_syncs_document_and_rename_file_updates_name() {
 
     let document_resp = server
         .client
-        .get(server.url(&format!("/api/v1/documents/{}", file_id)))
+        .get(server.url(&format!("/api/v1/documents/{}", doc_id)))
         .headers(server.auth_header(&token))
         .send()
         .await
@@ -1831,7 +1866,7 @@ async fn test_wopi_put_file_syncs_document_and_rename_file_updates_name() {
     let rename_resp = server
         .client
         .post(server.url(&format!("/api/v1/wopi/files/{}", file_id)))
-        .query(&[("access_token", token.as_str())])
+        .query(&[("access_token", wopi_token.as_str())])
         .header("X-WOPI-Override", "RENAME_FILE")
         .header("X-WOPI-Lock", lock_token)
         .header("X-WOPI-RequestedName", "Renamed via WOPI")
@@ -1865,12 +1900,13 @@ async fn test_wopi_put_relative_creates_sibling_file() {
     let (_, file_id, _) = server
         .create_document(&token, "Relative Source", "writer", None)
         .await;
+    let wopi_token = wopi_session_token(&server, &token, &file_id).await;
     let lock_token = "wopi-relative-lock";
 
     let lock_resp = server
         .client
         .post(server.url(&format!("/api/v1/wopi/files/{}", file_id)))
-        .query(&[("access_token", token.as_str())])
+        .query(&[("access_token", wopi_token.as_str())])
         .header("X-WOPI-Override", "LOCK")
         .header("X-WOPI-Lock", lock_token)
         .send()
@@ -1882,7 +1918,7 @@ async fn test_wopi_put_relative_creates_sibling_file() {
     let relative_resp = server
         .client
         .post(server.url(&format!("/api/v1/wopi/files/{}", file_id)))
-        .query(&[("access_token", token.as_str())])
+        .query(&[("access_token", wopi_token.as_str())])
         .header("X-WOPI-Override", "PUT_RELATIVE")
         .header("X-WOPI-Lock", lock_token)
         .header("X-WOPI-SuggestedTarget", ".docx")
@@ -1919,9 +1955,13 @@ async fn test_wopi_put_relative_creates_sibling_file() {
 #[tokio::test]
 async fn test_accept_invitation_creates_hashed_user_and_allows_login() {
     let server = TestServer::new().await;
-    let (owner_token, _) = server
+    let (_, reg_body) = server
         .register("owner", "owner@test.com", "Password123")
         .await;
+    // Creating invitations requires admin privileges.
+    let owner_id = reg_body["data"]["user"]["id"].as_str().unwrap();
+    server.make_admin(owner_id).await;
+    let (owner_token, _) = server.login("owner@test.com", "Password123").await;
 
     let invite_resp = server
         .client
@@ -2279,7 +2319,7 @@ async fn test_document_creation_requires_parent_access_and_supports_room_root() 
         .headers(server.auth_header(&outsider_token))
         .json(&serde_json::json!({
             "name": "Forbidden Doc",
-            "doc_type": "writer",
+            "document_type": "writer",
             "parent_id": private_folder_id,
         }))
         .send()
@@ -2320,7 +2360,7 @@ async fn test_document_creation_requires_parent_access_and_supports_room_root() 
         .headers(server.auth_header(&member_token))
         .json(&serde_json::json!({
             "name": "Room Writer",
-            "doc_type": "writer",
+            "document_type": "writer",
             "room_id": room_id,
         }))
         .send()
@@ -2355,7 +2395,7 @@ async fn test_document_creation_requires_parent_access_and_supports_room_root() 
         .headers(server.auth_header(&outsider_token))
         .json(&serde_json::json!({
             "name": "No Access Room Doc",
-            "doc_type": "writer",
+            "document_type": "writer",
             "room_id": room_id,
         }))
         .send()
@@ -2731,10 +2771,7 @@ async fn test_heartbeat() {
     // Send heartbeat.
     let resp = server
         .client
-        .post(server.url(&format!(
-            "/api/v1/documents/{}/presence/heartbeat",
-            doc_id
-        )))
+        .post(server.url(&format!("/api/v1/documents/{}/presence/heartbeat", doc_id)))
         .headers(server.auth_header(&token))
         .send()
         .await
@@ -3110,9 +3147,7 @@ async fn test_batch_move() {
         .register("user1", "user1@test.com", "password123")
         .await;
 
-    let (folder_id, _) = server
-        .create_folder(&token, "Batch Target", None)
-        .await;
+    let (folder_id, _) = server.create_folder(&token, "Batch Target", None).await;
 
     // Upload a file.
     let part = reqwest::multipart::Part::bytes(b"move me".to_vec())
@@ -3267,7 +3302,7 @@ async fn test_admin_set_quota() {
         .headers(server.auth_header(&admin_token))
         .json(&serde_json::json!({
             "user_id": user_id,
-            "storage_quota_mb": 500
+            "storage_quota": 524288000
         }))
         .send()
         .await
@@ -3276,7 +3311,6 @@ async fn test_admin_set_quota() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
-    // 500 MB = 500 * 1024 * 1024 = 524288000 bytes.
     assert_eq!(body["data"]["storage_quota"], 524288000_i64);
 }
 
@@ -3368,7 +3402,12 @@ async fn test_totp_setup() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
     assert!(body["data"]["secret"].is_string());
-    assert!(body["data"]["qr_url"].as_str().unwrap().contains("otpauth://totp/"));
+    assert!(
+        body["data"]["qr_url"]
+            .as_str()
+            .unwrap()
+            .contains("otpauth://totp/")
+    );
     let backup_codes = body["data"]["backup_codes"].as_array().unwrap();
     assert_eq!(backup_codes.len(), 8);
 }
@@ -3395,7 +3434,12 @@ async fn test_forgot_password() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
-    assert!(body["data"]["message"].as_str().unwrap().contains("reset token"));
+    assert!(
+        body["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reset token")
+    );
 }
 
 #[tokio::test]
@@ -3970,10 +4014,7 @@ async fn test_room_remove_member() {
     // Remove member.
     let resp = server
         .client
-        .delete(server.url(&format!(
-            "/api/v1/rooms/{}/members/{}",
-            room_id, member_id
-        )))
+        .delete(server.url(&format!("/api/v1/rooms/{}/members/{}", room_id, member_id)))
         .headers(server.auth_header(&owner_token))
         .send()
         .await
@@ -4554,9 +4595,7 @@ async fn test_list_favorites() {
     let (_, file_id1, _) = server
         .create_document(&token, "Fav A", "writer", None)
         .await;
-    let (_, file_id2, _) = server
-        .create_document(&token, "Fav B", "calc", None)
-        .await;
+    let (_, file_id2, _) = server.create_document(&token, "Fav B", "calc", None).await;
 
     for fid in &[&file_id1, &file_id2] {
         server
@@ -4955,7 +4994,7 @@ async fn test_create_template() {
         .json(&serde_json::json!({
             "name": "Meeting Notes",
             "description": "Template for meeting notes",
-            "doc_type": "writer",
+            "document_type": "writer",
             "content": template_content
         }))
         .send()
@@ -4967,7 +5006,7 @@ async fn test_create_template() {
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["name"], "Meeting Notes");
     assert_eq!(body["data"]["description"], "Template for meeting notes");
-    assert_eq!(body["data"]["doc_type"], "writer");
+    assert_eq!(body["data"]["document_type"], "writer");
     assert!(body["data"]["content"].is_object());
 }
 
@@ -4986,7 +5025,7 @@ async fn test_list_templates() {
             .headers(server.auth_header(&token))
             .json(&serde_json::json!({
                 "name": name,
-                "doc_type": "writer"
+                "document_type": "writer"
             }))
             .send()
             .await
@@ -5021,7 +5060,7 @@ async fn test_get_template() {
         .headers(server.auth_header(&token))
         .json(&serde_json::json!({
             "name": "Get Template",
-            "doc_type": "calc"
+            "document_type": "calc"
         }))
         .send()
         .await
@@ -5042,7 +5081,7 @@ async fn test_get_template() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["name"], "Get Template");
-    assert_eq!(body["data"]["doc_type"], "calc");
+    assert_eq!(body["data"]["document_type"], "calc");
     assert_eq!(body["data"]["id"], template_id);
 }
 
@@ -5064,7 +5103,7 @@ async fn test_create_document_from_template() {
         .headers(server.auth_header(&token))
         .json(&serde_json::json!({
             "name": "Doc Template",
-            "doc_type": "writer",
+            "document_type": "writer",
             "content": template_content
         }))
         .send()
@@ -5092,7 +5131,7 @@ async fn test_create_document_from_template() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
     assert_eq!(body["data"]["name"], "From Template");
-    assert_eq!(body["data"]["doc_type"], "writer");
+    assert_eq!(body["data"]["document_type"], "writer");
     assert_eq!(body["data"]["version"], 1);
     // Content should come from the template.
     assert_eq!(body["data"]["content"]["title"], "Default Title");
@@ -5111,7 +5150,7 @@ async fn test_delete_template() {
         .headers(server.auth_header(&token))
         .json(&serde_json::json!({
             "name": "Doomed Template",
-            "doc_type": "writer"
+            "document_type": "writer"
         }))
         .send()
         .await

@@ -9,7 +9,6 @@ use contrix_core::dto::ApiResponse;
 use contrix_core::error::AppError;
 use contrix_core::models::{NewTenant, Tenant};
 use contrix_core::schema::tenants::dsl as t;
-use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::get_user_role;
 use crate::state::AppState;
@@ -283,7 +282,9 @@ pub async fn update_tenant(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let target = t::tenants.filter(t::id.eq(&tenant_id));
 
     // Always update `updated_at`.
-    let base_result = diesel::update(target).set(t::updated_at.eq(&now)).execute(&mut conn);
+    let base_result = diesel::update(target)
+        .set(t::updated_at.eq(&now))
+        .execute(&mut conn);
     if let Err(e) = base_result {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(

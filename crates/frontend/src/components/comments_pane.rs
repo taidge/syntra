@@ -20,11 +20,17 @@ pub struct CommentItem {
     pub created_at: String,
     #[serde(default)]
     pub is_resolved: bool,
+    /// Parent comment id for threaded replies (None for top-level comments).
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
 struct CreateComment {
     content: String,
+    /// When replying, the id of the comment being replied to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_id: Option<String>,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -97,24 +103,22 @@ pub fn CommentsPane(props: CommentsPaneProps) -> Element {
     let token = auth.read().token.clone().unwrap_or_default();
     let doc_id_for_fetch = props.doc_id.clone();
     let token_for_fetch = token.clone();
-    let mut refresh_tick = use_signal(|| 0u32);
+    let refresh_tick = use_signal(|| 0u32);
 
     let comments = use_resource(move || {
         let _ = refresh_tick.read();
         let id = doc_id_for_fetch.clone();
         let t = token_for_fetch.clone();
         async move {
-            crate::state::api_get::<Vec<CommentItem>>(
-                &format!("/documents/{id}/comments"),
-                &t,
-            )
-            .await
+            crate::state::api_get::<Vec<CommentItem>>(&format!("/documents/{id}/comments"), &t)
+                .await
         }
     });
 
     let mut draft = use_signal(String::new);
     let mut suggestions = use_signal(Vec::<String>::new);
     let mut selected_idx = use_signal(|| 0usize);
+    let mut reply_to = use_signal(|| None::<String>);
     let mut open_sig = props.open;
     if !*open_sig.read() {
         return rsx! { Fragment {} };
@@ -133,11 +137,14 @@ pub fn CommentsPane(props: CommentsPaneProps) -> Element {
         let mut tick = refresh_tick;
         let mut local_draft = draft;
         let mut local_sugg = suggestions;
+        let mut local_reply = reply_to;
+        let parent = reply_to.read().clone();
         wasm_bindgen_futures::spawn_local(async move {
             match api_post::<serde_json::Value, _>(
                 &format!("/documents/{id}/comments"),
                 &CreateComment {
                     content: content.clone(),
+                    parent_id: parent,
                 },
                 &t,
             )
@@ -147,25 +154,31 @@ pub fn CommentsPane(props: CommentsPaneProps) -> Element {
                     push_toast(bus, ToastKind::Success, crate::i18n::t("comments.added"));
                     local_draft.set(String::new());
                     local_sugg.write().clear();
+                    local_reply.set(None);
                     let cur = *tick.read();
                     tick.set(cur + 1);
                 }
-                Err(e) => push_toast(bus, ToastKind::Error, crate::i18n::t("comments.add_failed").replace("{err}", &e.to_string())),
+                Err(e) => push_toast(
+                    bus,
+                    ToastKind::Error,
+                    crate::i18n::t("comments.add_failed").replace("{err}", &e.to_string()),
+                ),
             }
         });
     };
 
+    // Mention candidates: everyone who has commented on this document, plus
+    // the current user.
     let pool: Vec<String> = {
-        let mut v: Vec<String> = vec![
-            "alice".to_string(),
-            "bob".to_string(),
-            "charlie".to_string(),
-            "demo".to_string(),
-        ];
+        let mut v: Vec<String> = Vec::new();
         if let Some(u) = auth.read().user.as_ref() {
-            let me = u.username.clone();
-            if !v.iter().any(|x| x == &me) {
-                v.insert(0, me);
+            v.push(u.username.clone());
+        }
+        if let Some(Ok(items)) = comments.read().as_ref() {
+            for c in items {
+                if !c.username.is_empty() && !v.iter().any(|x| x == &c.username) {
+                    v.push(c.username.clone());
+                }
             }
         }
         v
@@ -207,26 +220,66 @@ pub fn CommentsPane(props: CommentsPaneProps) -> Element {
                     None => rsx! { p { class: "muted", "{loading_label}" } },
                     Some(Err(e)) => rsx! { p { class: "muted", {crate::i18n::t("comments.failed").replace("{err}", &e.to_string())} } },
                     Some(Ok(items)) if items.is_empty() => rsx! { p { class: "muted", "{empty_label}" } },
-                    Some(Ok(items)) => rsx! {
-                        for c in items.iter().cloned() {
-                            div { class: "comment-item", key: "{c.id}",
-                                div { class: "comment-meta",
-                                    strong {
-                                        {
-                                            c.display_name
-                                                .clone()
-                                                .unwrap_or_else(|| c.username.clone())
+                    Some(Ok(items)) => {
+                        // Order as threads: each top-level comment followed by its replies.
+                        let top: Vec<CommentItem> =
+                            items.iter().filter(|c| c.parent_id.is_none()).cloned().collect();
+                        let reply_label = crate::i18n::t("comments.reply");
+                        rsx! {
+                            for c in top {
+                                {
+                                    let replies: Vec<CommentItem> = items
+                                        .iter()
+                                        .filter(|r| r.parent_id.as_deref() == Some(c.id.as_str()))
+                                        .cloned()
+                                        .collect();
+                                    let parent_id = c.id.clone();
+                                    let reply_label = reply_label.clone();
+                                    rsx! {
+                                        div { class: "comment-item", key: "{c.id}",
+                                            div { class: "comment-meta",
+                                                strong {
+                                                    { c.display_name.clone().unwrap_or_else(|| c.username.clone()) }
+                                                }
+                                                span { class: "muted", " \u{00b7} {c.created_at}" }
+                                            }
+                                            {render_with_mentions(&c.content)}
+                                            button {
+                                                class: "btn-link comment-reply-btn",
+                                                onclick: move |_| reply_to.set(Some(parent_id.clone())),
+                                                "{reply_label}"
+                                            }
+                                            for r in replies {
+                                                div { class: "comment-item comment-reply", key: "{r.id}",
+                                                    div { class: "comment-meta",
+                                                        strong {
+                                                            { r.display_name.clone().unwrap_or_else(|| r.username.clone()) }
+                                                        }
+                                                        span { class: "muted", " \u{00b7} {r.created_at}" }
+                                                    }
+                                                    {render_with_mentions(&r.content)}
+                                                }
+                                            }
                                         }
                                     }
-                                    span { class: "muted", " \u{00b7} {c.created_at}" }
                                 }
-                                {render_with_mentions(&c.content)}
                             }
                         }
                     }
                 }
             }
             div { class: "comments-compose",
+                if reply_to.read().is_some() {
+                    div { class: "comment-replying-indicator",
+                        span { class: "muted", {crate::i18n::t("comments.replying")} }
+                        button {
+                            class: "btn-link",
+                            r#type: "button",
+                            onclick: move |_| reply_to.set(None),
+                            {crate::i18n::t("comments.cancel_reply")}
+                        }
+                    }
+                }
                 if !suggestions.read().is_empty() {
                     div { class: "mention-suggestions", role: "listbox",
                         for (i, s) in suggestions.read().iter().cloned().enumerate() {

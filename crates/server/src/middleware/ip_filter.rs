@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use diesel::prelude::*;
@@ -6,6 +7,48 @@ use salvo::prelude::*;
 use contrix_core::schema::ip_restrictions::dsl as ip;
 
 use crate::state::AppState;
+
+/// Whether `client` matches an `ip_range` rule. The rule may be a single IP
+/// (exact match) or CIDR notation (`10.0.0.0/8`, `2001:db8::/32`).
+fn ip_matches(range: &str, client: IpAddr) -> bool {
+    let range = range.trim();
+    if let Some((base, prefix)) = range.split_once('/') {
+        let prefix: u32 = match prefix.trim().parse() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        match (base.trim().parse::<IpAddr>(), client) {
+            (Ok(IpAddr::V4(b)), IpAddr::V4(c)) => {
+                if prefix > 32 {
+                    return false;
+                }
+                let mask: u32 = if prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - prefix)
+                };
+                (u32::from(b) & mask) == (u32::from(c) & mask)
+            }
+            (Ok(IpAddr::V6(b)), IpAddr::V6(c)) => {
+                if prefix > 128 {
+                    return false;
+                }
+                let mask: u128 = if prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - prefix)
+                };
+                (u128::from(b) & mask) == (u128::from(c) & mask)
+            }
+            _ => false,
+        }
+    } else {
+        match range.parse::<IpAddr>() {
+            Ok(r) => r == client,
+            Err(_) => false,
+        }
+    }
+}
 
 /// Middleware that enforces IP-based access restrictions stored in the
 /// `ip_restrictions` database table.
@@ -17,9 +60,34 @@ use crate::state::AppState;
 ///   (denylist mode).
 /// - If there are no rules, all traffic is permitted.
 ///
-/// Matching is performed as an exact string comparison on `ip_range`
-/// (not CIDR).
+/// Each `ip_range` rule may be a single IP address (exact match) or CIDR
+/// notation such as `10.0.0.0/8` or `2001:db8::/32`.
 pub struct IpFilter;
+
+#[cfg(test)]
+mod ip_filter_tests {
+    use super::*;
+
+    #[test]
+    fn cidr_and_exact_matching() {
+        let c: IpAddr = "10.1.2.3".parse().unwrap();
+        assert!(ip_matches("10.0.0.0/8", c));
+        assert!(!ip_matches("10.2.0.0/16", c));
+        assert!(ip_matches("10.1.2.3", c));
+        assert!(!ip_matches("10.1.2.4", c));
+        assert!(ip_matches("0.0.0.0/0", c));
+        // Malformed rules never match.
+        assert!(!ip_matches("not-an-ip", c));
+        assert!(!ip_matches("10.0.0.0/40", c));
+    }
+
+    #[test]
+    fn cidr_v6_matching() {
+        let c: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(ip_matches("2001:db8::/32", c));
+        assert!(!ip_matches("2001:dead::/32", c));
+    }
+}
 
 #[handler]
 impl IpFilter {
@@ -48,24 +116,13 @@ impl IpFilter {
             }
         };
 
-        // Resolve client IP address from headers or remote addr.
-        let client_ip = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-            .or_else(|| {
-                req.headers()
-                    .get("x-real-ip")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| format!("{}", req.remote_addr()));
-
-        if client_ip.is_empty() {
-            // No IP detected — allow the request through.
-            return;
-        }
+        let client_ip = match req.remote_addr().ip() {
+            Some(addr) => addr,
+            None => {
+                // No IP detected — allow the request through.
+                return;
+            }
+        };
 
         // Load all restriction rules.
         let rules: Vec<(String, String)> = match ip::ip_restrictions
@@ -90,7 +147,7 @@ impl IpFilter {
             // Allowlist mode: the client IP must match at least one "allow" rule.
             let is_allowed = rules
                 .iter()
-                .any(|(range, rtype)| rtype == "allow" && range == &client_ip);
+                .any(|(range, rtype)| rtype == "allow" && ip_matches(range, client_ip));
 
             if !is_allowed {
                 res.status_code(StatusCode::FORBIDDEN);
@@ -108,7 +165,7 @@ impl IpFilter {
             // Denylist mode: block the client if it matches a "deny" rule.
             let is_denied = rules
                 .iter()
-                .any(|(range, rtype)| rtype == "deny" && range == &client_ip);
+                .any(|(range, rtype)| rtype == "deny" && ip_matches(range, client_ip));
 
             if is_denied {
                 res.status_code(StatusCode::FORBIDDEN);

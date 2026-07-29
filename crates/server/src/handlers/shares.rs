@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use argon2::{
+    Argon2, PasswordHash, PasswordVerifier,
+    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
+};
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -7,12 +11,21 @@ use uuid::Uuid;
 
 use contrix_core::dto::{ApiResponse, CreateShareRequest, ShareResponse};
 use contrix_core::error::AppError;
-use contrix_core::models::{NewShare, SharePermission};
+use contrix_core::models::{File, NewShare, SharePermission};
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::shares::dsl as s;
 
 use crate::middleware::auth::get_user_id;
+use crate::services::StorageService;
 use crate::state::AppState;
+
+fn hash_share_password(password: &str) -> Result<String, AppError> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|e| AppError::Internal(format!("Failed to hash share password: {e}")))
+}
 
 // ---------------------------------------------------------------------------
 // POST /shares
@@ -81,22 +94,27 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
     let share_id_val = Uuid::new_v4();
     let now = Utc::now();
-    let shared_with_str = body.shared_with.map(|sw| sw.to_string());
-    let pub_token = if body.shared_with.is_none() {
+    let shared_with_str = body.shared_with_user_id.map(|sw| sw.to_string());
+    let pub_token = if body.shared_with_user_id.is_none() {
         Some(Uuid::new_v4().to_string().replace('-', ""))
     } else {
         None
     };
     let expires_at_str = body.expires_at.map(|dt| dt.to_rfc3339());
 
-    let shared_with_group_str = body.shared_with_group.map(|g| g.to_string());
+    let shared_with_group_str = body.shared_with_group_id.map(|g| g.to_string());
 
-    // Hash password if provided
-    let password_hash_val = body.password.as_ref().map(|p| {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(p.as_bytes());
-        format!("{:x}", hash)
-    });
+    let password_hash_val = match body.password.as_deref() {
+        Some(password) if !password.is_empty() => match hash_share_password(password) {
+            Ok(hash) => Some(hash),
+            Err(e) => {
+                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                return;
+            }
+        },
+        _ => None,
+    };
 
     let new_share = NewShare {
         id: share_id_val.to_string(),
@@ -122,16 +140,16 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
                 &serde_json::json!({
                     "id": share_id_val.to_string(),
                     "file_id": body.file_id.to_string(),
-                    "shared_by": &uid,
-                    "shared_with": body.shared_with.map(|u| u.to_string()),
-                    "shared_with_group": body.shared_with_group.map(|g| g.to_string()),
+                    "shared_by_user_id": &uid,
+                    "shared_with_user_id": body.shared_with_user_id.map(|u| u.to_string()),
+                    "shared_with_group_id": body.shared_with_group_id.map(|g| g.to_string()),
                     "permission": body.permission.as_str(),
                     "public_token": &pub_token,
                     "created_at": now.to_rfc3339(),
                 }),
             );
 
-            if let Some(target) = body.shared_with.map(|u| u.to_string()) {
+            if let Some(target) = body.shared_with_user_id.map(|u| u.to_string()) {
                 if target != uid {
                     let from_username = contrix_core::schema::users::dsl::users
                         .filter(contrix_core::schema::users::dsl::id.eq(&uid))
@@ -155,13 +173,13 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
             let resp = ShareResponse {
                 id: share_id_val,
                 file_id: body.file_id,
-                shared_by: uid.parse().unwrap_or_default(),
-                shared_with: body.shared_with,
+                shared_by_user_id: uid.parse().unwrap_or_default(),
+                shared_with_user_id: body.shared_with_user_id,
                 permission: body.permission,
                 public_token: pub_token,
                 expires_at: body.expires_at,
                 created_at: now,
-                shared_with_group: body.shared_with_group,
+                shared_with_group_id: body.shared_with_group_id,
                 is_password_protected: password_hash_val.is_some(),
             };
             res.status_code(StatusCode::CREATED);
@@ -240,8 +258,8 @@ pub async fn get_share(req: &mut Request, depot: &mut Depot, res: &mut Response)
             let resp = ShareResponse {
                 id: sid.parse().unwrap_or_default(),
                 file_id: fid.parse().unwrap_or_default(),
-                shared_by: sby.parse().unwrap_or_default(),
-                shared_with: sw.as_deref().and_then(|v| v.parse().ok()),
+                shared_by_user_id: sby.parse().unwrap_or_default(),
+                shared_with_user_id: sw.as_deref().and_then(|v| v.parse().ok()),
                 permission: SharePermission::from_str(&perm),
                 public_token: pt,
                 expires_at: exp
@@ -249,7 +267,7 @@ pub async fn get_share(req: &mut Request, depot: &mut Depot, res: &mut Response)
                     .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
                     .map(|d| d.with_timezone(&Utc)),
                 created_at: cat.parse().unwrap_or_else(|_| Utc::now()),
-                shared_with_group: swg.as_deref().and_then(|v| v.parse().ok()),
+                shared_with_group_id: swg.as_deref().and_then(|v| v.parse().ok()),
                 is_password_protected: pwh.is_some(),
             };
             res.status_code(StatusCode::OK);
@@ -504,8 +522,8 @@ pub async fn list_file_shares(req: &mut Request, depot: &mut Depot, res: &mut Re
                     |(sid, fid, sby, sw, perm, pt, exp, cat, swg, pwh)| ShareResponse {
                         id: sid.parse().unwrap_or_default(),
                         file_id: fid.parse().unwrap_or_default(),
-                        shared_by: sby.parse().unwrap_or_default(),
-                        shared_with: sw.as_deref().and_then(|v| v.parse().ok()),
+                        shared_by_user_id: sby.parse().unwrap_or_default(),
+                        shared_with_user_id: sw.as_deref().and_then(|v| v.parse().ok()),
                         permission: SharePermission::from_str(&perm),
                         public_token: pt,
                         expires_at: exp
@@ -513,7 +531,7 @@ pub async fn list_file_shares(req: &mut Request, depot: &mut Depot, res: &mut Re
                             .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
                             .map(|d| d.with_timezone(&Utc)),
                         created_at: cat.parse().unwrap_or_else(|_| Utc::now()),
-                        shared_with_group: swg.as_deref().and_then(|v| v.parse().ok()),
+                        shared_with_group_id: swg.as_deref().and_then(|v| v.parse().ok()),
                         is_password_protected: pwh.is_some(),
                     },
                 )
@@ -528,4 +546,164 @@ pub async fn list_file_shares(req: &mut Request, depot: &mut Depot, res: &mut Re
             )));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// GET /public/shares/{token}  (Public, unauthenticated share access)
+// ---------------------------------------------------------------------------
+
+/// Download a file via a public share token. No authentication is required, but
+/// the share must exist, be unexpired, and — if password-protected — the
+/// correct password must be supplied via the `password` query parameter.
+#[handler]
+pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let token: String = req.param("token").unwrap_or_default();
+    let supplied_password: Option<String> = req.query("password");
+
+    if token.is_empty() {
+        res.status_code(StatusCode::NOT_FOUND);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::NotFound("Share not found".into()).to_response(),
+        )));
+        return;
+    }
+
+    let mut conn = match state.db.get() {
+        Ok(c) => c,
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    // Look up the share by its public token.
+    let share = s::shares
+        .filter(s::public_token.eq(&token))
+        .select((s::file_id, s::expires_at, s::password_hash))
+        .first::<(String, Option<String>, Option<String>)>(&mut conn)
+        .optional();
+
+    let (file_id, expires_at, password_hash) = match share {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("Share not found".into()).to_response(),
+            )));
+            return;
+        }
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    // Reject expired shares.
+    if let Some(exp) = expires_at {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&exp) {
+            if dt.with_timezone(&Utc) < Utc::now() {
+                res.status_code(StatusCode::GONE);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::NotFound("This share has expired".into()).to_response(),
+                )));
+                return;
+            }
+        }
+    }
+
+    // Enforce the share password when one is set.
+    if let Some(ref hash) = password_hash {
+        let ok = supplied_password
+            .as_deref()
+            .and_then(|pw| {
+                PasswordHash::new(hash).ok().map(|parsed| {
+                    Argon2::default()
+                        .verify_password(pw.as_bytes(), &parsed)
+                        .is_ok()
+                })
+            })
+            .unwrap_or(false);
+        if !ok {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Auth("A valid password is required for this share".into()).to_response(),
+            )));
+            return;
+        }
+    }
+
+    // Load the underlying file and stream its content.
+    let file_row = match f::files
+        .filter(f::id.eq(&file_id))
+        .filter(f::is_trashed.eq(false))
+        .first::<File>(&mut conn)
+        .optional()
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("Shared file no longer exists".into()).to_response(),
+            )));
+            return;
+        }
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let data = match state.storage.read_file(&file_row.path).await {
+        Ok(d) => d,
+        Err(_) => {
+            // Documents are stored as JSON blobs; fall back to the document row.
+            use contrix_core::schema::documents::dsl as d;
+            let content = d::documents
+                .filter(d::file_id.eq(&file_row.id))
+                .select(d::content)
+                .first::<Option<String>>(&mut conn)
+                .optional()
+                .ok()
+                .flatten()
+                .flatten();
+            match content {
+                Some(c) => c.into_bytes(),
+                None => {
+                    res.status_code(StatusCode::NOT_FOUND);
+                    res.render(Json(ApiResponse::<()>::err(
+                        AppError::NotFound("Shared file content is unavailable".into())
+                            .to_response(),
+                    )));
+                    return;
+                }
+            }
+        }
+    };
+
+    let ct = file_row
+        .mime_type
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    res.status_code(StatusCode::OK);
+    if let Ok(ct_val) = ct.parse() {
+        res.headers_mut().insert("content-type", ct_val);
+    }
+    if let Ok(cd) = format!(
+        "attachment; filename=\"{}\"",
+        StorageService::sanitize_file_name(&file_row.name)
+    )
+    .parse()
+    {
+        res.headers_mut().insert("content-disposition", cd);
+    }
+    res.body(salvo::http::body::ResBody::Once(bytes::Bytes::from(data)));
 }

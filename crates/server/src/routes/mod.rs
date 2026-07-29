@@ -4,6 +4,7 @@ use salvo::prelude::*;
 
 use crate::handlers;
 use crate::middleware::auth::jwt_auth_middleware;
+use crate::middleware::ip_filter::IpFilter;
 use crate::middleware::rate_limit::RateLimiter;
 use crate::middleware::security_headers::SecurityHeaders;
 use crate::state::AppState;
@@ -13,15 +14,27 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // Middleware that injects AppState into every request depot.
     let state_injector = StateInjector(state.clone());
 
-    // Rate limiter middleware.
+    // Edge rate limiter (runs before auth): keys by client IP and protects
+    // every route, including unauthenticated ones.
     let rate_limiter = RateLimiter::new(
         state.config.rate_limit.max_requests,
         state.config.rate_limit.window_seconds,
         state.config.rate_limit.enabled,
+        state.config.rate_limit.trust_forwarded_headers,
+    );
+
+    // Per-user rate limiter (runs after JWT auth): keys by the authenticated
+    // user id so multiple users behind one NAT/proxy do not share a quota.
+    let user_rate_limiter = RateLimiter::new(
+        state.config.rate_limit.max_requests,
+        state.config.rate_limit.window_seconds,
+        state.config.rate_limit.enabled,
+        state.config.rate_limit.trust_forwarded_headers,
     );
 
     Router::new()
         .hoop(state_injector)
+        .hoop(IpFilter)
         .hoop(rate_limiter)
         .hoop(SecurityHeaders)
         .push(
@@ -33,10 +46,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 .push(wopi_routes())
                 .push(invitation_public_routes())
                 .push(client_log_public_routes())
+                .push(share_public_routes())
                 // --- Protected routes (auth required) ---
                 .push(
                     Router::new()
                         .hoop(jwt_auth_middleware)
+                        .hoop(user_rate_limiter)
                         .push(auth_protected_routes())
                         .push(file_routes())
                         .push(folder_routes())
@@ -195,6 +210,11 @@ fn document_routes() -> Router {
                         ),
                 ),
         )
+}
+
+/// Public (unauthenticated) share access by token.
+fn share_public_routes() -> Router {
+    Router::with_path("public/shares/{token}").get(handlers::shares::access_public_share)
 }
 
 fn share_routes() -> Router {

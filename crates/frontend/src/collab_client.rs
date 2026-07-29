@@ -67,17 +67,11 @@ pub fn connect_collab(document_id: &str, token: &str) -> Result<WebSocket, Strin
     Ok(ws)
 }
 
-pub fn send_message(ws: &WebSocket, msg: &CollabMessage) -> Result<(), String> {
-    let json = serde_json::to_string(msg).map_err(|e| e.to_string())?;
-    ws.send_with_str(&json).map_err(|e| format!("{:?}", e))
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct RemoteCursor {
     pub user_id: String,
     pub username: String,
     pub color: String,
-    pub is_active: bool,
     pub position: Option<u32>,
 }
 
@@ -191,7 +185,11 @@ fn open_connection(
     }
 
     {
-        let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |_evt: web_sys::Event| {});
+        // Reconnection is driven by onclose (which always follows onerror);
+        // here we only surface the failure for debugging.
+        let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |_evt: web_sys::Event| {
+            web_sys::console::warn_1(&"collab websocket error".into());
+        });
         ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
         onerror.forget();
     }

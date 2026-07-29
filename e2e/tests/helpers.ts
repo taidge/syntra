@@ -62,7 +62,7 @@ export async function createDocument(
 ): Promise<any> {
   const response = await request.post(`${API_BASE}/documents`, {
     headers: authHeaders(token),
-    data: { name, doc_type: docType, parent_id: parentId || null },
+    data: { name, document_type: docType, parent_id: parentId || null },
   });
   const body = await response.json();
   return { response, body };

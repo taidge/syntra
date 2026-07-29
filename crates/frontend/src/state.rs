@@ -15,13 +15,6 @@ pub struct AuthState {
     pub user: Option<UserInfo>,
 }
 
-impl AuthState {
-    /// Returns `true` when the user is authenticated.
-    pub fn is_authenticated(&self) -> bool {
-        self.token.is_some() && self.user.is_some()
-    }
-}
-
 /// Lightweight user info kept in client-side state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserInfo {
@@ -99,7 +92,6 @@ pub struct CreateFolderRequest {
 pub struct FileResponse {
     pub id: Uuid,
     pub name: String,
-    pub path: String,
     pub mime_type: Option<String>,
     pub size: i64,
     pub owner_id: Uuid,
@@ -284,12 +276,86 @@ pub async fn api_delete(path: &str, token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Trigger a document export by opening the export URL in a new tab.
-pub async fn export_document(doc_id: &str, format: &str, _token: &str) -> Result<(), String> {
+/// Export a document via the authenticated POST endpoint and trigger a
+/// browser download of the returned bytes.
+pub async fn export_document(doc_id: &str, format: &str, token: &str) -> Result<(), String> {
     let url = format!("{API_BASE}/documents/{doc_id}/export/{format}");
-    if let Some(window) = web_sys::window() {
-        let _ = window.open_with_url(&url);
+
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_mode(RequestMode::SameOrigin);
+
+    let headers = Headers::new().map_err(|e| format!("{:?}", e))?;
+    if !token.is_empty() {
+        headers
+            .set("Authorization", &format!("Bearer {}", token))
+            .map_err(|e| format!("{:?}", e))?;
     }
+    opts.set_headers(&headers);
+
+    let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| format!("{:?}", e))?;
+    let window = web_sys::window().ok_or_else(|| "no global window object".to_string())?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+    let resp: Response = resp_value
+        .dyn_into()
+        .map_err(|_| "fetch did not return a Response".to_string())?;
+
+    if !resp.ok() {
+        if let Ok(text_promise) = resp.text() {
+            if let Ok(text_val) = JsFuture::from(text_promise).await {
+                if let Some(text) = text_val.as_string() {
+                    if let Ok(envelope) =
+                        serde_json::from_str::<ApiResponse<serde_json::Value>>(&text)
+                    {
+                        if let Some(err) = envelope.error {
+                            return Err(err.message);
+                        }
+                    }
+                }
+            }
+        }
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    // Prefer the server-provided filename from Content-Disposition.
+    let file_name = resp
+        .headers()
+        .get("content-disposition")
+        .ok()
+        .flatten()
+        .and_then(|cd| {
+            cd.split("filename=")
+                .nth(1)
+                .map(|part| part.trim_matches(|c| c == '"' || c == ' ').to_string())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("export.{format}"));
+
+    let blob_promise = resp.blob().map_err(|e| format!("{:?}", e))?;
+    let blob_value = JsFuture::from(blob_promise)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+    let blob: web_sys::Blob = blob_value
+        .dyn_into()
+        .map_err(|_| "response body is not a Blob".to_string())?;
+
+    let object_url =
+        web_sys::Url::create_object_url_with_blob(&blob).map_err(|e| format!("{:?}", e))?;
+    let document = window
+        .document()
+        .ok_or_else(|| "no document object".to_string())?;
+    let anchor: web_sys::HtmlAnchorElement = document
+        .create_element("a")
+        .map_err(|e| format!("{:?}", e))?
+        .dyn_into()
+        .map_err(|_| "failed to create anchor element".to_string())?;
+    anchor.set_href(&object_url);
+    anchor.set_download(&file_name);
+    anchor.click();
+    let _ = web_sys::Url::revoke_object_url(&object_url);
+
     Ok(())
 }
 

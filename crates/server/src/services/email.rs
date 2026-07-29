@@ -12,69 +12,43 @@ use contrix_core::schema::smtp_settings::dsl as smtp;
 pub struct EmailService;
 
 impl EmailService {
-    /// Send a notification email using SMTP settings from the database.
-    ///
-    /// This is a best-effort service: when SMTP is not configured or sending
-    /// fails, the error is logged but never propagated to callers.
-    pub fn send_notification(
+    /// Send an email using SMTP settings from the database, returning an error
+    /// describing any failure (no SMTP configured, bad address, transport/send
+    /// error). Use this when the caller needs to know the outcome (e.g. an
+    /// admin "test SMTP" action).
+    pub fn send(
         pool: &Pool<ConnectionManager<SqliteConnection>>,
         to_email: &str,
         subject: &str,
         body_html: &str,
-    ) {
-        let mut conn = match pool.get() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("EmailService: failed to get db connection: {e}");
-                return;
-            }
-        };
+    ) -> Result<(), String> {
+        let mut conn = pool
+            .get()
+            .map_err(|e| format!("failed to get db connection: {e}"))?;
 
-        // Try to load SMTP configuration from the database.
-        let settings: Option<SmtpSettings> = match smtp::smtp_settings
+        let cfg: SmtpSettings = smtp::smtp_settings
             .first::<SmtpSettings>(&mut conn)
             .optional()
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("EmailService: failed to query smtp_settings: {e}");
-                None
-            }
-        };
+            .map_err(|e| format!("failed to query smtp_settings: {e}"))?
+            .ok_or_else(|| "no SMTP settings configured".to_string())?;
 
-        let cfg = match settings {
-            Some(cfg) => cfg,
-            None => {
-                tracing::info!(
-                    "EmailService: no SMTP configured — skipping email to={to_email} subject=\"{subject}\""
-                );
-                return;
-            }
-        };
-
-        // Build the email message.
         let from_addr = format!("{} <{}>", cfg.from_name, cfg.from_email);
-        let email = match Message::builder()
-            .from(from_addr.parse().unwrap_or_else(|_| {
-                cfg.from_email.parse().expect("Invalid from_email in SMTP settings")
-            }))
-            .to(to_email.parse().unwrap_or_else(|_| {
-                tracing::error!("EmailService: invalid recipient address: {to_email}");
-                // Use a dummy address that will cause transport to fail gracefully.
-                "invalid@invalid".parse().unwrap()
-            }))
+        let from = from_addr
+            .parse()
+            .or_else(|_| cfg.from_email.parse())
+            .map_err(|_| format!("invalid from address: {}", cfg.from_email))?;
+        let to = to_email
+            .parse()
+            .map_err(|_| format!("invalid recipient address: {to_email}"))?;
+
+        let email = Message::builder()
+            .from(from)
+            .to(to)
             .subject(subject)
             .header(ContentType::TEXT_HTML)
             .body(body_html.to_string())
-        {
-            Ok(msg) => msg,
-            Err(e) => {
-                tracing::error!("EmailService: failed to build email: {e}");
-                return;
-            }
-        };
+            .map_err(|e| format!("failed to build email: {e}"))?;
 
-        // Build the SMTP transport.
         let creds = match (cfg.username.as_deref(), cfg.password.as_deref()) {
             (Some(user), Some(pass)) if !user.is_empty() => {
                 Some(Credentials::new(user.to_string(), pass.to_string()))
@@ -82,56 +56,43 @@ impl EmailService {
             _ => None,
         };
 
-        let transport_result = if cfg.use_tls {
-            let builder = SmtpTransport::relay(&cfg.host);
-            match builder {
-                Ok(b) => {
-                    let b = b.port(cfg.port as u16);
-                    Ok(if let Some(creds) = creds {
-                        b.credentials(creds).build()
-                    } else {
-                        b.build()
-                    })
-                }
-                Err(e) => Err(e),
+        let transport = if cfg.use_tls {
+            let mut b = SmtpTransport::relay(&cfg.host)
+                .map_err(|e| format!("failed to create SMTP transport to {}: {e}", cfg.host))?
+                .port(cfg.port as u16);
+            if let Some(creds) = creds {
+                b = b.credentials(creds);
             }
+            b.build()
         } else {
-            let builder = SmtpTransport::builder_dangerous(&cfg.host).port(cfg.port as u16);
-            Ok(if let Some(creds) = creds {
-                builder.credentials(creds).build()
-            } else {
-                builder.build()
-            })
+            let mut b = SmtpTransport::builder_dangerous(&cfg.host).port(cfg.port as u16);
+            if let Some(creds) = creds {
+                b = b.credentials(creds);
+            }
+            b.build()
         };
 
-        let transport = match transport_result {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!(
-                    "EmailService: failed to create SMTP transport to {}:{} — {e}",
-                    cfg.host,
-                    cfg.port,
-                );
-                return;
-            }
-        };
+        transport
+            .send(&email)
+            .map(|_| ())
+            .map_err(|e| format!("failed to send email via {}:{} — {e}", cfg.host, cfg.port))
+    }
 
-        // Send the email.
-        match transport.send(&email) {
-            Ok(_) => {
-                tracing::info!(
-                    "EmailService: email sent to={to_email} subject=\"{subject}\" via {}:{}",
-                    cfg.host,
-                    cfg.port,
-                );
+    /// Best-effort notification email: when SMTP is unconfigured or sending
+    /// fails, the error is logged but never propagated to callers.
+    pub fn send_notification(
+        pool: &Pool<ConnectionManager<SqliteConnection>>,
+        to_email: &str,
+        subject: &str,
+        body_html: &str,
+    ) {
+        match Self::send(pool, to_email, subject, body_html) {
+            Ok(()) => {
+                tracing::info!("EmailService: email sent to={to_email} subject=\"{subject}\"")
             }
-            Err(e) => {
-                tracing::error!(
-                    "EmailService: failed to send email to={to_email} subject=\"{subject}\" via {}:{} — {e}",
-                    cfg.host,
-                    cfg.port,
-                );
-            }
+            Err(e) => tracing::warn!(
+                "EmailService: skipped/failed email to={to_email} subject=\"{subject}\": {e}"
+            ),
         }
     }
 }

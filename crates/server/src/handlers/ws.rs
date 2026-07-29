@@ -54,6 +54,46 @@ pub async fn collab_ws(req: &mut Request, depot: &mut Depot, res: &mut Response)
         }
     };
 
+    // Authorize: the user must have editor access to the underlying file before
+    // they may join the realtime session (read others' edits / write their own).
+    {
+        let mut conn = match state.db.get() {
+            Ok(c) => c,
+            Err(e) => {
+                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::Database(e.to_string()).to_response(),
+                )));
+                return;
+            }
+        };
+        match crate::handlers::access::load_accessible_document(
+            &mut conn,
+            &document_id_str,
+            &user_id_str,
+            "editor",
+        ) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                res.status_code(StatusCode::NOT_FOUND);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::NotFound("Document not found".into()).to_response(),
+                )));
+                return;
+            }
+            Err(e) => {
+                let code = match &e {
+                    AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+                    AppError::NotFound(_) => StatusCode::NOT_FOUND,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                res.status_code(code);
+                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                return;
+            }
+        }
+    }
+
     // Fetch username for the collab session.
     let username = {
         use contrix_core::schema::users::dsl as u;
@@ -120,7 +160,10 @@ async fn handle_ws(
                         if let Ok(text) = msg.as_str() {
                             if let Ok(collab_msg) = serde_json::from_str::<CollabMessage>(text) {
                                 match collab_msg {
-                                    CollabMessage::Operation(op) => {
+                                    CollabMessage::Operation(mut op) => {
+                                        // Never trust the client-supplied author;
+                                        // bind the operation to the authenticated user.
+                                        op.user_id = user_id;
                                         let version = collab.apply_operation(document_id, op.clone()).await;
                                         // Persist to DB
                                         if let Ok(ver) = &version {
@@ -141,7 +184,10 @@ async fn handle_ws(
                                             }
                                         }
                                     }
-                                    CollabMessage::CursorUpdate(cursor) => {
+                                    CollabMessage::CursorUpdate(mut cursor) => {
+                                        // Bind the cursor to the authenticated
+                                        // user so peers can't be impersonated.
+                                        cursor.user_id = user_id;
                                         collab.update_cursor(document_id, cursor).await;
                                     }
                                     _ => {}

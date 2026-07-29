@@ -6,7 +6,8 @@
 use std::io::{Cursor, Read, Write};
 
 use contrix_doc_engine::slides::{
-    Presentation, Slide, SlideElement, SlideLayout, SlideTextRun, TextBox,
+    Presentation, Shape, ShapeType, Slide, SlideElement, SlideImage, SlideLayout, SlideTextRun,
+    TextBox,
 };
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -122,14 +123,113 @@ fn slide_to_xml(slide: &Slide) -> String {
 
     let mut sp_id: u32 = 2;
     for element in &slide.elements {
-        if let SlideElement::TextBox(tb) = element {
-            text_box_to_xml(tb, sp_id, &mut xml);
-            sp_id += 1;
+        match element {
+            SlideElement::TextBox(tb) => text_box_to_xml(tb, sp_id, &mut xml),
+            SlideElement::Shape(shape) => shape_to_xml(shape, sp_id, &mut xml),
+            // Images need media parts + relationships to embed the bytes; until
+            // that pipeline exists, emit a framed placeholder carrying the alt
+            // text so the element is not silently dropped on export.
+            SlideElement::Image(img) => image_placeholder_to_xml(img, sp_id, &mut xml),
+            // Charts/videos/groups are not yet serialised to OOXML; emit a
+            // labelled placeholder rather than losing the element entirely.
+            SlideElement::Chart(c) => {
+                placeholder_box_to_xml(c.x, c.y, c.width, c.height, "[Chart]", sp_id, &mut xml)
+            }
+            SlideElement::Video(v) => {
+                placeholder_box_to_xml(v.x, v.y, v.width, v.height, "[Video]", sp_id, &mut xml)
+            }
+            SlideElement::Group(_) => {
+                placeholder_box_to_xml(0.0, 0.0, 200.0, 50.0, "[Group]", sp_id, &mut xml)
+            }
         }
+        sp_id += 1;
     }
 
     xml.push_str("</p:spTree></p:cSld></p:sld>");
     xml
+}
+
+/// Map an internal [`ShapeType`] to an OOXML preset geometry name.
+fn shape_preset(shape_type: ShapeType) -> &'static str {
+    match shape_type {
+        ShapeType::Rectangle => "rect",
+        ShapeType::RoundedRectangle => "roundRect",
+        ShapeType::Circle | ShapeType::Ellipse => "ellipse",
+        ShapeType::Triangle => "triangle",
+        ShapeType::Arrow => "rightArrow",
+        ShapeType::Star => "star5",
+        ShapeType::Diamond => "diamond",
+        ShapeType::Pentagon => "pentagon",
+        ShapeType::Hexagon => "hexagon",
+        ShapeType::Line => "line",
+        ShapeType::CurvedLine => "curvedConnector3",
+    }
+}
+
+fn shape_to_xml(shape: &Shape, sp_id: u32, xml: &mut String) {
+    let x_emu = (shape.x * 9525.0) as i64;
+    let y_emu = (shape.y * 9525.0) as i64;
+    let w_emu = (shape.width * 9525.0) as i64;
+    let h_emu = (shape.height * 9525.0) as i64;
+    let prst = shape_preset(shape.shape_type);
+
+    xml.push_str(&format!(
+        "<p:sp><p:nvSpPr><p:cNvPr id=\"{sp_id}\" name=\"Shape {sp_id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"
+    ));
+    xml.push_str(&format!(
+        "<p:spPr><a:xfrm><a:off x=\"{x_emu}\" y=\"{y_emu}\"/><a:ext cx=\"{w_emu}\" cy=\"{h_emu}\"/></a:xfrm><a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>"
+    ));
+    if let Some(ref fill) = shape.fill_color {
+        let c = fill.trim_start_matches('#');
+        xml.push_str(&format!(
+            "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+            escape_xml(c)
+        ));
+    }
+    xml.push_str("</p:spPr>");
+    xml.push_str("<p:txBody><a:bodyPr/><a:lstStyle/><a:p>");
+    if let Some(ref runs) = shape.text {
+        for run in runs {
+            run_to_xml(run, xml);
+        }
+    }
+    xml.push_str("</a:p></p:txBody></p:sp>");
+}
+
+fn image_placeholder_to_xml(img: &SlideImage, sp_id: u32, xml: &mut String) {
+    let label = if img.alt_text.is_empty() {
+        "[Image]".to_string()
+    } else {
+        format!("[Image: {}]", img.alt_text)
+    };
+    placeholder_box_to_xml(img.x, img.y, img.width, img.height, &label, sp_id, xml);
+}
+
+/// Emit a simple rectangle text box used as a placeholder for elements that are
+/// not yet fully serialised to OOXML, so their position and a label survive.
+fn placeholder_box_to_xml(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    label: &str,
+    sp_id: u32,
+    xml: &mut String,
+) {
+    let x_emu = (x * 9525.0) as i64;
+    let y_emu = (y * 9525.0) as i64;
+    let w_emu = (width.max(1.0) * 9525.0) as i64;
+    let h_emu = (height.max(1.0) * 9525.0) as i64;
+
+    xml.push_str(&format!(
+        "<p:sp><p:nvSpPr><p:cNvPr id=\"{sp_id}\" name=\"Placeholder {sp_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>"
+    ));
+    xml.push_str(&format!(
+        "<p:spPr><a:xfrm><a:off x=\"{x_emu}\" y=\"{y_emu}\"/><a:ext cx=\"{w_emu}\" cy=\"{h_emu}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>"
+    ));
+    xml.push_str("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\"/>");
+    xml.push_str(&format!("<a:t>{}</a:t>", escape_xml(label)));
+    xml.push_str("</a:r></a:p></p:txBody></p:sp>");
 }
 
 fn text_box_to_xml(tb: &TextBox, sp_id: u32, xml: &mut String) {
@@ -188,10 +288,7 @@ fn run_to_xml(run: &SlideTextRun, xml: &mut String) {
             ));
         }
         if let Some(ref font) = run.font_family {
-            xml.push_str(&format!(
-                "<a:latin typeface=\"{}\"/>",
-                escape_xml(font)
-            ));
+            xml.push_str(&format!("<a:latin typeface=\"{}\"/>", escape_xml(font)));
         }
         xml.push_str("</a:rPr>");
     } else {
@@ -411,9 +508,7 @@ mod tests {
     fn test_pptx_round_trip() {
         let mut pres = Presentation::new("Trip".into());
         // Replace default first slide content with our text.
-        pres.slides[0]
-            .elements
-            .clear();
+        pres.slides[0].elements.clear();
         pres.slides[0].add_text_box(10.0, 10.0, 400.0, 50.0, "First slide text");
 
         let slide2 = pres.add_slide(SlideLayout::Blank);

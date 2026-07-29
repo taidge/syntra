@@ -17,12 +17,15 @@ impl PasswordService {
             .optional()
         {
             Ok(Some(policy)) => policy,
+            // Default policy enforces only a minimum length so existing
+            // accounts/flows keep working; admins can opt into stricter
+            // composition rules via the password-policy API.
             _ => PasswordPolicy {
                 id: String::new(),
                 min_length: 8,
-                require_uppercase: true,
-                require_lowercase: true,
-                require_digit: true,
+                require_uppercase: false,
+                require_lowercase: false,
+                require_digit: false,
                 require_special: false,
                 max_age_days: None,
                 updated_by: String::new(),

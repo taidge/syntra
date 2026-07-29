@@ -10,7 +10,7 @@ use contrix_core::dto::{
     UpdateGroupRequest,
 };
 use contrix_core::error::AppError;
-use contrix_core::models::{Group, GroupMember, NewGroup, NewGroupMember};
+use contrix_core::models::{Group, NewGroup, NewGroupMember};
 use contrix_core::schema::group_members::dsl as gm;
 use contrix_core::schema::groups::dsl as g;
 use contrix_core::schema::users::dsl as u;
@@ -21,6 +21,31 @@ use crate::state::AppState;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Whether `user_id` created `group_id` or is a member of it.
+fn is_group_participant(
+    conn: &mut diesel::SqliteConnection,
+    group_id: &str,
+    user_id: &str,
+) -> bool {
+    let is_creator = g::groups
+        .filter(g::id.eq(group_id))
+        .filter(g::created_by.eq(user_id))
+        .count()
+        .get_result::<i64>(conn)
+        .unwrap_or(0)
+        > 0;
+    if is_creator {
+        return true;
+    }
+    gm::group_members
+        .filter(gm::group_id.eq(group_id))
+        .filter(gm::user_id.eq(user_id))
+        .count()
+        .get_result::<i64>(conn)
+        .unwrap_or(0)
+        > 0
+}
 
 fn group_model_to_response(row: Group, member_count: u32) -> GroupResponse {
     GroupResponse {
@@ -176,7 +201,7 @@ pub async fn list_groups(depot: &mut Depot, res: &mut Response) {
 #[handler]
 pub async fn get_group(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -206,6 +231,13 @@ pub async fn get_group(req: &mut Request, depot: &mut Depot, res: &mut Response)
         .optional()
     {
         Ok(Some(group)) => {
+            if !is_group_participant(&mut conn, &group_id_param, &uid) {
+                res.status_code(StatusCode::FORBIDDEN);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::Forbidden("Not a member of this group".into()).to_response(),
+                )));
+                return;
+            }
             let count: i64 = gm::group_members
                 .filter(gm::group_id.eq(&group.id))
                 .count()
@@ -600,7 +632,7 @@ pub async fn remove_member(req: &mut Request, depot: &mut Depot, res: &mut Respo
 #[handler]
 pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -623,6 +655,14 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
             return;
         }
     };
+
+    if !is_group_participant(&mut conn, &group_id_param, &uid) {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Forbidden("Not a member of this group".into()).to_response(),
+        )));
+        return;
+    }
 
     match gm::group_members
         .inner_join(u::users.on(gm::user_id.eq(u::id)))

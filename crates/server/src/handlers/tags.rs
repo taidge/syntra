@@ -9,10 +9,11 @@ use contrix_core::dto::{
     ApiResponse, CreateTagRequest, TagFileRequest, TagResponse, UpdateTagRequest,
 };
 use contrix_core::error::AppError;
-use contrix_core::models::{FileTag, NewFileTag, NewTag, Tag};
+use contrix_core::models::{NewFileTag, NewTag, Tag};
 use contrix_core::schema::file_tags::dsl as ft;
 use contrix_core::schema::tags::dsl as t;
 
+use crate::handlers::access::load_accessible_file;
 use crate::middleware::auth::get_user_id;
 use crate::state::AppState;
 
@@ -26,6 +27,65 @@ fn tag_model_to_response(row: Tag) -> TagResponse {
         name: row.name,
         color: row.color,
         created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
+    }
+}
+
+/// Verify the tag belongs to the user. Renders an error response and returns
+/// false when it does not.
+fn require_owned_tag(
+    conn: &mut diesel::SqliteConnection,
+    tag_id: &str,
+    uid: &str,
+    res: &mut Response,
+) -> bool {
+    match t::tags
+        .filter(t::id.eq(tag_id))
+        .filter(t::owner_id.eq(uid))
+        .select(t::id)
+        .first::<String>(conn)
+        .optional()
+    {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("Tag not found".into()).to_response(),
+            )));
+            false
+        }
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            false
+        }
+    }
+}
+
+/// Verify the user can access the file with `required_role`. Renders an error
+/// response and returns false when they cannot.
+fn require_accessible_file(
+    conn: &mut diesel::SqliteConnection,
+    file_id: &str,
+    uid: &str,
+    required_role: &str,
+    res: &mut Response,
+) -> bool {
+    match load_accessible_file(conn, file_id, uid, required_role) {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("File not found".into()).to_response(),
+            )));
+            false
+        }
+        Err(e) => {
+            res.status_code(StatusCode::FORBIDDEN);
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            false
+        }
     }
 }
 
@@ -315,7 +375,7 @@ pub async fn delete_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
 #[handler]
 pub async fn assign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -347,6 +407,13 @@ pub async fn assign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
             return;
         }
     };
+
+    if !require_owned_tag(&mut conn, &body.tag_id.to_string(), &uid, res) {
+        return;
+    }
+    if !require_accessible_file(&mut conn, &body.file_id.to_string(), &uid, "editor", res) {
+        return;
+    }
 
     let file_tag_id = Uuid::new_v4();
     let now = Utc::now();
@@ -384,7 +451,7 @@ pub async fn assign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
 #[handler]
 pub async fn unassign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -421,6 +488,13 @@ pub async fn unassign_tag(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
+    if !require_owned_tag(&mut conn, &tag_id_str, &uid, res) {
+        return;
+    }
+    if !require_accessible_file(&mut conn, &file_id_str, &uid, "editor", res) {
+        return;
+    }
+
     match diesel::delete(
         ft::file_tags
             .filter(ft::file_id.eq(&file_id_str))
@@ -456,7 +530,7 @@ pub async fn unassign_tag(req: &mut Request, depot: &mut Depot, res: &mut Respon
 #[handler]
 pub async fn list_file_tags(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -479,6 +553,10 @@ pub async fn list_file_tags(req: &mut Request, depot: &mut Depot, res: &mut Resp
             return;
         }
     };
+
+    if !require_accessible_file(&mut conn, &file_id_param, &uid, "viewer", res) {
+        return;
+    }
 
     match ft::file_tags
         .inner_join(t::tags.on(ft::tag_id.eq(t::id)))

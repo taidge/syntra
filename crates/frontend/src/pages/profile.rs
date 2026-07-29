@@ -39,11 +39,11 @@ pub fn Profile() -> Element {
     });
 
     let mut display_name = use_signal(String::new);
-    let mut profile_status = use_signal(String::new);
+    let profile_status = use_signal(String::new);
     let mut current_pw = use_signal(String::new);
     let mut new_pw = use_signal(String::new);
     let mut new_pw_confirm = use_signal(String::new);
-    let mut pw_status = use_signal(String::new);
+    let pw_status = use_signal(String::new);
     let mut initialized = use_signal(|| false);
 
     {
@@ -79,7 +79,7 @@ pub fn Profile() -> Element {
             h1 { "{title}" }
             match me.read().as_ref() {
                 None => rsx! { div { class: "editor-loading", "{loading_label}" } },
-                Some(Err(e)) => rsx! { div { class: "editor-error", "Failed to load: {e}" } },
+                Some(Err(e)) => rsx! { div { class: "editor-error", {crate::i18n::t("editor.failed_load").replace("{err}", e)} } },
                 Some(Ok(p)) => {
                     let storage_mb = (p.storage_used as f64) / 1_048_576.0;
                     let quota_gb = (p.storage_quota as f64) / 1_073_741_824.0;
@@ -108,7 +108,9 @@ pub fn Profile() -> Element {
                                         div { class: "storage-bar-fill", style: "width: {pct}%;" }
                                     }
                                     span { class: "storage-text",
-                                        "{storage_mb:.1} MB of {quota_gb:.2} GB used"
+                                        {crate::i18n::t("profile.storage_usage")
+                                            .replace("{used}", &format!("{storage_mb:.1}"))
+                                            .replace("{quota}", &format!("{quota_gb:.2}"))}
                                     }
                                 }
                             }
@@ -129,13 +131,13 @@ pub fn Profile() -> Element {
                                         let dn = display_name.read().clone();
                                         let mut status = profile_status;
                                         wasm_bindgen_futures::spawn_local(async move {
-                                            status.set("Saving...".into());
+                                            status.set(crate::i18n::t("common.saving"));
                                             let body = UpdateProfileRequest {
                                                 display_name: if dn.is_empty() { None } else { Some(dn) },
                                             };
                                             match api_put::<serde_json::Value, _>("/auth/me", &body, &token).await {
-                                                Ok(_) => status.set("Saved".into()),
-                                                Err(e) => status.set(format!("Save failed: {e}")),
+                                                Ok(_) => status.set(crate::i18n::t("profile.saved")),
+                                                Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e)),
                                             }
                                         });
                                     }
@@ -186,27 +188,27 @@ pub fn Profile() -> Element {
                                         let cf = new_pw_confirm.read().clone();
                                         let mut status = pw_status;
                                         if np.len() < 8 {
-                                            status.set("New password must be at least 8 characters".into());
+                                            status.set(crate::i18n::t("profile.password_too_short"));
                                             return;
                                         }
                                         if np != cf {
-                                            status.set("Passwords do not match".into());
+                                            status.set(crate::i18n::t("profile.password_mismatch"));
                                             return;
                                         }
                                         wasm_bindgen_futures::spawn_local(async move {
-                                            status.set("Saving...".into());
+                                            status.set(crate::i18n::t("common.saving"));
                                             let body = ChangePasswordRequest {
                                                 current_password: cp,
                                                 new_password: np,
                                             };
                                             match api_put::<serde_json::Value, _>("/auth/password", &body, &token).await {
                                                 Ok(_) => {
-                                                    status.set("Password changed".into());
+                                                    status.set(crate::i18n::t("profile.password_changed"));
                                                     current_pw.set(String::new());
                                                     new_pw.set(String::new());
                                                     new_pw_confirm.set(String::new());
                                                 }
-                                                Err(e) => status.set(format!("Failed: {e}")),
+                                                Err(e) => status.set(crate::i18n::t("comments.failed").replace("{err}", &e)),
                                             }
                                         });
                                     }

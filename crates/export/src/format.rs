@@ -78,7 +78,12 @@ impl ExportFormat {
     }
 
     pub fn from_mime(mime: &str) -> Option<Self> {
-        let base = mime.split(';').next().unwrap_or(mime).trim().to_ascii_lowercase();
+        let base = mime
+            .split(';')
+            .next()
+            .unwrap_or(mime)
+            .trim()
+            .to_ascii_lowercase();
         match base.as_str() {
             "application/pdf" => Some(Self::Pdf),
             "text/html" => Some(Self::Html),
@@ -89,9 +94,7 @@ impl ExportFormat {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
                 Some(Self::Docx)
             }
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
-                Some(Self::Xlsx)
-            }
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Some(Self::Xlsx),
             "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
                 Some(Self::Pptx)
             }

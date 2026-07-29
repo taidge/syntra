@@ -162,6 +162,9 @@ pub async fn create_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn list_webhooks(depot: &mut Depot, res: &mut Response) {
+    if !require_admin(depot, res) {
+        return;
+    }
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let _uid = match get_user_id(depot) {
         Some(val) => val,
@@ -210,6 +213,9 @@ pub async fn list_webhooks(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn get_webhook(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    if !require_admin(depot, res) {
+        return;
+    }
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let _uid = match get_user_id(depot) {
         Some(val) => val,
@@ -265,6 +271,9 @@ pub async fn get_webhook(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn update_webhook(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    if !require_admin(depot, res) {
+        return;
+    }
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let _uid = match get_user_id(depot) {
         Some(val) => val,
@@ -430,6 +439,9 @@ pub async fn delete_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn list_deliveries(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    if !require_admin(depot, res) {
+        return;
+    }
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let _uid = match get_user_id(depot) {
         Some(val) => val,

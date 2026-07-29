@@ -8,14 +8,14 @@ pub mod search_index;
 pub mod storage;
 pub mod thumbnail;
 pub mod webhook;
+pub mod wopi_sessions;
 
 pub use audit::AuditService;
 pub use email::EmailService;
 pub use notification::NotificationService;
 pub use notification_bus::NotificationBus;
-pub use password::PasswordService;
-pub use s3_storage::S3Storage;
 pub use search_index::SearchService;
-pub use storage::StorageService;
+pub use storage::{StorageBackend, StorageService};
 pub use thumbnail::ThumbnailService;
 pub use webhook::WebhookService;
+pub use wopi_sessions::WopiSessionStore;

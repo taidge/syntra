@@ -1,15 +1,13 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use diesel::prelude::*;
-use salvo::prelude::*;
-use uuid::Uuid;
-
 use contrix_core::dto::{ApiResponse, FileResponse};
 use contrix_core::error::AppError;
-use contrix_core::models::{File, RecentFile};
+use contrix_core::models::File;
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::recent_files::dsl as rf;
+use diesel::prelude::*;
+use salvo::prelude::*;
 
 use crate::middleware::auth::get_user_id;
 use crate::state::AppState;
@@ -22,7 +20,6 @@ fn file_model_to_response(row: File) -> FileResponse {
     FileResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
-        path: row.path,
         mime_type: row.mime_type,
         size: row.size,
         owner_id: row.owner_id.parse().unwrap_or_default(),
@@ -102,11 +99,15 @@ pub async fn list_recent(depot: &mut Depot, res: &mut Response) {
             // Preserve the recent ordering by building a lookup and sorting.
             let mut file_map: std::collections::HashMap<String, File> =
                 rows.into_iter().map(|row| (row.id.clone(), row)).collect();
-            let file_list: Vec<FileResponse> = recent_file_ids
+            let mut file_list: Vec<FileResponse> = recent_file_ids
                 .into_iter()
                 .filter_map(|id| file_map.remove(&id))
                 .map(file_model_to_response)
                 .collect();
+            for r in &mut file_list {
+                r.shared_with_count =
+                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string());
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
         }

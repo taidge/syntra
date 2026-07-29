@@ -14,6 +14,7 @@ use contrix_core::schema::files::dsl as f;
 use contrix_export::ExportFormat;
 
 use crate::middleware::auth::get_user_id;
+use crate::services::{StorageBackend, StorageService};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -21,12 +22,12 @@ use crate::state::AppState;
 // ---------------------------------------------------------------------------
 
 /// Attempt to convert a document and update the conversion job record.
-fn perform_conversion(
+async fn perform_conversion(
     conn: &mut diesel::SqliteConnection,
     job_id: &str,
     source_file_id: &str,
     target_format: &str,
-    base_path: &str,
+    storage: &StorageBackend,
 ) {
     // Resolve the export format.
     let export_format = match ExportFormat::from_extension(target_format) {
@@ -112,6 +113,24 @@ fn perform_conversion(
                 Err(e) => Err(format!("Failed to parse workbook: {e}")),
             }
         }
+        (DocumentType::Writer, ExportFormat::Docx) => {
+            match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
+                Ok(doc) => contrix_export::docx::writer_to_docx(&doc),
+                Err(e) => Err(format!("Failed to parse writer document: {e}")),
+            }
+        }
+        (DocumentType::Calc, ExportFormat::Xlsx) => {
+            match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
+                Ok(wb) => contrix_export::xlsx::workbook_to_xlsx(&wb),
+                Err(e) => Err(format!("Failed to parse workbook: {e}")),
+            }
+        }
+        (DocumentType::Slides, ExportFormat::Pptx) => {
+            match serde_json::from_value::<contrix_doc_engine::Presentation>(content) {
+                Ok(pres) => contrix_export::pptx::presentation_to_pptx(&pres),
+                Err(e) => Err(format!("Failed to parse presentation: {e}")),
+            }
+        }
         (_, ExportFormat::Json) => Ok(content_str.into_bytes()),
         _ => Err(format!(
             "Export format '{}' not supported for document type '{}'",
@@ -121,26 +140,13 @@ fn perform_conversion(
 
     match exported {
         Ok(data) => {
-            // Save output to data/files/conversions/{job_id}.{format}
-            let conversions_dir = std::path::Path::new(base_path).join("conversions");
-            if let Err(e) = std::fs::create_dir_all(&conversions_dir) {
-                tracing::error!("Failed to create conversions directory: {e}");
-                let _ = diesel::update(cj::conversion_jobs.filter(cj::id.eq(job_id)))
-                    .set((
-                        cj::status.eq("failed"),
-                        cj::error_message
-                            .eq(Some(format!("Failed to create output directory: {e}"))),
-                        cj::completed_at.eq(Some(Utc::now().to_rfc3339())),
-                    ))
-                    .execute(conn);
-                return;
-            }
-
             let output_filename = format!("{}.{}", job_id, export_format.extension());
-            let output_full_path = conversions_dir.join(&output_filename);
             let output_relative = format!("conversions/{}", output_filename);
 
-            if let Err(e) = std::fs::write(&output_full_path, &data) {
+            if let Err(e) = storage
+                .write_file(&output_relative, &data, "application/octet-stream")
+                .await
+            {
                 let _ = diesel::update(cj::conversion_jobs.filter(cj::id.eq(job_id)))
                     .set((
                         cj::status.eq("failed"),
@@ -278,8 +284,9 @@ pub async fn create_conversion(req: &mut Request, depot: &mut Depot, res: &mut R
         &job_id,
         &body.file_id,
         &body.target_format,
-        &state.config.storage.base_path,
-    );
+        &state.storage,
+    )
+    .await;
 
     // Re-read the job to return the up-to-date status.
     let job = cj::conversion_jobs
@@ -454,8 +461,7 @@ pub async fn download_conversion(req: &mut Request, depot: &mut Depot, res: &mut
         }
     };
 
-    let storage = crate::services::StorageService::new(&state.config.storage.base_path);
-    let data = match storage.read_file(&output_path) {
+    let data = match state.storage.read_file(&output_path).await {
         Ok(d) => d,
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
@@ -464,16 +470,15 @@ pub async fn download_conversion(req: &mut Request, depot: &mut Depot, res: &mut
         }
     };
 
-    let file_name = format!("converted.{}", job.target_format);
+    // `target_format` is user-supplied; sanitize before placing it in a header
+    // to prevent header injection / parse panics.
+    let file_name = StorageService::sanitize_file_name(&format!("converted.{}", job.target_format));
     res.status_code(StatusCode::OK);
     res.headers_mut()
         .insert("content-type", "application/octet-stream".parse().unwrap());
-    res.headers_mut().insert(
-        "content-disposition",
-        format!("attachment; filename=\"{}\"", file_name)
-            .parse()
-            .unwrap(),
-    );
+    if let Ok(cd) = format!("attachment; filename=\"{}\"", file_name).parse() {
+        res.headers_mut().insert("content-disposition", cd);
+    }
     res.body(salvo::http::body::ResBody::Once(bytes::Bytes::from(data)));
 }
 

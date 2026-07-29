@@ -103,6 +103,9 @@ pub struct RateLimitConfig {
     pub window_seconds: u64,
     /// Whether rate limiting is enabled
     pub enabled: bool,
+    /// Whether to trust X-Forwarded-For/X-Real-IP as the client address.
+    #[serde(default)]
+    pub trust_forwarded_headers: bool,
 }
 
 impl Default for RateLimitConfig {
@@ -111,6 +114,7 @@ impl Default for RateLimitConfig {
             max_requests: 100,
             window_seconds: 60,
             enabled: false,
+            trust_forwarded_headers: false,
         }
     }
 }

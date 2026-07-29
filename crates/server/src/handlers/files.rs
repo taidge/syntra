@@ -12,108 +12,34 @@ use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::users::dsl as u;
 
+use crate::handlers::access::{
+    check_room_access, load_accessible_file, load_accessible_folder, load_accessible_target_folder,
+};
 use crate::middleware::auth::get_user_id;
-use crate::services::StorageService;
+use crate::services::{StorageBackend, StorageService};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Check if user has at least `required_role` access to a room.
-/// Returns Ok(()) if allowed, Err with 403 if not.
-///
-/// Role hierarchy: admin > editor > viewer.
-///
-#[allow(dead_code)]
-fn check_room_access(
-    conn: &mut diesel::SqliteConnection,
-    user_id: &str,
-    room_id: &str,
-    required_role: &str,
-) -> Result<(), AppError> {
-    use contrix_core::schema::room_members::dsl as rm;
-
-    let member = rm::room_members
-        .filter(rm::room_id.eq(room_id))
-        .filter(rm::user_id.eq(user_id))
-        .select(rm::role)
+fn document_id_for_file(conn: &mut diesel::SqliteConnection, file_id: &str) -> Option<Uuid> {
+    d::documents
+        .filter(d::file_id.eq(file_id))
+        .select(d::id)
         .first::<String>(conn)
         .optional()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-    match member {
-        Some(role) => {
-            let allowed = match required_role {
-                "viewer" => true, // any role can view
-                "editor" => role == "owner" || role == "editor" || role == "admin",
-                "admin" => role == "owner" || role == "admin",
-                _ => false,
-            };
-            if allowed {
-                Ok(())
-            } else {
-                Err(AppError::Forbidden("Insufficient room permissions".into()))
-            }
-        }
-        None => Err(AppError::Forbidden("Not a member of this room".into())),
-    }
+        .ok()
+        .flatten()
+        .and_then(|id| id.parse().ok())
 }
 
-fn authorize_file_access(
-    conn: &mut diesel::SqliteConnection,
-    row: &File,
-    user_id: &str,
-    required_role: &str,
-) -> Result<(), AppError> {
-    if let Some(room_id) = row.room_id.as_deref() {
-        check_room_access(conn, user_id, room_id, required_role)
-    } else if row.owner_id == user_id {
-        Ok(())
-    } else {
-        Err(AppError::NotFound("File not found".into()))
-    }
-}
-
-fn load_accessible_file(
-    conn: &mut diesel::SqliteConnection,
-    file_id: &str,
-    user_id: &str,
-    required_role: &str,
-) -> Result<Option<File>, AppError> {
-    let row = f::files
-        .filter(f::id.eq(file_id))
-        .first::<File>(conn)
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-    match row {
-        Some(row) => {
-            authorize_file_access(conn, &row, user_id, required_role)?;
-            Ok(Some(row))
-        }
-        None => Ok(None),
-    }
-}
-
-fn load_accessible_folder(
-    conn: &mut diesel::SqliteConnection,
-    folder_id: &str,
-    user_id: &str,
-    required_role: &str,
-) -> Result<Option<File>, AppError> {
-    match load_accessible_file(conn, folder_id, user_id, required_role)? {
-        Some(row) if row.is_folder => Ok(Some(row)),
-        Some(_) => Err(AppError::Validation("Target is not a folder".into())),
-        None => Ok(None),
-    }
-}
-
-fn file_model_to_response(row: File) -> FileResponse {
+fn file_model_to_response(conn: &mut diesel::SqliteConnection, row: File) -> FileResponse {
+    let document_id = document_id_for_file(conn, &row.id);
+    let shared_with_count = crate::handlers::access::count_shares_for_file(conn, &row.id);
     FileResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
-        path: row.path,
         mime_type: row.mime_type,
         size: row.size,
         owner_id: row.owner_id.parse().unwrap_or_default(),
@@ -127,19 +53,18 @@ fn file_model_to_response(row: File) -> FileResponse {
             .map(|d| d.with_timezone(&Utc)),
         created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
         updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
-        shared_with_count: 0,
-        document_id: None,
+        shared_with_count,
+        document_id,
     }
 }
 
-fn read_file_with_document_fallback(
+async fn read_file_with_document_fallback(
     conn: &mut diesel::SqliteConnection,
-    base_path: &str,
+    storage: &StorageBackend,
     file_id: &str,
     file_path: &str,
 ) -> Result<Vec<u8>, AppError> {
-    let storage = StorageService::new(base_path);
-    match storage.read_file(file_path) {
+    match storage.read_file(file_path).await {
         Ok(data) => Ok(data),
         Err(storage_err) => {
             let document_content = d::documents
@@ -156,6 +81,15 @@ fn read_file_with_document_fallback(
             }
         }
     }
+}
+
+fn max_upload_bytes(max_upload_size_mb: u64) -> i64 {
+    let bytes = (max_upload_size_mb as u128).saturating_mul(1024 * 1024);
+    bytes.min(i64::MAX as u128) as i64
+}
+
+fn safe_attachment_name(file_name: &str) -> String {
+    StorageService::sanitize_file_name(file_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +173,10 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
 
     match result {
         Ok(rows) => {
-            let file_list: Vec<FileResponse> =
-                rows.into_iter().map(file_model_to_response).collect();
+            let file_list: Vec<FileResponse> = rows
+                .into_iter()
+                .map(|row| file_model_to_response(&mut conn, row))
+                .collect();
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
         }
@@ -285,7 +221,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
     let file_name = file_part
         .name()
-        .map(|s| s.to_string())
+        .map(StorageService::sanitize_file_name)
         .unwrap_or_else(|| "upload".to_string());
     let content_type = file_part.content_type().map(|m| m.to_string());
 
@@ -300,20 +236,30 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
-    let owner_uuid: Uuid = uid.parse().unwrap_or_default();
-    let storage = StorageService::new(&state.config.storage.base_path);
-    let storage_path = match storage.save_file(&owner_uuid, &file_name, &data) {
-        Ok(p) => p,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+    let size_val = data.len() as i64;
+    let max_size = max_upload_bytes(state.config.storage.max_upload_size_mb);
+    if size_val > max_size {
+        res.status_code(StatusCode::PAYLOAD_TOO_LARGE);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::QuotaExceeded(format!(
+                "Upload exceeds configured limit of {} MB",
+                state.config.storage.max_upload_size_mb
+            ))
+            .to_response(),
+        )));
+        return;
+    }
+
+    let owner_uuid: Uuid = match uid.parse() {
+        Ok(uuid) => uuid,
+        Err(_) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation("Invalid user id".into()).to_response(),
+            )));
             return;
         }
     };
-
-    let file_id_val = Uuid::new_v4();
-    let now = Utc::now();
-    let size_val = data.len() as i64;
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -327,7 +273,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     };
 
     let room_id_for_new_file = if let Some(parent_id) = parent_id_param.as_deref() {
-        match load_accessible_folder(&mut conn, parent_id, &uid, "editor") {
+        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
             Ok(Some(parent)) => {
                 if let Some(requested_room_id) = room_id_param.as_deref() {
                     if parent.room_id.as_deref() != Some(requested_room_id) {
@@ -369,6 +315,22 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         None
     };
 
+    let storage_path = match state
+        .storage
+        .save_file(&owner_uuid, &file_name, &data)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            return;
+        }
+    };
+
+    let file_id_val = Uuid::new_v4();
+    let now = Utc::now();
+
     let new_file = NewFile {
         id: file_id_val.to_string(),
         name: file_name.clone(),
@@ -391,6 +353,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         .values(&new_file)
         .execute(&mut conn)
     {
+        let _ = state.storage.delete_file(&storage_path).await;
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Database(e.to_string()).to_response(),
@@ -408,10 +371,10 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     if let Some(ref ct) = content_type {
         if ct.starts_with("image/") {
             if let Some(ref thumb_svc) = state.thumbnail {
-                match thumb_svc.generate_thumbnail(
-                    &storage_path,
-                    &file_id_val.to_string(),
-                ) {
+                match thumb_svc
+                    .generate_thumbnail(&state.storage, &storage_path, &file_id_val.to_string())
+                    .await
+                {
                     Ok(thumb_rel) => {
                         let _ = diesel::update(f::files.filter(f::id.eq(file_id_val.to_string())))
                             .set(f::thumbnail_path.eq(Some(&thumb_rel)))
@@ -489,7 +452,6 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let file_resp = FileResponse {
         id: file_id_val,
         name: file_name,
-        path: storage_path,
         mime_type: content_type,
         size: size_val,
         owner_id: owner_uuid,
@@ -543,7 +505,9 @@ pub async fn get_file(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     match load_accessible_file(&mut conn, &file_id_param, &uid, "viewer") {
         Ok(Some(row)) => {
             res.status_code(StatusCode::OK);
-            res.render(Json(ApiResponse::ok(file_model_to_response(row))));
+            res.render(Json(ApiResponse::ok(file_model_to_response(
+                &mut conn, row,
+            ))));
         }
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -599,6 +563,7 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
+    let new_name = StorageService::sanitize_file_name(&body.name);
     let now = Utc::now();
 
     let mut conn = match state.db.get() {
@@ -629,7 +594,7 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     };
 
     match diesel::update(f::files.filter(f::id.eq(&target.id)))
-        .set((f::name.eq(&body.name), f::updated_at.eq(now.to_rfc3339())))
+        .set((f::name.eq(&new_name), f::updated_at.eq(now.to_rfc3339())))
         .execute(&mut conn)
     {
         Ok(0) => {
@@ -644,7 +609,7 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 "file.updated",
                 &serde_json::json!({
                     "id": &target.id,
-                    "name": &body.name,
+                    "name": &new_name,
                     "owner_id": &uid,
                     "updated_at": now.to_rfc3339(),
                 }),
@@ -810,7 +775,7 @@ pub async fn move_file(req: &mut Request, depot: &mut Depot, res: &mut Response)
         }
     };
 
-    let target_folder = match load_accessible_folder(
+    let target_folder = match load_accessible_target_folder(
         &mut conn,
         &body.target_folder_id.to_string(),
         &uid,
@@ -926,10 +891,12 @@ pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
     let data = match read_file_with_document_fallback(
         &mut conn,
-        &state.config.storage.base_path,
+        &state.storage,
         &resolved_file_id,
         &file_path,
-    ) {
+    )
+    .await
+    {
         Ok(d) => d,
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
@@ -947,9 +914,12 @@ pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Respo
     );
     res.headers_mut().insert(
         "content-disposition",
-        format!("attachment; filename=\"{}\"", file_name)
-            .parse()
-            .unwrap(),
+        format!(
+            "attachment; filename=\"{}\"",
+            safe_attachment_name(&file_name)
+        )
+        .parse()
+        .unwrap(),
     );
     res.body(salvo::http::body::ResBody::Once(bytes::Bytes::from(data)));
 }

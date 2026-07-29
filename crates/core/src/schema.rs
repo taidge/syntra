@@ -149,7 +149,7 @@ diesel::table! {
         updated_at -> Text,
         logo_url -> Nullable<Text>,
         color -> Nullable<Text>,
-        storage_quota -> Nullable<Integer>,
+        storage_quota -> Nullable<BigInt>,
         auto_delete_days -> Nullable<Integer>,
         auto_delete_enabled -> Bool,
     }

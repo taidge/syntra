@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
+use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 
 use contrix_core::error::AppError;
@@ -27,7 +27,7 @@ impl SearchService {
         let id_field = schema_builder.add_text_field("id", STRING | STORED);
         let name_field = schema_builder.add_text_field("name", TEXT | STORED);
         let content_field = schema_builder.add_text_field("content", TEXT);
-        let doc_type_field = schema_builder.add_text_field("doc_type", STRING | STORED);
+        let doc_type_field = schema_builder.add_text_field("document_type", STRING | STORED);
         let owner_id_field = schema_builder.add_text_field("owner_id", STRING | STORED);
         let schema = schema_builder.build();
 

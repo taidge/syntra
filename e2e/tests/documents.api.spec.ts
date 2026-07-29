@@ -13,7 +13,7 @@ test.describe('Documents API @api', () => {
     const { response, body } = await createDocument(request, token, 'My Document', 'writer');
     expect(response.status()).toBe(201);
     expect(body.success).toBe(true);
-    expect(body.data.doc_type).toBe('writer');
+    expect(body.data.document_type).toBe('writer');
     expect(body.data.name).toBe('My Document');
     expect(body.data.version).toBe(1);
     expect(body.data.id).toBeTruthy();
@@ -23,19 +23,19 @@ test.describe('Documents API @api', () => {
   test('should create a calc document', async ({ request }) => {
     const { response, body } = await createDocument(request, token, 'My Spreadsheet', 'calc');
     expect(response.status()).toBe(201);
-    expect(body.data.doc_type).toBe('calc');
+    expect(body.data.document_type).toBe('calc');
   });
 
   test('should create a slides document', async ({ request }) => {
     const { response, body } = await createDocument(request, token, 'My Presentation', 'slides');
     expect(response.status()).toBe(201);
-    expect(body.data.doc_type).toBe('slides');
+    expect(body.data.document_type).toBe('slides');
   });
 
   test('should create a whiteboard document', async ({ request }) => {
     const { response, body } = await createDocument(request, token, 'My Whiteboard', 'whiteboard');
     expect(response.status()).toBe(201);
-    expect(body.data.doc_type).toBe('whiteboard');
+    expect(body.data.document_type).toBe('whiteboard');
   });
 
   test('should get document by id', async ({ request }) => {
@@ -49,7 +49,7 @@ test.describe('Documents API @api', () => {
     const body = await response.json();
     expect(body.data.id).toBe(docId);
     expect(body.data.name).toBe('Test Doc');
-    expect(body.data.doc_type).toBe('writer');
+    expect(body.data.document_type).toBe('writer');
   });
 
   test('should return 404 for nonexistent document', async ({ request }) => {
@@ -162,7 +162,7 @@ test.describe('Documents API @api', () => {
 
   test('should reject unauthenticated document creation', async ({ request }) => {
     const response = await request.post('/api/v1/documents', {
-      data: { name: 'Test', doc_type: 'writer', parent_id: null },
+      data: { name: 'Test', document_type: 'writer', parent_id: null },
     });
     expect(response.status()).toBe(401);
   });

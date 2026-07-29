@@ -63,4 +63,5 @@ features = [
     "CustomEvent",
     "Location",
     "EventTarget",
+    "console",
 ]

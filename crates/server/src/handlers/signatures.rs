@@ -11,8 +11,8 @@ use contrix_core::error::AppError;
 use contrix_core::models::{DocumentSignature, NewDocumentSignature};
 use contrix_core::schema::document_signatures::dsl as ds;
 use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
 
+use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;
 use crate::state::AppState;
 
@@ -20,16 +20,22 @@ use crate::state::AppState;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Resolve a document id and authorize the caller for `required_role`.
+///
+/// Returns `Ok(None)` when the document does not exist *or* the caller is not
+/// permitted to access it (forbidden is folded into not-found so existence is
+/// not leaked). Only genuine database errors propagate as `Err`.
 fn resolve_document_id(
     conn: &mut diesel::SqliteConnection,
     identifier: &str,
+    user_id: &str,
+    required_role: &str,
 ) -> Result<Option<String>, AppError> {
-    d::documents
-        .filter(d::id.eq(identifier).or(d::file_id.eq(identifier)))
-        .select(d::id)
-        .first::<String>(conn)
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))
+    match load_accessible_document(conn, identifier, user_id, required_role) {
+        Ok(Some(_)) => Ok(Some(identifier.to_string())),
+        Ok(None) | Err(AppError::Forbidden(_)) | Err(AppError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 fn compute_content_hash(content: &str) -> String {
@@ -85,7 +91,7 @@ pub async fn sign_document(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "editor") {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -155,7 +161,7 @@ pub async fn sign_document(req: &mut Request, depot: &mut Depot, res: &mut Respo
 #[handler]
 pub async fn list_signatures(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -179,7 +185,7 @@ pub async fn list_signatures(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer") {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -234,7 +240,7 @@ pub async fn list_signatures(req: &mut Request, depot: &mut Depot, res: &mut Res
 #[handler]
 pub async fn verify_signatures(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -258,7 +264,7 @@ pub async fn verify_signatures(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer") {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);

@@ -15,38 +15,85 @@ use contrix_core::schema::users::dsl as u;
 use contrix_core::schema::versions::dsl as v;
 
 use crate::middleware::auth::JwtClaims;
-use crate::services::StorageService;
+use crate::services::StorageBackend;
 use crate::state::AppState;
 
 const WOPI_LOCK_TTL_MINUTES: i64 = 30;
 const WOPI_FILE_NAME_MAX: usize = 255;
+const WOPI_SESSION_TTL_MINUTES: i64 = 15;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract and validate the WOPI access token from either the query string or
-/// the standard POST form field used by WOPI hosts.
-async fn validate_wopi_token(req: &mut Request, state: &AppState) -> Result<String, AppError> {
-    let token = if let Some(token) = req.query::<String>("access_token") {
-        token
-    } else if let Some(token) = req.form::<String>("access_token").await {
-        token
-    } else {
-        return Err(AppError::Auth("Missing access_token parameter".into()));
-    };
+async fn extract_wopi_token(req: &mut Request) -> Result<String, AppError> {
+    if let Some(token) = req.query::<String>("access_token") {
+        return Ok(token);
+    }
+    if let Some(token) = req.form::<String>("access_token").await {
+        return Ok(token);
+    }
 
+    Err(AppError::Auth("Missing access_token parameter".into()))
+}
+
+fn validate_jwt_access_token(token: &str, state: &AppState) -> Result<String, AppError> {
     let secret = &state.config.auth.jwt_secret;
     let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
 
     let data = jsonwebtoken::decode::<JwtClaims>(
-        &token,
+        token,
         &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
         &validation,
     )
     .map_err(|_| AppError::Auth("Invalid or expired access token".into()))?;
 
     Ok(data.claims.sub)
+}
+
+/// Validate a short-lived WOPI session token bound to the requested file.
+async fn validate_wopi_token(
+    req: &mut Request,
+    state: &AppState,
+    file_id: &str,
+) -> Result<String, AppError> {
+    let token = extract_wopi_token(req).await?;
+    state
+        .wopi_sessions
+        .validate(&token, file_id)
+        .ok_or_else(|| AppError::Auth("Invalid or expired WOPI session token".into()))
+}
+
+fn file_id_from_wopi_src(wopi_src: &str) -> Option<String> {
+    let marker = "/wopi/files/";
+    let lower = wopi_src.to_ascii_lowercase();
+    let start = lower.find(marker)? + marker.len();
+    let rest = &wopi_src[start..];
+    let file_id = rest
+        .split(['?', '#', '/'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if file_id.is_empty() {
+        None
+    } else {
+        Some(file_id.to_string())
+    }
+}
+
+fn exchange_wopi_session_token(
+    state: &AppState,
+    access_token: &str,
+    wopi_src: &str,
+) -> Result<String, AppError> {
+    let user_id = validate_jwt_access_token(access_token, state)?;
+    let file_id = file_id_from_wopi_src(wopi_src)
+        .ok_or_else(|| AppError::Validation("Unable to resolve file id from WOPISrc".into()))?;
+    Ok(state.wopi_sessions.create(
+        &user_id,
+        &file_id,
+        Duration::minutes(WOPI_SESSION_TTL_MINUTES),
+    ))
 }
 
 fn request_base_url(req: &Request) -> String {
@@ -134,13 +181,12 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
-fn delete_previous_blob_if_safe(base_path: &str, old_path: &str) {
+async fn delete_previous_blob_if_safe(storage: &StorageBackend, old_path: &str) {
     if old_path.is_empty() || Path::new(old_path).is_absolute() {
         return;
     }
 
-    let storage = StorageService::new(base_path);
-    let _ = storage.delete_file(old_path);
+    let _ = storage.delete_file(old_path).await;
 }
 
 fn load_owned_file(
@@ -183,14 +229,13 @@ fn load_active_lock(
     }
 }
 
-fn read_file_bytes(
+async fn read_file_bytes(
     conn: &mut diesel::SqliteConnection,
-    base_path: &str,
+    storage: &StorageBackend,
     file_id: &str,
     file_path: &str,
 ) -> Result<Vec<u8>, AppError> {
-    let storage = StorageService::new(base_path);
-    match storage.read_file(file_path) {
+    match storage.read_file(file_path).await {
         Ok(data) => Ok(data),
         Err(storage_err) => {
             let document_content = d::documents
@@ -209,7 +254,7 @@ fn read_file_bytes(
     }
 }
 
-fn save_file_bytes(
+async fn save_file_bytes(
     conn: &mut diesel::SqliteConnection,
     state: &AppState,
     file_row: &File,
@@ -239,8 +284,10 @@ fn save_file_bytes(
         .owner_id
         .parse()
         .map_err(|_| AppError::Validation("Invalid owner id".into()))?;
-    let storage = StorageService::new(&state.config.storage.base_path);
-    let new_path = storage.save_file(&owner_uuid, &file_row.name, data)?;
+    let new_path = state
+        .storage
+        .save_file(&owner_uuid, &file_row.name, data)
+        .await?;
 
     let now = Utc::now();
     let now_string = now.to_rfc3339();
@@ -260,7 +307,7 @@ fn save_file_bytes(
         .set(u::storage_used.eq(u::storage_used + size_diff))
         .execute(conn);
 
-    delete_previous_blob_if_safe(&state.config.storage.base_path, &file_row.path);
+    delete_previous_blob_if_safe(&state.storage, &file_row.path).await;
 
     if let Some((document_id, current_version, old_content)) = linked_document {
         let snapshot = NewVersion {
@@ -485,7 +532,17 @@ pub async fn wopi_capabilities(res: &mut Response) {
 // ---------------------------------------------------------------------------
 
 #[handler]
-pub async fn wopi_host_page(req: &mut Request, res: &mut Response) {
+pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let state = match depot.obtain::<Arc<AppState>>() {
+        Ok(state) => state.clone(),
+        Err(_) => {
+            render_wopi_error(
+                res,
+                AppError::Internal("Application state unavailable".into()),
+            );
+            return;
+        }
+    };
     let doc_kind = req
         .param::<String>("doc_kind")
         .unwrap_or_else(|| "document".to_string());
@@ -506,7 +563,7 @@ pub async fn wopi_host_page(req: &mut Request, res: &mut Response) {
         "whiteboard" => "Contrix Whiteboard",
         _ => "Contrix Document",
     };
-    let access_token = if let Some(token) = req.query::<String>("access_token") {
+    let incoming_access_token = if let Some(token) = req.query::<String>("access_token") {
         token
     } else {
         req.form::<String>("access_token").await.unwrap_or_default()
@@ -515,6 +572,14 @@ pub async fn wopi_host_page(req: &mut Request, res: &mut Response) {
         .query::<String>("wopisrc")
         .or_else(|| req.query::<String>("WOPISrc"))
         .unwrap_or_default();
+    let wopi_session_token =
+        match exchange_wopi_session_token(&state, &incoming_access_token, &wopi_src) {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::warn!("Failed to exchange WOPI session token: {e}");
+                String::new()
+            }
+        };
     let status_message = if mode == "edit" {
         "Opening editor"
     } else {
@@ -604,8 +669,18 @@ pub async fn wopi_host_page(req: &mut Request, res: &mut Response) {
     </main>
     <script>
       const routePrefix = "{route_prefix}";
-      const accessToken = {access_token:?};
+      const wopiSessionToken = {wopi_session_token:?};
       const initialWopiSrc = {wopi_src:?};
+
+      function scrubSensitiveQuery() {{
+        try {{
+          const url = new URL(window.location.href);
+          if (url.searchParams.has("access_token")) {{
+            url.searchParams.delete("access_token");
+            window.history.replaceState(null, document.title, url.pathname + url.search + url.hash);
+          }}
+        }} catch (_) {{}}
+      }}
 
       function extractFileId(value) {{
         if (!value) return "";
@@ -622,31 +697,8 @@ pub async fn wopi_host_page(req: &mut Request, res: &mut Response) {
         }}
       }}
 
-      async function bootstrapAuth() {{
-        if (!accessToken) return;
-        try {{
-          const resp = await fetch("/api/v1/auth/me", {{
-            headers: {{ "Authorization": `Bearer ${{accessToken}}` }}
-          }});
-          if (!resp.ok) return;
-          const payload = await resp.json();
-          const user = payload && payload.data;
-          if (!user || !user.id) return;
-          localStorage.setItem("contrix.auth", JSON.stringify({{
-            token: accessToken,
-            user: {{
-              id: user.id,
-              username: user.username,
-              email: user.email,
-              display_name: user.display_name ?? null,
-              role: user.role
-            }}
-          }}));
-        }} catch (_) {{}}
-      }}
-
       async function start() {{
-        await bootstrapAuth();
+        scrubSensitiveQuery();
         const params = new URLSearchParams(window.location.search);
         const wopiSrc = params.get("wopisrc") || params.get("WOPISrc") || initialWopiSrc;
         const fileId = extractFileId(wopiSrc);
@@ -656,6 +708,12 @@ pub async fn wopi_host_page(req: &mut Request, res: &mut Response) {
         }}
 
         const target = `${{routePrefix}}/${{encodeURIComponent(fileId)}}`;
+        if (wopiSessionToken) {{
+          sessionStorage.setItem("contrix.wopi", JSON.stringify({{
+            token: wopiSessionToken,
+            file_id: fileId
+          }}));
+        }}
         document.getElementById("fallback").href = target;
         document.getElementById("meta").textContent = `File id: ${{fileId}}`;
         window.location.replace(target);
@@ -670,6 +728,10 @@ pub async fn wopi_host_page(req: &mut Request, res: &mut Response) {
     res.status_code(StatusCode::OK);
     res.headers_mut()
         .insert("content-type", "text/html; charset=utf-8".parse().unwrap());
+    res.headers_mut()
+        .insert("cache-control", "no-store".parse().unwrap());
+    res.headers_mut()
+        .insert("referrer-policy", "no-referrer".parse().unwrap());
     res.render(html);
 }
 
@@ -680,15 +742,14 @@ pub async fn wopi_host_page(req: &mut Request, res: &mut Response) {
 #[handler]
 pub async fn check_file_info(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let uid = match validate_wopi_token(req, &state).await {
+    let file_id_param: String = req.param("file_id").unwrap_or_default();
+    let uid = match validate_wopi_token(req, &state, &file_id_param).await {
         Ok(id) => id,
         Err(e) => {
             render_wopi_error(res, e);
             return;
         }
     };
-
-    let file_id_param: String = req.param("file_id").unwrap_or_default();
     let base_url = request_base_url(req);
 
     let mut conn = match state.db.get() {
@@ -773,15 +834,14 @@ pub async fn check_file_info(req: &mut Request, depot: &mut Depot, res: &mut Res
 #[handler]
 pub async fn get_file_contents(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let uid = match validate_wopi_token(req, &state).await {
+    let file_id_param: String = req.param("file_id").unwrap_or_default();
+    let uid = match validate_wopi_token(req, &state, &file_id_param).await {
         Ok(id) => id,
         Err(e) => {
             render_wopi_error(res, e);
             return;
         }
     };
-
-    let file_id_param: String = req.param("file_id").unwrap_or_default();
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -803,12 +863,8 @@ pub async fn get_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    let data = match read_file_bytes(
-        &mut conn,
-        &state.config.storage.base_path,
-        &file_row.id,
-        &file_row.path,
-    ) {
+    let data = match read_file_bytes(&mut conn, &state.storage, &file_row.id, &file_row.path).await
+    {
         Ok(bytes) => bytes,
         Err(e) => {
             render_wopi_error(res, e);
@@ -837,15 +893,14 @@ pub async fn get_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
 #[handler]
 pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let uid = match validate_wopi_token(req, &state).await {
+    let file_id_param: String = req.param("file_id").unwrap_or_default();
+    let uid = match validate_wopi_token(req, &state, &file_id_param).await {
         Ok(id) => id,
         Err(e) => {
             render_wopi_error(res, e);
             return;
         }
     };
-
-    let file_id_param: String = req.param("file_id").unwrap_or_default();
     let request_lock = req
         .headers()
         .get("X-WOPI-Lock")
@@ -893,7 +948,7 @@ pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    let item_version = match save_file_bytes(&mut conn, &state, &file_row, &data, &uid) {
+    let item_version = match save_file_bytes(&mut conn, &state, &file_row, &data, &uid).await {
         Ok(version) => version,
         Err(e) => {
             render_wopi_error(res, e);
@@ -915,15 +970,14 @@ pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
 #[handler]
 pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let uid = match validate_wopi_token(req, &state).await {
+    let file_id_param: String = req.param("file_id").unwrap_or_default();
+    let uid = match validate_wopi_token(req, &state, &file_id_param).await {
         Ok(id) => id,
         Err(e) => {
             render_wopi_error(res, e);
             return;
         }
     };
-
-    let file_id_param: String = req.param("file_id").unwrap_or_default();
     let override_header = req
         .headers()
         .get("X-WOPI-Override")
@@ -1212,7 +1266,7 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 }
 
                 let item_version =
-                    match save_file_bytes(&mut conn, &state, &existing_target, &data, &uid) {
+                    match save_file_bytes(&mut conn, &state, &existing_target, &data, &uid).await {
                         Ok(version) => version,
                         Err(e) => {
                             render_wopi_error(res, e);
@@ -1240,8 +1294,11 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                     return;
                 }
             };
-            let storage = StorageService::new(&state.config.storage.base_path);
-            let path = match storage.save_file(&owner_uuid, &desired_name, &data) {
+            let path = match state
+                .storage
+                .save_file(&owner_uuid, &desired_name, &data)
+                .await
+            {
                 Ok(path) => path,
                 Err(e) => {
                     render_wopi_error(res, e);
@@ -1262,7 +1319,7 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 trashed_at: None,
                 created_at: now.clone(),
                 updated_at: now,
-                room_id: None,
+                room_id: file_row.room_id.clone(),
                 thumbnail_path: None,
                 sort_order: 0,
             };

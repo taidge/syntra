@@ -11,7 +11,6 @@ use crate::components::context_menu::{ContextMenu, MenuEntry};
 use crate::components::menubar::Menubar;
 use crate::components::navbar::Navbar;
 use crate::components::toast::{Toast, ToastKind, push_toast};
-use crate::components::toolbar::Toolbar;
 use crate::components::version_history::VersionHistory;
 use crate::state::{AuthState, api_get, api_put, export_document};
 
@@ -37,9 +36,15 @@ struct SlideDto {
     layout: String,
 }
 
-fn default_transition() -> String { "none".into() }
-fn default_bg() -> String { "#ffffff".into() }
-fn default_layout() -> String { "title-body".into() }
+fn default_transition() -> String {
+    "none".into()
+}
+fn default_bg() -> String {
+    "#ffffff".into()
+}
+fn default_layout() -> String {
+    "title-body".into()
+}
 
 #[derive(Deserialize)]
 struct PresentationLite {
@@ -94,9 +99,7 @@ pub fn Slides(id: String) -> Element {
     let doc_resource = use_resource(move || {
         let id = id_for_resource.clone();
         let token = auth.read().token.clone().unwrap_or_default();
-        async move {
-            api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await
-        }
+        async move { api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await }
     });
 
     use_effect(move || {
@@ -107,8 +110,11 @@ pub fn Slides(id: String) -> Element {
             doc_title.set(doc.name.clone());
             let parsed = serde_json::from_value::<PresentationLite>(doc.content.clone()).ok();
             let new_slides: Vec<SlideData> = match parsed {
-                Some(p) if !p.slides.is_empty() => p.slides.into_iter().enumerate().map(|(i, s)| {
-                    SlideData {
+                Some(p) if !p.slides.is_empty() => p
+                    .slides
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, s)| SlideData {
                         id: i,
                         title: s.title,
                         body: s.body,
@@ -116,8 +122,8 @@ pub fn Slides(id: String) -> Element {
                         transition: s.transition,
                         bg_color: s.bg_color,
                         layout: s.layout,
-                    }
-                }).collect(),
+                    })
+                    .collect(),
                 _ => vec![SlideData::empty(0)],
             };
             slides.set(new_slides);
@@ -132,15 +138,17 @@ pub fn Slides(id: String) -> Element {
         let payload: Vec<serde_json::Value> = slides
             .read()
             .iter()
-            .map(|s| serde_json::json!({
-                "id": s.id,
-                "title": s.title,
-                "body": s.body,
-                "notes": s.notes,
-                "transition": s.transition,
-                "bg_color": s.bg_color,
-                "layout": s.layout,
-            }))
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "title": s.title,
+                    "body": s.body,
+                    "notes": s.notes,
+                    "transition": s.transition,
+                    "bg_color": s.bg_color,
+                    "layout": s.layout,
+                })
+            })
             .collect();
         serde_json::json!({ "slides": payload })
     };
@@ -152,9 +160,12 @@ pub fn Slides(id: String) -> Element {
             status.set(crate::i18n::t("common.saving"));
             wasm_bindgen_futures::spawn_local(async move {
                 let req = serde_json::json!({ "content": body });
-                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token).await {
+                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token)
+                    .await
+                {
                     Ok(_) => status.set(crate::i18n::t("common.saved")),
-                    Err(e) => status.set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
+                    Err(e) => status
+                        .set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
                 }
             });
         }
@@ -219,12 +230,36 @@ pub fn Slides(id: String) -> Element {
 
     let slide_count = slides.read().len();
     let cur_idx = *current_slide.read();
-    let cur_title = slides.read().get(cur_idx).map(|s| s.title.clone()).unwrap_or_default();
-    let cur_body = slides.read().get(cur_idx).map(|s| s.body.clone()).unwrap_or_default();
-    let cur_notes = slides.read().get(cur_idx).map(|s| s.notes.clone()).unwrap_or_default();
-    let cur_bg = slides.read().get(cur_idx).map(|s| s.bg_color.clone()).unwrap_or_else(|| "#ffffff".into());
-    let cur_transition = slides.read().get(cur_idx).map(|s| s.transition.clone()).unwrap_or_else(|| "none".into());
-    let cur_layout = slides.read().get(cur_idx).map(|s| s.layout.clone()).unwrap_or_else(|| "title-body".into());
+    let cur_title = slides
+        .read()
+        .get(cur_idx)
+        .map(|s| s.title.clone())
+        .unwrap_or_default();
+    let cur_body = slides
+        .read()
+        .get(cur_idx)
+        .map(|s| s.body.clone())
+        .unwrap_or_default();
+    let cur_notes = slides
+        .read()
+        .get(cur_idx)
+        .map(|s| s.notes.clone())
+        .unwrap_or_default();
+    let cur_bg = slides
+        .read()
+        .get(cur_idx)
+        .map(|s| s.bg_color.clone())
+        .unwrap_or_else(|| "#ffffff".into());
+    let cur_transition = slides
+        .read()
+        .get(cur_idx)
+        .map(|s| s.transition.clone())
+        .unwrap_or_else(|| "none".into());
+    let cur_layout = slides
+        .read()
+        .get(cur_idx)
+        .map(|s| s.layout.clone())
+        .unwrap_or_else(|| "title-body".into());
 
     rsx! {
         Navbar {}
@@ -232,7 +267,7 @@ pub fn Slides(id: String) -> Element {
             class: "editor-container",
             tabindex: "0",
             onkeydown: {
-                let mut flush_save = flush_save.clone();
+                let flush_save = flush_save.clone();
                 move |evt: KeyboardEvent| {
                     if evt.modifiers().contains(Modifiers::CONTROL) {
                         if evt.key() == Key::Character("s".to_string()) {
@@ -279,16 +314,16 @@ pub fn Slides(id: String) -> Element {
             }
 
             {
-                let mut flush_for_menu = flush_save.clone();
+                let flush_for_menu = flush_save.clone();
                 let mut schedule_for_menu = schedule_save.clone();
                 let id_for_menu = id.clone();
-                let mut bus_for_menu = toast_bus;
+                let bus_for_menu = toast_bus;
                 let nav_for_menu = nav;
                 rsx! {
                     Menubar {
-                        doc_type: "slides".to_string(),
+                        document_type: "slides".to_string(),
                         on_command: move |cmd: String| {
-                            let mut bus = bus_for_menu;
+                            let bus = bus_for_menu;
                             match cmd.as_str() {
                                 "save" => flush_for_menu(),
                                 "back" => { nav_for_menu.push(Route::Dashboard {}); }
@@ -330,7 +365,7 @@ pub fn Slides(id: String) -> Element {
                                     };
                                     let id = id_for_menu.clone();
                                     let token = auth.read().token.clone().unwrap_or_default();
-                                    let mut bus2 = bus;
+                                    let bus2 = bus;
                                     let fmt_owned = format.to_string();
                                     wasm_bindgen_futures::spawn_local(async move {
                                         match export_document(&id, &fmt_owned, &token).await {
@@ -345,8 +380,6 @@ pub fn Slides(id: String) -> Element {
                     }
                 }
             }
-
-            Toolbar { doc_type: "slides".to_string() }
 
             match doc_resource.read().as_ref() {
                 None => rsx! { div { class: "editor-loading", {crate::i18n::t("editor.loading_document")} } },
@@ -596,11 +629,28 @@ pub fn Slides(id: String) -> Element {
 
                     div { class: "property-group",
                         label { {crate::i18n::t("editor.slides.layout")} }
-                        select { class: "property-select",
-                            option { {crate::i18n::t("editor.slides.layout.title_slide")} }
-                            option { {crate::i18n::t("editor.slides.layout.title_content")} }
-                            option { {crate::i18n::t("editor.slides.layout.two_columns")} }
-                            option { {crate::i18n::t("editor.slides.layout.blank")} }
+                        select {
+                            class: "property-select",
+                            value: "{cur_layout}",
+                            onchange: {
+                                let mut schedule_save = schedule_save.clone();
+                                move |e: FormEvent| {
+                                    let kind = e.value();
+                                    let cur = *current_slide.read();
+                                    slides.with_mut(|sl| {
+                                        if let Some(slide) = sl.get_mut(cur) {
+                                            slide.layout = kind.clone();
+                                        }
+                                    });
+                                    schedule_save();
+                                }
+                            },
+                            option { value: "title-only", {crate::i18n::t("editor.slides.layout.title_only")} }
+                            option { value: "title-body", {crate::i18n::t("editor.slides.layout.title_body")} }
+                            option { value: "two-column", {crate::i18n::t("editor.slides.layout.two_column")} }
+                            option { value: "blank", {crate::i18n::t("editor.slides.layout.blank")} }
+                            option { value: "section-header", {crate::i18n::t("editor.slides.layout.section_header")} }
+                            option { value: "image-title", {crate::i18n::t("editor.slides.layout.image_title")} }
                         }
                     }
 
@@ -663,7 +713,7 @@ pub fn Slides(id: String) -> Element {
             ContextMenu {
                 state: ctx_menu,
                 on_command: {
-                    let mut bus = toast_bus;
+                    let bus = toast_bus;
                     let mut schedule_save_ctx = schedule_save.clone();
                     move |cmd: String| {
                         match cmd.as_str() {

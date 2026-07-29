@@ -21,7 +21,7 @@ pub fn Login() -> Element {
 
         // Basic client-side validation
         if email_val.is_empty() || password_val.is_empty() {
-            error.set(Some("Please fill in all fields.".into()));
+            error.set(Some(crate::i18n::t("auth.fill_all_fields")));
             return;
         }
 
@@ -71,7 +71,7 @@ pub fn Login() -> Element {
             div { class: "auth-card",
                 div { class: "auth-header",
                     h2 { "{title}" }
-                    p { class: "auth-subtitle", "Welcome back to Contrix Office" }
+                    p { class: "auth-subtitle", {crate::i18n::t("auth.login_subtitle")} }
                 }
 
                 form { onsubmit: handle_submit,
@@ -81,7 +81,7 @@ pub fn Login() -> Element {
                             id: "email",
                             r#type: "email",
                             class: "form-input",
-                            placeholder: "you@example.com",
+                            placeholder: crate::i18n::t("auth.email_placeholder"),
                             value: "{email}",
                             oninput: move |e| email.set(e.value()),
                         }
@@ -93,7 +93,7 @@ pub fn Login() -> Element {
                             id: "password",
                             r#type: "password",
                             class: "form-input",
-                            placeholder: "Enter your password",
+                            placeholder: crate::i18n::t("auth.password_placeholder"),
                             value: "{password}",
                             oninput: move |e| password.set(e.value()),
                         }
@@ -107,7 +107,7 @@ pub fn Login() -> Element {
                         r#type: "submit",
                         class: "btn btn-primary btn-block",
                         disabled: *loading.read(),
-                        if *loading.read() { "Signing in..." } else { "{sign_in_label}" }
+                        if *loading.read() { {crate::i18n::t("auth.signing_in")} } else { "{sign_in_label}" }
                     }
                 }
 

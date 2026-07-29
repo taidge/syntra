@@ -25,6 +25,7 @@ use contrix_core::schema::password_reset_tokens::dsl as prt;
 use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::{JwtClaims, get_user_id};
+use crate::services::password::PasswordService;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -128,6 +129,13 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         res.render(Json(ApiResponse::<()>::err(
             AppError::Conflict("Username already taken".into()).to_response(),
         )));
+        return;
+    }
+
+    // Enforce the configured password policy before accepting the account.
+    if let Err(e) = PasswordService::validate_password(&mut conn, &body.password) {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(e.to_response())));
         return;
     }
 
@@ -325,16 +333,43 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         return;
     }
 
+    // Reject disabled accounts even with valid credentials — a disabled user
+    // must not be able to mint a fresh token.
+    if user_row.role == "disabled" {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Forbidden("This account has been disabled".into()).to_response(),
+        )));
+        return;
+    }
+
     // Record successful login attempt
     let _ = diesel::insert_into(la::login_attempts)
         .values(&NewLoginAttempt {
             id: Uuid::new_v4().to_string(),
-            ip_address,
+            ip_address: ip_address.clone(),
             email: body.email.clone(),
             success: true,
             attempted_at: Utc::now().to_rfc3339(),
         })
         .execute(&mut conn);
+
+    // Audit the successful authentication.
+    let user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    crate::services::AuditService::log(
+        &mut conn,
+        &user_row.id,
+        "auth.login",
+        "user",
+        &user_row.id,
+        None,
+        Some(&ip_address),
+        user_agent.as_deref(),
+    );
 
     // Update last_login_at.
     let now = Utc::now();
@@ -711,15 +746,36 @@ pub async fn forgot_password(req: &mut Request, depot: &mut Depot, res: &mut Res
         let new_token = NewPasswordResetToken {
             id: Uuid::new_v4().to_string(),
             user_id: user_row.id.clone(),
-            token: token_val,
+            token: token_val.clone(),
             expires_at: expires.to_rfc3339(),
             used: false,
             created_at: now.to_rfc3339(),
         };
 
-        let _ = diesel::insert_into(prt::password_reset_tokens)
+        if diesel::insert_into(prt::password_reset_tokens)
             .values(&new_token)
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .is_ok()
+        {
+            // Deliver the reset link by email (best-effort, off the async
+            // runtime since the SMTP transport is blocking).
+            let pool = state.db.clone();
+            let to = user_row.email.clone();
+            let body_html = format!(
+                "<p>A password reset was requested for your account.</p>\
+                 <p>Use this token to reset your password (valid for 1 hour):</p>\
+                 <p><code>{token_val}</code></p>\
+                 <p>If you did not request this, you can ignore this email.</p>"
+            );
+            tokio::task::spawn_blocking(move || {
+                crate::services::EmailService::send_notification(
+                    &pool,
+                    &to,
+                    "Password reset",
+                    &body_html,
+                );
+            });
+        }
     }
 
     // Always return success regardless of whether the email was found.
@@ -808,6 +864,13 @@ pub async fn reset_password(req: &mut Request, depot: &mut Depot, res: &mut Resp
         res.render(Json(ApiResponse::<()>::err(
             AppError::Validation("Reset token has expired".into()).to_response(),
         )));
+        return;
+    }
+
+    // Enforce the configured password policy on the new password.
+    if let Err(e) = PasswordService::validate_password(&mut conn, &body.password) {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(e.to_response())));
         return;
     }
 

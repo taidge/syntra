@@ -73,6 +73,174 @@ fn build_otpauth_url(email: &str, secret: &str) -> String {
     )
 }
 
+/// Decode an RFC 4648 base32 string (case-insensitive, padding/whitespace
+/// tolerated) into raw bytes.
+fn base32_decode(s: &str) -> Option<Vec<u8>> {
+    let mut buffer: u64 = 0;
+    let mut bits_left: u32 = 0;
+    let mut out = Vec::new();
+    for c in s.chars() {
+        if c == '=' || c.is_whitespace() {
+            continue;
+        }
+        let upper = c.to_ascii_uppercase() as u8;
+        let val = BASE32_ALPHABET.iter().position(|&b| b == upper)? as u64;
+        buffer = (buffer << 5) | val;
+        bits_left += 5;
+        if bits_left >= 8 {
+            bits_left -= 8;
+            out.push((buffer >> bits_left) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// SHA-1 digest (RFC 3174). Implemented locally to avoid pulling an extra
+/// crypto dependency just for TOTP.
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
+    let ml = (data.len() as u64).wrapping_mul(8);
+
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&ml.to_be_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 80];
+        for (i, word) in w.iter_mut().enumerate().take(16) {
+            *word = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+/// HMAC-SHA1 of `msg` keyed by `key`.
+fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..20].copy_from_slice(&sha1(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= block[i];
+        opad[i] ^= block[i];
+    }
+
+    let mut inner = Vec::with_capacity(64 + msg.len());
+    inner.extend_from_slice(&ipad);
+    inner.extend_from_slice(msg);
+    let inner_hash = sha1(&inner);
+
+    let mut outer = Vec::with_capacity(84);
+    outer.extend_from_slice(&opad);
+    outer.extend_from_slice(&inner_hash);
+    sha1(&outer)
+}
+
+/// Compute the 6-digit HOTP/TOTP value for a counter (RFC 6238, SHA-1).
+fn totp_value(secret: &[u8], counter: u64) -> u32 {
+    let hs = hmac_sha1(secret, &counter.to_be_bytes());
+    let offset = (hs[19] & 0x0f) as usize;
+    let bin = ((hs[offset] as u32 & 0x7f) << 24)
+        | ((hs[offset + 1] as u32) << 16)
+        | ((hs[offset + 2] as u32) << 8)
+        | (hs[offset + 3] as u32);
+    bin % 1_000_000
+}
+
+/// Verify a user-supplied 6-digit code against a base32 secret, allowing a
+/// ±1 time-step (30s) window to tolerate clock skew.
+fn verify_totp_code(secret_b32: &str, code: &str) -> bool {
+    let code_num: u32 = match code.parse() {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let secret = match base32_decode(secret_b32) {
+        Some(s) if !s.is_empty() => s,
+        _ => return false,
+    };
+    let step = (Utc::now().timestamp() / 30) as i64;
+    for w in [-1i64, 0, 1] {
+        let counter = (step + w) as u64;
+        if totp_value(&secret, counter) == code_num {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod totp_tests {
+    use super::*;
+
+    #[test]
+    fn rfc6238_sha1_vector() {
+        // RFC 6238 Appendix B: seed "12345678901234567890", SHA-1.
+        // T=59 -> counter 1 -> 8-digit 94287082 -> 6-digit 287082.
+        let secret = b"12345678901234567890";
+        assert_eq!(totp_value(secret, 1), 287082);
+    }
+
+    #[test]
+    fn base32_round_trip() {
+        let bytes = b"hello world";
+        let encoded = base32_encode(bytes);
+        assert_eq!(base32_decode(&encoded).as_deref(), Some(&bytes[..]));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POST /totp/setup
 // ---------------------------------------------------------------------------
@@ -252,14 +420,20 @@ pub async fn verify_totp(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
-    // Validate the code. A proper implementation would compute the TOTP value
-    // from the secret and compare; here we accept any 6-digit numeric code
-    // during setup verification to confirm the user has their authenticator
-    // configured. In production, integrate a TOTP validation library.
+    // Validate the code format, then verify it against the stored secret using
+    // the real RFC 6238 algorithm (with a ±1 step window for clock skew).
     if body.code.len() != 6 || !body.code.chars().all(|c| c.is_ascii_digit()) {
         res.status_code(StatusCode::BAD_REQUEST);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Validation("Code must be a 6-digit number".into()).to_response(),
+        )));
+        return;
+    }
+
+    if !verify_totp_code(&totp_row.secret, &body.code) {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("Invalid authentication code".into()).to_response(),
         )));
         return;
     }

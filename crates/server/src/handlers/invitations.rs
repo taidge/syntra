@@ -57,6 +57,16 @@ pub async fn create_invitation(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
+    // Only admins may invite users; otherwise any logged-in user could mint an
+    // admin invitation and escalate privileges by accepting it.
+    if get_user_role(depot).as_deref() != Some("admin") {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Forbidden("Admin access required".into()).to_response(),
+        )));
+        return;
+    }
+
     let body: CreateInvitationRequest = match req.parse_json().await {
         Ok(b) => b,
         Err(e) => {
@@ -107,6 +117,33 @@ pub async fn create_invitation(req: &mut Request, depot: &mut Depot, res: &mut R
             AppError::Database(e.to_string()).to_response(),
         )));
         return;
+    }
+
+    // Email the invitation (best-effort, off the async runtime).
+    {
+        let pool = state.db.clone();
+        let to = body.email.clone();
+        let invite_token = token.clone();
+        let custom = body.message.clone().unwrap_or_default();
+        let body_html = format!(
+            "<p>You have been invited to join the workspace.</p>\
+             {}\
+             <p>Use this invitation token to create your account:</p>\
+             <p><code>{invite_token}</code></p>",
+            if custom.is_empty() {
+                String::new()
+            } else {
+                format!("<p>{custom}</p>")
+            }
+        );
+        tokio::task::spawn_blocking(move || {
+            crate::services::EmailService::send_notification(
+                &pool,
+                &to,
+                "You have been invited",
+                &body_html,
+            );
+        });
     }
 
     let resp = InvitationResponse {

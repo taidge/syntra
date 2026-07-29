@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use contrix_core::dto::{ApiResponse, FavoriteRequest, FileResponse};
 use contrix_core::error::AppError;
-use contrix_core::models::{Favorite, File, NewFavorite};
+use contrix_core::models::{File, NewFavorite};
 use contrix_core::schema::favorites::dsl as fav;
 use contrix_core::schema::files::dsl as f;
 
@@ -22,7 +22,6 @@ fn file_model_to_response(row: File) -> FileResponse {
     FileResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
-        path: row.path,
         mime_type: row.mime_type,
         size: row.size,
         owner_id: row.owner_id.parse().unwrap_or_default(),
@@ -226,8 +225,12 @@ pub async fn list_favorites(depot: &mut Depot, res: &mut Response) {
         .load::<File>(&mut conn)
     {
         Ok(rows) => {
-            let file_list: Vec<FileResponse> =
+            let mut file_list: Vec<FileResponse> =
                 rows.into_iter().map(file_model_to_response).collect();
+            for r in &mut file_list {
+                r.shared_with_count =
+                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string());
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
         }

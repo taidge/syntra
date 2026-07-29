@@ -11,8 +11,40 @@ use contrix_core::models::NewComment;
 use contrix_core::schema::comments::dsl as c;
 use contrix_core::schema::users::dsl as u;
 
+use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;
 use crate::state::AppState;
+
+/// Authorize the caller for `required_role` on the document, rendering the
+/// appropriate error response and returning `false` when access is denied.
+fn ensure_document_access(
+    conn: &mut diesel::SqliteConnection,
+    document_id: &str,
+    user_id: &str,
+    required_role: &str,
+    res: &mut Response,
+) -> bool {
+    match load_accessible_document(conn, document_id, user_id, required_role) {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("Document not found".into()).to_response(),
+            )));
+            false
+        }
+        Err(e) => {
+            let code = match &e {
+                AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+                AppError::NotFound(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            res.status_code(code);
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            false
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GET /documents/:id/comments
@@ -21,7 +53,7 @@ use crate::state::AppState;
 #[handler]
 pub async fn list_comments(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -44,6 +76,10 @@ pub async fn list_comments(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
     };
+
+    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res) {
+        return;
+    }
 
     match c::comments
         .inner_join(u::users.on(c::user_id.eq(u::id)))
@@ -161,6 +197,10 @@ pub async fn create_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
             return;
         }
     };
+
+    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res) {
+        return;
+    }
 
     let new_comment = NewComment {
         id: comment_id_val.to_string(),
@@ -396,7 +436,7 @@ pub async fn delete_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
 #[handler]
 pub async fn resolve_comment(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -420,6 +460,28 @@ pub async fn resolve_comment(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
     };
+
+    // Resolve the comment's owning document and authorize the caller, so a
+    // user cannot mark comments on documents they cannot access.
+    let comment_doc_id: Option<String> = c::comments
+        .filter(c::id.eq(&comment_id_param))
+        .select(c::document_id)
+        .first::<String>(&mut conn)
+        .optional()
+        .unwrap_or(None);
+    let comment_doc_id = match comment_doc_id {
+        Some(id) => id,
+        None => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("Comment not found".into()).to_response(),
+            )));
+            return;
+        }
+    };
+    if !ensure_document_access(&mut conn, &comment_doc_id, &uid, "viewer", res) {
+        return;
+    }
 
     match diesel::update(c::comments.filter(c::id.eq(&comment_id_param)))
         .set((c::is_resolved.eq(true), c::updated_at.eq(now.to_rfc3339())))

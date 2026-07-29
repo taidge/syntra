@@ -12,6 +12,7 @@ pub struct RateLimiter {
     max_requests: u32,
     window_seconds: u64,
     enabled: bool,
+    trust_forwarded_headers: bool,
     clients: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
@@ -21,14 +22,60 @@ impl RateLimiter {
     /// * `max_requests` - maximum number of requests allowed per window.
     /// * `window_seconds` - length of the sliding window in seconds.
     /// * `enabled` - when `false`, the middleware is a no-op pass-through.
-    pub fn new(max_requests: u32, window_seconds: u64, enabled: bool) -> Self {
+    /// * `trust_forwarded_headers` - whether proxy-provided client IP headers
+    ///   are trusted for unauthenticated requests.
+    pub fn new(
+        max_requests: u32,
+        window_seconds: u64,
+        enabled: bool,
+        trust_forwarded_headers: bool,
+    ) -> Self {
         Self {
             max_requests,
             window_seconds,
             enabled,
+            trust_forwarded_headers,
             clients: Mutex::new(HashMap::new()),
         }
     }
+
+    fn client_key(&self, req: &Request, depot: &Depot) -> String {
+        depot
+            .get::<String>("current_user_id")
+            .ok()
+            .cloned()
+            .or_else(|| {
+                if self.trust_forwarded_headers {
+                    forwarded_client_ip(req)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                req.remote_addr()
+                    .ip()
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| req.remote_addr().to_string())
+            })
+    }
+}
+
+fn forwarded_client_ip(req: &Request) -> Option<String> {
+    req.headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            req.headers()
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        })
 }
 
 #[handler]
@@ -44,19 +91,7 @@ impl RateLimiter {
             return;
         }
 
-        // Determine the rate-limit key: prefer authenticated user id, fall
-        // back to remote IP address.
-        let key = depot
-            .get::<String>("current_user_id")
-            .ok()
-            .cloned()
-            .or_else(|| {
-                req.headers()
-                    .get("x-forwarded-for")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.split(',').next().unwrap_or("unknown").trim().to_string())
-            })
-            .unwrap_or_else(|| format!("{}", req.remote_addr()));
+        let key = self.client_key(req, depot);
 
         let now = Instant::now();
         let window = std::time::Duration::from_secs(self.window_seconds);
@@ -65,6 +100,8 @@ impl RateLimiter {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+
+        clients.retain(|_, (_, started_at)| now.duration_since(*started_at) < window);
 
         let entry = clients.entry(key).or_insert((0, now));
 

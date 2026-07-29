@@ -1,18 +1,15 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use diesel::prelude::*;
-use salvo::prelude::*;
-use uuid::Uuid;
-
 use contrix_core::dto::{ApiResponse, FileResponse};
 use contrix_core::error::AppError;
 use contrix_core::models::File;
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::users::dsl as u;
+use diesel::prelude::*;
+use salvo::prelude::*;
 
 use crate::middleware::auth::get_user_id;
-use crate::services::StorageService;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -23,7 +20,6 @@ fn file_model_to_response(row: File) -> FileResponse {
     FileResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
-        path: row.path,
         mime_type: row.mime_type,
         size: row.size,
         owner_id: row.owner_id.parse().unwrap_or_default(),
@@ -78,8 +74,12 @@ pub async fn list_trashed(depot: &mut Depot, res: &mut Response) {
         .load::<File>(&mut conn)
     {
         Ok(rows) => {
-            let file_list: Vec<FileResponse> =
+            let mut file_list: Vec<FileResponse> =
                 rows.into_iter().map(file_model_to_response).collect();
+            for r in &mut file_list {
+                r.shared_with_count =
+                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string());
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
         }
@@ -229,8 +229,7 @@ pub async fn permanently_delete(req: &mut Request, depot: &mut Depot, res: &mut 
 
     // Delete from physical storage (only for non-folder files).
     if !is_folder {
-        let storage = StorageService::new(&state.config.storage.base_path);
-        let _ = storage.delete_file(&file_path);
+        let _ = state.storage.delete_file(&file_path).await;
 
         // Update user's storage_used.
         let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
@@ -289,12 +288,11 @@ pub async fn empty_trash(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    let storage = StorageService::new(&state.config.storage.base_path);
     let mut total_freed: i64 = 0;
 
     for file_row in &trashed_files {
         if !file_row.is_folder {
-            let _ = storage.delete_file(&file_row.path);
+            let _ = state.storage.delete_file(&file_row.path).await;
             total_freed += file_row.size;
         }
     }

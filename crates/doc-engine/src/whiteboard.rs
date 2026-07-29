@@ -65,16 +65,45 @@ impl Whiteboard {
         for layer in &self.layers {
             for elem in &layer.elements {
                 let (x1, y1, x2, y2) = match elem {
-                    DrawElement::Rectangle(r) => (r.x as f64, r.y as f64, (r.x + r.width) as f64, (r.y + r.height) as f64),
-                    DrawElement::Ellipse(e) => ((e.x - e.rx) as f64, (e.y - e.ry) as f64, (e.x + e.rx) as f64, (e.y + e.ry) as f64),
-                    DrawElement::Line(l) => (l.start.x.min(l.end.x) as f64, l.start.y.min(l.end.y) as f64, l.start.x.max(l.end.x) as f64, l.start.y.max(l.end.y) as f64),
-                    DrawElement::Text(t) => (t.x as f64, t.y as f64, t.x as f64 + 100.0, t.y as f64 + 20.0),
-                    DrawElement::Image(img) => (img.x as f64, img.y as f64, (img.x + img.width) as f64, (img.y + img.height) as f64),
+                    DrawElement::Rectangle(r) => (
+                        r.x as f64,
+                        r.y as f64,
+                        (r.x + r.width) as f64,
+                        (r.y + r.height) as f64,
+                    ),
+                    DrawElement::Ellipse(e) => (
+                        (e.x - e.rx) as f64,
+                        (e.y - e.ry) as f64,
+                        (e.x + e.rx) as f64,
+                        (e.y + e.ry) as f64,
+                    ),
+                    DrawElement::Line(l) => (
+                        l.start.x.min(l.end.x) as f64,
+                        l.start.y.min(l.end.y) as f64,
+                        l.start.x.max(l.end.x) as f64,
+                        l.start.y.max(l.end.y) as f64,
+                    ),
+                    DrawElement::Text(t) => (
+                        t.x as f64,
+                        t.y as f64,
+                        t.x as f64 + 100.0,
+                        t.y as f64 + 20.0,
+                    ),
+                    DrawElement::Image(img) => (
+                        img.x as f64,
+                        img.y as f64,
+                        (img.x + img.width) as f64,
+                        (img.y + img.height) as f64,
+                    ),
                     DrawElement::Path(p) => {
                         let xs: Vec<f64> = p.points.iter().map(|pt| pt.x as f64).collect();
                         let ys: Vec<f64> = p.points.iter().map(|pt| pt.y as f64).collect();
-                        (xs.iter().cloned().fold(f64::MAX, f64::min), ys.iter().cloned().fold(f64::MAX, f64::min),
-                         xs.iter().cloned().fold(f64::MIN, f64::max), ys.iter().cloned().fold(f64::MIN, f64::max))
+                        (
+                            xs.iter().cloned().fold(f64::MAX, f64::min),
+                            ys.iter().cloned().fold(f64::MAX, f64::min),
+                            xs.iter().cloned().fold(f64::MIN, f64::max),
+                            ys.iter().cloned().fold(f64::MIN, f64::max),
+                        )
                     }
                 };
                 if x1 < min_x {
@@ -94,7 +123,12 @@ impl Whiteboard {
         }
 
         if !found {
-            return (0.0, 0.0, self.canvas_width as f64, self.canvas_height as f64);
+            return (
+                0.0,
+                0.0,
+                self.canvas_width as f64,
+                self.canvas_height as f64,
+            );
         }
         (min_x, min_y, max_x, max_y)
     }

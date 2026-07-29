@@ -30,13 +30,17 @@ pub async fn jwt_auth_middleware(
     res: &mut Response,
     ctrl: &mut FlowCtrl,
 ) {
-    let auth_header = req
+    let header_token = req
         .headers()
         .get("authorization")
-        .and_then(|v| v.to_str().ok());
+        .and_then(|v| v.to_str().ok())
+        .and_then(|header| header.strip_prefix("Bearer "))
+        .map(|t| t.to_string());
 
-    let token = match auth_header {
-        Some(header) if header.starts_with("Bearer ") => &header[7..],
+    // WebSocket connections cannot set an Authorization header from the
+    // browser, so fall back to a `?token=` query parameter for those routes.
+    let token = match header_token.or_else(|| req.query::<String>("token")) {
+        Some(t) if !t.is_empty() => t,
         _ => {
             res.status_code(StatusCode::UNAUTHORIZED);
             res.render(Json(serde_json::json!({
@@ -65,7 +69,7 @@ pub async fn jwt_auth_middleware(
     let validation = Validation::new(Algorithm::HS256);
 
     match decode::<JwtClaims>(
-        token,
+        &token,
         &DecodingKey::from_secret(secret.as_bytes()),
         &validation,
     ) {

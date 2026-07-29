@@ -10,17 +10,6 @@ pub mod navbar;
 pub mod post_message;
 pub mod sidebar;
 pub mod toast;
-pub mod toolbar;
 pub mod version_history;
 
-pub use comments_pane::CommentsPane;
-pub use context_menu::{ContextMenu, MenuEntry};
-pub use file_list::FileList;
-pub use find_dialog::FindDialog;
-pub use menubar::Menubar;
-pub use modal::Modal;
-pub use navbar::Navbar;
-pub use sidebar::Sidebar;
 pub use toast::{Toast, ToastKind, ToastRack, push_toast};
-pub use toolbar::Toolbar;
-pub use version_history::VersionHistory;

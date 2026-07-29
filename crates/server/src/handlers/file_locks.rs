@@ -9,10 +9,41 @@ use contrix_core::dto::ApiResponse;
 use contrix_core::error::AppError;
 use contrix_core::models::{FileLock, NewFileLock};
 use contrix_core::schema::file_locks::dsl as fl;
-use contrix_core::schema::files::dsl as f;
 
+use crate::handlers::access::load_accessible_file;
 use crate::middleware::auth::get_user_id;
 use crate::state::AppState;
+
+/// Authorize the caller for `required_role` on a file, rendering the proper
+/// error and returning `false` when access is denied or the file is missing.
+fn ensure_file_access(
+    conn: &mut diesel::SqliteConnection,
+    file_id: &str,
+    user_id: &str,
+    required_role: &str,
+    res: &mut Response,
+) -> bool {
+    match load_accessible_file(conn, file_id, user_id, required_role) {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("File not found".into()).to_response(),
+            )));
+            false
+        }
+        Err(e) => {
+            let code = match &e {
+                AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+                AppError::NotFound(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            res.status_code(code);
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            false
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // POST /files/:file_id/lock  (Acquire lock)
@@ -45,28 +76,9 @@ pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
-    // Verify the file exists.
-    match f::files
-        .filter(f::id.eq(&file_id_param))
-        .select(f::id)
-        .first::<String>(&mut conn)
-        .optional()
-    {
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("File not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-        Ok(Some(_)) => {}
+    // Verify the file exists and the caller may edit it (locking is a write).
+    if !ensure_file_access(&mut conn, &file_id_param, &uid, "editor", res) {
+        return;
     }
 
     // Check for existing lock.
@@ -220,7 +232,7 @@ pub async fn release_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
 #[handler]
 pub async fn check_lock(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -244,19 +256,30 @@ pub async fn check_lock(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
 
+    if !ensure_file_access(&mut conn, &file_id_param, &uid, "viewer", res) {
+        return;
+    }
+
     match fl::file_locks
         .filter(fl::file_id.eq(&file_id_param))
         .first::<FileLock>(&mut conn)
         .optional()
     {
         Ok(Some(lock)) => {
+            // Only expose the opaque lock_token to the lock holder; other
+            // collaborators just need to know it is locked and by whom.
+            let lock_token = if lock.locked_by == uid {
+                Some(lock.lock_token.clone())
+            } else {
+                None
+            };
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(serde_json::json!({
                 "locked": true,
                 "id": lock.id,
                 "file_id": lock.file_id,
                 "locked_by": lock.locked_by,
-                "lock_token": lock.lock_token,
+                "lock_token": lock_token,
                 "lock_type": lock.lock_type,
                 "expires_at": lock.expires_at,
                 "created_at": lock.created_at,

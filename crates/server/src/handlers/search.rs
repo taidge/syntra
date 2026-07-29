@@ -32,7 +32,7 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     };
 
     let q: String = req.query("q").unwrap_or_default();
-    let doc_type_filter: Option<String> = req.query("type");
+    let doc_type_filter: Option<String> = req.query("document_type");
     let page: u32 = req.query("page").unwrap_or(1);
     let per_page: u32 = req.query("per_page").unwrap_or(20);
 
@@ -70,7 +70,7 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                     .map(|(id_val, name_val, doc_type_str, score)| SearchResult {
                         id: id_val.parse().unwrap_or_default(),
                         name: name_val.clone(),
-                        doc_type: DocumentType::from_str(&doc_type_str),
+                        document_type: DocumentType::from_str(&doc_type_str),
                         snippet: name_val,
                         score,
                         updated_at: Utc::now(),
@@ -167,7 +167,7 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                     |(id_val, name_val, doc_type_str, updated_val)| SearchResult {
                         id: id_val.parse().unwrap_or_default(),
                         name: name_val.clone(),
-                        doc_type: DocumentType::from_str(&doc_type_str),
+                        document_type: DocumentType::from_str(&doc_type_str),
                         snippet: name_val,
                         score: 1.0,
                         updated_at: updated_val.parse().unwrap_or_else(|_| Utc::now()),

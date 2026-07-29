@@ -25,15 +25,15 @@ pub fn Register() -> Element {
 
         // Client-side validation
         if uname.is_empty() || em.is_empty() || pw.is_empty() || cpw.is_empty() {
-            error.set(Some("Please fill in all fields.".into()));
+            error.set(Some(crate::i18n::t("auth.fill_all_fields")));
             return;
         }
         if pw.len() < 8 {
-            error.set(Some("Password must be at least 8 characters.".into()));
+            error.set(Some(crate::i18n::t("profile.password_too_short")));
             return;
         }
         if pw != cpw {
-            error.set(Some("Passwords do not match.".into()));
+            error.set(Some(crate::i18n::t("profile.password_mismatch")));
             return;
         }
 
@@ -86,7 +86,7 @@ pub fn Register() -> Element {
             div { class: "auth-card",
                 div { class: "auth-header",
                     h2 { "{title}" }
-                    p { class: "auth-subtitle", "Join Contrix Office" }
+                    p { class: "auth-subtitle", {crate::i18n::t("auth.register_subtitle")} }
                 }
 
                 form { onsubmit: handle_submit,
@@ -96,7 +96,7 @@ pub fn Register() -> Element {
                             id: "username",
                             r#type: "text",
                             class: "form-input",
-                            placeholder: "Choose a username",
+                            placeholder: crate::i18n::t("auth.username_placeholder"),
                             value: "{username}",
                             oninput: move |e| username.set(e.value()),
                         }
@@ -108,7 +108,7 @@ pub fn Register() -> Element {
                             id: "reg-email",
                             r#type: "email",
                             class: "form-input",
-                            placeholder: "you@example.com",
+                            placeholder: crate::i18n::t("auth.email_placeholder"),
                             value: "{email}",
                             oninput: move |e| email.set(e.value()),
                         }
@@ -120,7 +120,7 @@ pub fn Register() -> Element {
                             id: "reg-password",
                             r#type: "password",
                             class: "form-input",
-                            placeholder: "At least 8 characters",
+                            placeholder: crate::i18n::t("auth.new_password_placeholder"),
                             value: "{password}",
                             oninput: move |e| password.set(e.value()),
                         }
@@ -132,7 +132,7 @@ pub fn Register() -> Element {
                             id: "confirm-password",
                             r#type: "password",
                             class: "form-input",
-                            placeholder: "Repeat your password",
+                            placeholder: crate::i18n::t("auth.confirm_password_placeholder"),
                             value: "{confirm_password}",
                             oninput: move |e| confirm_password.set(e.value()),
                         }
@@ -146,7 +146,7 @@ pub fn Register() -> Element {
                         r#type: "submit",
                         class: "btn btn-primary btn-block",
                         disabled: *loading.read(),
-                        if *loading.read() { "Creating account..." } else { "{create_label}" }
+                        if *loading.read() { {crate::i18n::t("auth.creating_account")} } else { "{create_label}" }
                     }
                 }
 

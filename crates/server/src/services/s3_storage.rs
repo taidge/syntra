@@ -1,4 +1,9 @@
+use std::collections::BTreeMap;
+
+use chrono::Utc;
 use contrix_core::error::AppError;
+use reqwest::{Method, StatusCode, Url};
+use sha2::{Digest, Sha256};
 
 /// S3-compatible storage backend.
 ///
@@ -40,8 +45,12 @@ impl S3Storage {
     pub fn from_config(cfg: &contrix_core::config::StorageConfig) -> Option<Self> {
         let bucket = cfg.s3_bucket.as_deref()?;
         let region = cfg.s3_region.as_deref().unwrap_or("us-east-1");
-        let access_key = cfg.s3_access_key.as_deref().unwrap_or("");
-        let secret_key = cfg.s3_secret_key.as_deref().unwrap_or("");
+        let access_key = cfg.s3_access_key.as_deref()?;
+        let secret_key = cfg.s3_secret_key.as_deref()?;
+        if bucket.trim().is_empty() || access_key.trim().is_empty() || secret_key.trim().is_empty()
+        {
+            return None;
+        }
         let endpoint = cfg.s3_endpoint.as_deref().unwrap_or("");
         Some(Self::new(bucket, region, access_key, secret_key, endpoint))
     }
@@ -49,16 +58,19 @@ impl S3Storage {
     // -- accessors -----------------------------------------------------------
 
     /// The configured bucket name.
+    #[allow(dead_code)] // accessor retained for diagnostics / tests
     pub fn bucket(&self) -> &str {
         &self.bucket
     }
 
     /// The configured region.
+    #[allow(dead_code)] // accessor retained for diagnostics / tests
     pub fn region(&self) -> &str {
         &self.region
     }
 
     /// Whether this storage points at a custom (non-AWS) endpoint.
+    #[allow(dead_code)] // accessor retained for diagnostics / tests
     pub fn is_custom_endpoint(&self) -> bool {
         !self.endpoint.is_empty()
     }
@@ -67,6 +79,7 @@ impl S3Storage {
 
     /// Generate the full URL for an object key.
     fn object_url(&self, key: &str) -> String {
+        let key = encode_path(key);
         if self.endpoint.is_empty() {
             format!(
                 "https://{}.s3.{}.amazonaws.com/{}",
@@ -78,12 +91,10 @@ impl S3Storage {
     }
 
     /// Generate the base URL for listing objects (the bucket root).
+    #[allow(dead_code)] // URL helper retained for tests / future listing support
     fn bucket_url(&self) -> String {
         if self.endpoint.is_empty() {
-            format!(
-                "https://{}.s3.{}.amazonaws.com",
-                self.bucket, self.region
-            )
+            format!("https://{}.s3.{}.amazonaws.com", self.bucket, self.region)
         } else {
             format!("{}/{}", self.endpoint, self.bucket)
         }
@@ -92,6 +103,74 @@ impl S3Storage {
     /// Build a shared `reqwest::Client`.
     fn client(&self) -> reqwest::Client {
         reqwest::Client::new()
+    }
+
+    async fn send_signed(
+        &self,
+        method: Method,
+        url: String,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+        extra_headers: BTreeMap<String, String>,
+    ) -> Result<reqwest::Response, AppError> {
+        let url_parts = Url::parse(&url).map_err(|e| AppError::Storage(e.to_string()))?;
+        let amz_date = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let date = Utc::now().format("%Y%m%d").to_string();
+        let payload_hash = sha256_hex(&body);
+        let host = host_header(&url_parts)?;
+
+        let mut headers = BTreeMap::new();
+        headers.insert("host".to_string(), host);
+        headers.insert("x-amz-content-sha256".to_string(), payload_hash.clone());
+        headers.insert("x-amz-date".to_string(), amz_date.clone());
+        if let Some(content_type) = content_type {
+            headers.insert("content-type".to_string(), content_type.to_string());
+        }
+        for (name, value) in extra_headers {
+            headers.insert(name.to_ascii_lowercase(), value);
+        }
+
+        let canonical_headers = headers
+            .iter()
+            .map(|(name, value)| format!("{name}:{}\n", value.trim()))
+            .collect::<String>();
+        let signed_headers = headers.keys().cloned().collect::<Vec<_>>().join(";");
+        let canonical_request = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            method.as_str(),
+            canonical_uri(&url_parts),
+            canonical_query(&url_parts),
+            canonical_headers,
+            signed_headers,
+            payload_hash
+        );
+        let credential_scope = format!("{date}/{}/s3/aws4_request", self.region);
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+            sha256_hex(canonical_request.as_bytes())
+        );
+        let signing_key = signing_key(&self.secret_key, &date, &self.region);
+        let signature = hex_bytes(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+        let authorization = format!(
+            "AWS4-HMAC-SHA256 Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
+            self.access_key
+        );
+
+        let mut request = self
+            .client()
+            .request(method, url)
+            .header("Authorization", authorization);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        if !body.is_empty() {
+            request = request.body(body);
+        }
+
+        request
+            .send()
+            .await
+            .map_err(|e| AppError::Storage(format!("S3 request failed: {e}")))
     }
 
     // -- public API ----------------------------------------------------------
@@ -105,12 +184,13 @@ impl S3Storage {
     ) -> Result<(), AppError> {
         let url = self.object_url(key);
         let resp = self
-            .client()
-            .put(&url)
-            .header("Content-Type", content_type)
-            .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
-            .body(data.to_vec())
-            .send()
+            .send_signed(
+                Method::PUT,
+                url,
+                data.to_vec(),
+                Some(content_type),
+                BTreeMap::new(),
+            )
             .await
             .map_err(|e| AppError::Storage(format!("S3 PUT failed: {e}")))?;
 
@@ -127,9 +207,7 @@ impl S3Storage {
     pub async fn get_object(&self, key: &str) -> Result<Vec<u8>, AppError> {
         let url = self.object_url(key);
         let resp = self
-            .client()
-            .get(&url)
-            .send()
+            .send_signed(Method::GET, url, Vec::new(), None, BTreeMap::new())
             .await
             .map_err(|e| AppError::Storage(format!("S3 GET failed: {e}")))?;
 
@@ -149,96 +227,49 @@ impl S3Storage {
     /// Delete an object from S3.
     pub async fn delete_object(&self, key: &str) -> Result<(), AppError> {
         let url = self.object_url(key);
-        let _ = self
-            .client()
-            .delete(&url)
-            .send()
+        let resp = self
+            .send_signed(Method::DELETE, url, Vec::new(), None, BTreeMap::new())
             .await
             .map_err(|e| AppError::Storage(format!("S3 DELETE failed: {e}")))?;
-        Ok(())
+        if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Err(AppError::Storage(format!(
+            "S3 DELETE returned {}",
+            resp.status()
+        )))
     }
 
     /// Check whether an object exists (HEAD request).
     pub async fn head_object(&self, key: &str) -> Result<bool, AppError> {
         let url = self.object_url(key);
         let resp = self
-            .client()
-            .head(&url)
-            .send()
+            .send_signed(Method::HEAD, url, Vec::new(), None, BTreeMap::new())
             .await
             .map_err(|e| AppError::Storage(format!("S3 HEAD failed: {e}")))?;
 
-        Ok(resp.status().is_success())
-    }
-
-    /// Copy an object within the same bucket.
-    pub async fn copy_object(&self, source_key: &str, dest_key: &str) -> Result<(), AppError> {
-        let url = self.object_url(dest_key);
-        let copy_source = format!("{}/{}", self.bucket, source_key);
-
-        let resp = self
-            .client()
-            .put(&url)
-            .header("x-amz-copy-source", copy_source)
-            .send()
-            .await
-            .map_err(|e| AppError::Storage(format!("S3 COPY failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(AppError::Storage(format!(
-                "S3 COPY returned {}",
+        if resp.status().is_success() {
+            Ok(true)
+        } else if resp.status() == StatusCode::NOT_FOUND {
+            Ok(false)
+        } else {
+            Err(AppError::Storage(format!(
+                "S3 HEAD returned {}",
                 resp.status()
-            )));
+            )))
         }
-        Ok(())
-    }
-
-    /// List object keys under a given prefix.
-    ///
-    /// Returns a simplified list of keys (no pagination / continuation token
-    /// handling — this is intentionally minimal).
-    pub async fn list_objects(&self, prefix: &str) -> Result<Vec<String>, AppError> {
-        let url = format!("{}?list-type=2&prefix={}", self.bucket_url(), prefix);
-
-        let resp = self
-            .client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| AppError::Storage(format!("S3 LIST failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(AppError::Storage(format!(
-                "S3 LIST returned {}",
-                resp.status()
-            )));
-        }
-
-        // Very simple XML key extraction — good enough for the minimal
-        // backend; a production implementation would use a proper XML parser.
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AppError::Storage(format!("S3 LIST read failed: {e}")))?;
-
-        let keys: Vec<String> = body
-            .split("<Key>")
-            .skip(1)
-            .filter_map(|fragment| fragment.split("</Key>").next())
-            .map(|s| s.to_string())
-            .collect();
-
-        Ok(keys)
     }
 
     /// Generate a storage key for a user-uploaded file.
     ///
     /// The key layout is: `uploads/<owner_id>/<file_id>/<filename>`
+    #[allow(dead_code)] // key-layout helper retained for tests / future wiring
     pub fn generate_key(owner_id: &str, file_id: &str, filename: &str) -> String {
         format!("uploads/{}/{}/{}", owner_id, file_id, filename)
     }
 
     /// Generate a storage key for a file version.
+    #[allow(dead_code)] // key-layout helper retained for tests / future wiring
     pub fn generate_version_key(
         owner_id: &str,
         file_id: &str,
@@ -251,10 +282,120 @@ impl S3Storage {
         )
     }
 
-    /// Generate a storage key for a thumbnail.
+    /// Generate a storage key for a thumbnail. Thumbnails are encoded as JPEG
+    /// (see `ThumbnailService`), so the key uses a `.jpg` extension to match.
+    #[allow(dead_code)] // key-layout helper retained for tests / future wiring
     pub fn generate_thumbnail_key(file_id: &str) -> String {
-        format!("thumbnails/{}.png", file_id)
+        format!("thumbnails/{}.jpg", file_id)
     }
+}
+
+fn host_header(url: &Url) -> Result<String, AppError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| AppError::Storage("S3 endpoint is missing a host".into()))?;
+    Ok(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
+}
+
+fn canonical_uri(url: &Url) -> String {
+    let path = url.path();
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn canonical_query(url: &Url) -> String {
+    let mut pairs = url
+        .query_pairs()
+        .map(|(key, value)| (encode_query_component(&key), encode_query_component(&value)))
+        .collect::<Vec<_>>();
+    pairs.sort();
+    pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn encode_path(value: &str) -> String {
+    percent_encode(value, true)
+}
+
+fn encode_query_component(value: &str) -> String {
+    percent_encode(value, false)
+}
+
+fn percent_encode(value: &str, keep_slash: bool) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            || (keep_slash && *byte == b'/');
+        if keep {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    hex_bytes(&digest)
+}
+
+fn signing_key(secret_key: &str, date: &str, region: &str) -> [u8; 32] {
+    let date_key = hmac_sha256(format!("AWS4{secret_key}").as_bytes(), date.as_bytes());
+    let region_key = hmac_sha256(&date_key, region.as_bytes());
+    let service_key = hmac_sha256(&region_key, b"s3");
+    hmac_sha256(&service_key, b"aws4_request")
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0_u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let digest = Sha256::digest(key);
+        key_block[..digest.len()].copy_from_slice(&digest);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0x36_u8; BLOCK_SIZE];
+    let mut outer_pad = [0x5c_u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        inner_pad[i] ^= key_block[i];
+        outer_pad[i] ^= key_block[i];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_hash);
+    let digest = outer.finalize();
+    let mut output = [0_u8; 32];
+    output.copy_from_slice(&digest);
+    output
+}
+
+fn hex_bytes(data: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(data.len() * 2);
+    for byte in data {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -290,7 +431,13 @@ mod tests {
 
     #[test]
     fn bucket_url_custom_endpoint() {
-        let s3 = S3Storage::new("my-bucket", "eu-west-1", "ak", "sk", "http://localhost:9000");
+        let s3 = S3Storage::new(
+            "my-bucket",
+            "eu-west-1",
+            "ak",
+            "sk",
+            "http://localhost:9000",
+        );
         assert_eq!(s3.bucket_url(), "http://localhost:9000/my-bucket");
     }
 
@@ -309,13 +456,10 @@ mod tests {
         assert_eq!(key, "uploads/user-1/file-abc/report.pdf");
 
         let vkey = S3Storage::generate_version_key("user-1", "file-abc", 3, "report.pdf");
-        assert_eq!(
-            vkey,
-            "uploads/user-1/file-abc/versions/v3/report.pdf"
-        );
+        assert_eq!(vkey, "uploads/user-1/file-abc/versions/v3/report.pdf");
 
         let tkey = S3Storage::generate_thumbnail_key("file-abc");
-        assert_eq!(tkey, "thumbnails/file-abc.png");
+        assert_eq!(tkey, "thumbnails/file-abc.jpg");
     }
 
     #[test]
