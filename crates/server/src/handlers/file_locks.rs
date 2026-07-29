@@ -89,29 +89,29 @@ pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
     {
         Ok(Some(existing)) => {
             // Check if expired.
-            if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(&existing.expires_at) {
-                if exp.with_timezone(&Utc) > Utc::now() {
-                    if existing.locked_by == uid {
-                        // Already locked by the same user — return the existing lock.
-                        res.status_code(StatusCode::OK);
-                        res.render(Json(ApiResponse::ok(serde_json::json!({
-                            "id": existing.id,
-                            "file_id": existing.file_id,
-                            "locked_by": existing.locked_by,
-                            "lock_token": existing.lock_token,
-                            "lock_type": existing.lock_type,
-                            "expires_at": existing.expires_at,
-                            "created_at": existing.created_at,
-                        }))));
-                        return;
-                    }
-                    res.status_code(StatusCode::CONFLICT);
-                    res.render(Json(ApiResponse::<()>::err(
-                        AppError::Conflict("File is already locked by another user".into())
-                            .to_response(),
-                    )));
+            if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(&existing.expires_at)
+                && exp.with_timezone(&Utc) > Utc::now()
+            {
+                if existing.locked_by == uid {
+                    // Already locked by the same user — return the existing lock.
+                    res.status_code(StatusCode::OK);
+                    res.render(Json(ApiResponse::ok(serde_json::json!({
+                        "id": existing.id,
+                        "file_id": existing.file_id,
+                        "locked_by": existing.locked_by,
+                        "lock_token": existing.lock_token,
+                        "lock_type": existing.lock_type,
+                        "expires_at": existing.expires_at,
+                        "created_at": existing.created_at,
+                    }))));
                     return;
                 }
+                res.status_code(StatusCode::CONFLICT);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::Conflict("File is already locked by another user".into())
+                        .to_response(),
+                )));
+                return;
             }
             // Lock is expired — remove it and proceed.
             let _ =

@@ -21,17 +21,16 @@ static CURRENT: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(detect_initial_loc
 
 fn detect_initial_locale() -> String {
     if let Some(window) = web_sys::window() {
-        if let Ok(Some(storage)) = window.local_storage() {
-            if let Ok(Some(v)) = storage.get_item("locale") {
-                if v == "zh" || v == "en" {
-                    return v;
-                }
-            }
+        if let Ok(Some(storage)) = window.local_storage()
+            && let Ok(Some(v)) = storage.get_item("locale")
+            && (v == "zh" || v == "en")
+        {
+            return v;
         }
-        if let Some(lang) = window.navigator().language() {
-            if lang.to_lowercase().starts_with("zh") {
-                return "zh".into();
-            }
+        if let Some(lang) = window.navigator().language()
+            && lang.to_lowercase().starts_with("zh")
+        {
+            return "zh".into();
         }
     }
     "en".into()
@@ -49,24 +48,24 @@ pub fn set_locale(loc: &str) {
     if let Ok(mut s) = CURRENT.lock() {
         *s = normalized.to_string();
     }
-    if let Some(window) = web_sys::window() {
-        if let Ok(Some(storage)) = window.local_storage() {
-            let _ = storage.set_item("locale", normalized);
-        }
+    if let Some(window) = web_sys::window()
+        && let Ok(Some(storage)) = window.local_storage()
+    {
+        let _ = storage.set_item("locale", normalized);
     }
 }
 
 pub fn t(key: &str) -> String {
     let loc = current_locale();
-    if let Some(dict) = DICTIONARIES.get(loc.as_str()) {
-        if let Some(s) = dict.get(key) {
-            return s.clone();
-        }
+    if let Some(dict) = DICTIONARIES.get(loc.as_str())
+        && let Some(s) = dict.get(key)
+    {
+        return s.clone();
     }
-    if let Some(en) = DICTIONARIES.get("en") {
-        if let Some(s) = en.get(key) {
-            return s.clone();
-        }
+    if let Some(en) = DICTIONARIES.get("en")
+        && let Some(s) = en.get(key)
+    {
+        return s.clone();
     }
     key.to_string()
 }

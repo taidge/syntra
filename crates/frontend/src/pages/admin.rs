@@ -338,8 +338,6 @@ fn AdminUsers() -> Element {
                                     let uid_for_role = user.id.clone();
                                     let uid_for_disable = user.id.clone();
                                     let role_now = user.role.clone();
-                                    let update_role = update_role.clone();
-                                    let disable_user = disable_user.clone();
                                     rsx! {
                                         tr { key: "{key}",
                                             td { "{user.username}" }
@@ -561,10 +559,10 @@ fn AdminSettings() -> Element {
             .unwrap_or_else(|| default.to_string())
     };
 
-    let mut default_quota = use_signal(|| String::new());
-    let mut max_upload = use_signal(|| String::new());
-    let mut allow_registration = use_signal(|| String::new());
-    let mut default_role = use_signal(|| String::new());
+    let mut default_quota = use_signal(String::new);
+    let mut max_upload = use_signal(String::new);
+    let mut allow_registration = use_signal(String::new);
+    let mut default_role = use_signal(String::new);
 
     // Seed inputs once settings have loaded.
     use_effect(move || {

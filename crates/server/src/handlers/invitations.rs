@@ -24,7 +24,7 @@ fn invitation_to_response(row: Invitation) -> InvitationResponse {
     InvitationResponse {
         id: row.id.parse().unwrap_or_default(),
         email: row.email,
-        role: UserRole::from_str(&row.role),
+        role: UserRole::parse_lossy(&row.role),
         invited_by: row.invited_by.parse().unwrap_or_default(),
         token: row.token,
         message: row.message,

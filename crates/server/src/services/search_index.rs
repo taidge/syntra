@@ -161,10 +161,10 @@ impl SearchService {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            if let Some(oid) = owner_id {
-                if doc_owner != oid {
-                    continue;
-                }
+            if let Some(oid) = owner_id
+                && doc_owner != oid
+            {
+                continue;
             }
             results.push((id, name, doc_type, score));
         }

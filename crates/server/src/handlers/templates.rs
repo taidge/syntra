@@ -31,7 +31,7 @@ fn template_to_response(row: Template) -> TemplateResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
         description: row.description,
-        document_type: DocumentType::from_str(&row.doc_type),
+        document_type: DocumentType::parse_lossy(&row.doc_type),
         content,
         thumbnail_url: row.thumbnail_url,
         is_global: row.is_global,
@@ -512,7 +512,7 @@ pub async fn create_document_from_template(
         None
     };
 
-    let doc_type = DocumentType::from_str(&template.doc_type);
+    let doc_type = DocumentType::parse_lossy(&template.doc_type);
     let doc_name = body
         .name
         .unwrap_or_else(|| format!("{} (copy)", template.name));

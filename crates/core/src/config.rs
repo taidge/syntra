@@ -120,23 +120,12 @@ impl Default for RateLimitConfig {
 }
 
 /// OAuth provider configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct OAuthConfig {
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
-}
-
-impl Default for OAuthConfig {
-    fn default() -> Self {
-        Self {
-            google_client_id: None,
-            google_client_secret: None,
-            github_client_id: None,
-            github_client_secret: None,
-        }
-    }
 }
 
 /// Trash retention configuration.

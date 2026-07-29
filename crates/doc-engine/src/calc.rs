@@ -958,12 +958,12 @@ impl Sheet {
         // Evaluate in topological order, updating cells.
         for (row, col) in &order {
             let cr = CellRef::new(*row, *col);
-            if let Some(cell) = self.cells.get(&cr) {
-                if let Some(f) = cell.formula.clone() {
-                    let val = self.evaluate_formula(&f);
-                    if let Some(cell_mut) = self.cells.get_mut(&cr) {
-                        cell_mut.value = val;
-                    }
+            if let Some(cell) = self.cells.get(&cr)
+                && let Some(f) = cell.formula.clone()
+            {
+                let val = self.evaluate_formula(&f);
+                if let Some(cell_mut) = self.cells.get_mut(&cr) {
+                    cell_mut.value = val;
                 }
             }
         }
@@ -973,10 +973,10 @@ impl Sheet {
         let ordered_set: HashSet<(u32, u32)> = order.into_iter().collect();
         for (cr, _formula) in &formula_cells {
             let key = (cr.row, cr.col);
-            if !ordered_set.contains(&key) {
-                if let Some(cell_mut) = self.cells.get_mut(cr) {
-                    cell_mut.value = CellValue::Error("Circular reference detected".into());
-                }
+            if !ordered_set.contains(&key)
+                && let Some(cell_mut) = self.cells.get_mut(cr)
+            {
+                cell_mut.value = CellValue::Error("Circular reference detected".into());
             }
         }
     }
@@ -1005,13 +1005,13 @@ impl Sheet {
         let refs = Self::expand_range(start, end);
         let mut values = Vec::new();
         for cr in &refs {
-            if let Some(cell) = self.cells.get(cr) {
-                if let Some(n) = cell.value.as_number() {
-                    // Skip truly empty cells for aggregation purposes (but
-                    // 0.0 from empty is acceptable for SUM, not AVERAGE).
-                    if !matches!(cell.value, CellValue::Empty) {
-                        values.push(n);
-                    }
+            if let Some(cell) = self.cells.get(cr)
+                && let Some(n) = cell.value.as_number()
+            {
+                // Skip truly empty cells for aggregation purposes (but
+                // 0.0 from empty is acceptable for SUM, not AVERAGE).
+                if !matches!(cell.value, CellValue::Empty) {
+                    values.push(n);
                 }
             }
         }
@@ -1102,22 +1102,22 @@ impl Sheet {
                         if let Some(ref f) = src_cell.formula {
                             let row_delta = r as i64 - src_row as i64;
                             new_cell.formula = Some(adjust_formula_refs(f, row_delta, 0));
-                        } else if matches!(src_cell.value, CellValue::Number(_)) {
-                            if let Some(Some(delta)) = col_deltas.get(&c) {
-                                // Linear pattern: value at source_start + delta * steps
-                                let base = self
-                                    .cells
-                                    .get(&CellRef::new(sr_min, c))
-                                    .and_then(|cell| {
-                                        if let CellValue::Number(n) = cell.value {
-                                            Some(n)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap_or(0.0);
-                                new_cell.value = CellValue::Number(base + *delta * steps as f64);
-                            }
+                        } else if matches!(src_cell.value, CellValue::Number(_))
+                            && let Some(Some(delta)) = col_deltas.get(&c)
+                        {
+                            // Linear pattern: value at source_start + delta * steps
+                            let base = self
+                                .cells
+                                .get(&CellRef::new(sr_min, c))
+                                .and_then(|cell| {
+                                    if let CellValue::Number(n) = cell.value {
+                                        Some(n)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0.0);
+                            new_cell.value = CellValue::Number(base + *delta * steps as f64);
                         }
                         self.cells.insert(CellRef::new(r, c), new_cell);
                     }
@@ -1166,21 +1166,21 @@ impl Sheet {
                         if let Some(ref f) = src_cell.formula {
                             let col_delta = c as i64 - src_col as i64;
                             new_cell.formula = Some(adjust_formula_refs(f, 0, col_delta));
-                        } else if matches!(src_cell.value, CellValue::Number(_)) {
-                            if let Some(Some(delta)) = row_deltas.get(&r) {
-                                let base = self
-                                    .cells
-                                    .get(&CellRef::new(r, sc_min))
-                                    .and_then(|cell| {
-                                        if let CellValue::Number(n) = cell.value {
-                                            Some(n)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap_or(0.0);
-                                new_cell.value = CellValue::Number(base + *delta * steps as f64);
-                            }
+                        } else if matches!(src_cell.value, CellValue::Number(_))
+                            && let Some(Some(delta)) = row_deltas.get(&r)
+                        {
+                            let base = self
+                                .cells
+                                .get(&CellRef::new(r, sc_min))
+                                .and_then(|cell| {
+                                    if let CellValue::Number(n) = cell.value {
+                                        Some(n)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0.0);
+                            new_cell.value = CellValue::Number(base + *delta * steps as f64);
                         }
                         self.cells.insert(CellRef::new(r, c), new_cell);
                     }
@@ -1289,7 +1289,7 @@ impl Sheet {
             .filter(|(cr, _)| cr.row >= at_row)
             .map(|(cr, cell)| (cr.clone(), cell.clone()))
             .collect();
-        to_move.sort_by(|a, b| b.0.row.cmp(&a.0.row));
+        to_move.sort_by_key(|item| std::cmp::Reverse(item.0.row));
 
         for (cr, _) in &to_move {
             self.cells.remove(cr);
@@ -1308,7 +1308,7 @@ impl Sheet {
             .filter(|(cr, _)| cr.col >= at_col)
             .map(|(cr, cell)| (cr.clone(), cell.clone()))
             .collect();
-        to_move.sort_by(|a, b| b.0.col.cmp(&a.0.col));
+        to_move.sort_by_key(|item| std::cmp::Reverse(item.0.col));
 
         for (cr, _) in &to_move {
             self.cells.remove(cr);
@@ -1333,7 +1333,7 @@ impl Sheet {
             .filter(|(cr, _)| cr.row >= delete_end)
             .map(|(cr, cell)| (cr.clone(), cell.clone()))
             .collect();
-        to_move.sort_by(|a, b| a.0.row.cmp(&b.0.row));
+        to_move.sort_by_key(|item| item.0.row);
 
         for (cr, _) in &to_move {
             self.cells.remove(cr);
@@ -1357,7 +1357,7 @@ impl Sheet {
             .filter(|(cr, _)| cr.col >= delete_end)
             .map(|(cr, cell)| (cr.clone(), cell.clone()))
             .collect();
-        to_move.sort_by(|a, b| a.0.col.cmp(&b.0.col));
+        to_move.sort_by_key(|item| item.0.col);
 
         for (cr, _) in &to_move {
             self.cells.remove(cr);
@@ -1525,10 +1525,10 @@ impl Sheet {
                 }
                 _ => {
                     let v = self.eval_expr(arg);
-                    if let Some(n) = v.as_number() {
-                        if !matches!(v, CellValue::Empty) {
-                            vals.push(n);
-                        }
+                    if let Some(n) = v.as_number()
+                        && !matches!(v, CellValue::Empty)
+                    {
+                        vals.push(n);
                     }
                 }
             }
@@ -1857,14 +1857,12 @@ impl Sheet {
                 .get(cr)
                 .map(|c| c.value.clone())
                 .unwrap_or(CellValue::Empty);
-            if match_criteria(&val, &criteria) {
-                if let Some(scr) = sum_refs.get(i) {
-                    if let Some(cell) = self.cells.get(scr) {
-                        if let Some(n) = cell.value.as_number() {
-                            total += n;
-                        }
-                    }
-                }
+            if match_criteria(&val, &criteria)
+                && let Some(scr) = sum_refs.get(i)
+                && let Some(cell) = self.cells.get(scr)
+                && let Some(n) = cell.value.as_number()
+            {
+                total += n;
             }
         }
         CellValue::Number(total)
@@ -1879,16 +1877,14 @@ impl Sheet {
 fn cell_values_equal(a: &CellValue, b: &CellValue) -> bool {
     match (a, b) {
         (CellValue::Number(x), CellValue::Number(y)) => (x - y).abs() < f64::EPSILON,
-        (CellValue::Text(x), CellValue::Text(y)) => {
-            x.to_ascii_uppercase() == y.to_ascii_uppercase()
-        }
+        (CellValue::Text(x), CellValue::Text(y)) => x.eq_ignore_ascii_case(y),
         (CellValue::Boolean(x), CellValue::Boolean(y)) => x == y,
         (CellValue::Empty, CellValue::Empty) => true,
         // Cross-type: number vs text that looks like number
         (CellValue::Number(n), CellValue::Text(s)) | (CellValue::Text(s), CellValue::Number(n)) => {
             s.trim()
                 .parse::<f64>()
-                .map_or(false, |sn| (sn - n).abs() < f64::EPSILON)
+                .is_ok_and(|sn| (sn - n).abs() < f64::EPSILON)
         }
         _ => false,
     }
@@ -2533,7 +2529,7 @@ mod tests {
     fn test_round() {
         let sheet = Sheet::new("T".into());
         match sheet.evaluate_formula("=ROUND(3.14159, 2)") {
-            CellValue::Number(n) => assert!((n - 3.14).abs() < 1e-9),
+            CellValue::Number(n) => assert!((n - (314.0 / 100.0)).abs() < 1e-9),
             other => panic!("Expected 3.14, got {other:?}"),
         }
     }

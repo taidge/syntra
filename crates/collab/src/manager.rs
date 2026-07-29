@@ -70,8 +70,12 @@ impl CollabManager {
     }
 
     /// Apply an operation to the document's session, returning the new
-    /// version number on success.
-    pub async fn apply_operation(&self, document_id: Uuid, op: Operation) -> Result<u64, String> {
+    /// version and the transformed operation on success.
+    pub async fn apply_operation(
+        &self,
+        document_id: Uuid,
+        op: Operation,
+    ) -> Result<(u64, Operation), String> {
         let mut sessions = self.sessions.write().await;
         let session = sessions
             .get_mut(&document_id)

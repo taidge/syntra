@@ -275,17 +275,15 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let room_id_for_new_file = if let Some(parent_id) = parent_id_param.as_deref() {
         match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
             Ok(Some(parent)) => {
-                if let Some(requested_room_id) = room_id_param.as_deref() {
-                    if parent.room_id.as_deref() != Some(requested_room_id) {
-                        res.status_code(StatusCode::BAD_REQUEST);
-                        res.render(Json(ApiResponse::<()>::err(
-                            AppError::Validation(
-                                "room_id must match the parent folder room".into(),
-                            )
+                if let Some(requested_room_id) = room_id_param.as_deref()
+                    && parent.room_id.as_deref() != Some(requested_room_id)
+                {
+                    res.status_code(StatusCode::BAD_REQUEST);
+                    res.render(Json(ApiResponse::<()>::err(
+                        AppError::Validation("room_id must match the parent folder room".into())
                             .to_response(),
-                        )));
-                        return;
-                    }
+                    )));
+                    return;
                 }
                 parent.room_id.clone()
             }
@@ -368,24 +366,23 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
     // Generate thumbnail for image uploads.
     let mut thumbnail_path_val: Option<String> = None;
-    if let Some(ref ct) = content_type {
-        if ct.starts_with("image/") {
-            if let Some(ref thumb_svc) = state.thumbnail {
-                match thumb_svc
-                    .generate_thumbnail(&state.storage, &storage_path, &file_id_val.to_string())
-                    .await
-                {
-                    Ok(thumb_rel) => {
-                        let _ = diesel::update(f::files.filter(f::id.eq(file_id_val.to_string())))
-                            .set(f::thumbnail_path.eq(Some(&thumb_rel)))
-                            .execute(&mut conn);
-                        thumbnail_path_val = Some(thumb_rel);
-                        tracing::debug!("Thumbnail generated for file {file_id_val}");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to generate thumbnail for {file_id_val}: {e}");
-                    }
-                }
+    if let Some(ref ct) = content_type
+        && ct.starts_with("image/")
+        && let Some(ref thumb_svc) = state.thumbnail
+    {
+        match thumb_svc
+            .generate_thumbnail(&state.storage, &storage_path, &file_id_val.to_string())
+            .await
+        {
+            Ok(thumb_rel) => {
+                let _ = diesel::update(f::files.filter(f::id.eq(file_id_val.to_string())))
+                    .set(f::thumbnail_path.eq(Some(&thumb_rel)))
+                    .execute(&mut conn);
+                thumbnail_path_val = Some(thumb_rel);
+                tracing::debug!("Thumbnail generated for file {file_id_val}");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to generate thumbnail for {file_id_val}: {e}");
             }
         }
     }

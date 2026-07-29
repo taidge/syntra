@@ -102,20 +102,19 @@
 
 - [x] 仪表盘仍残留假数据：近期动态在加载中/空数据时展示三条虚构活动，存储用量固定写死为 12% 和 120 MB。已删除虚构活动，补齐加载/空状态，并将存储用量接入 `/auth/me` 的真实 `storage_used` / `storage_quota`；相关文案全部接入中英文 i18n。
 
-## 待处理（功能项 / 已知限制，非现存缺陷）
+## 第六轮推进（原功能项 / 已知限制已完成）
 
-以下为新功能或需产品决策的工作，不属于本轮要解决的“现存问题”（安全漏洞 / 死代码 / 未接入 / 假实现）：
-
-- [ ] 协作实时编辑的“发送 Operation”链路：前端目前仅发送光标更新（CursorUpdate），尚未发送文档 Operation，故服务端 OT/undo 修复为正确但暂未被前端触发（新功能）。
-- [ ] 登录强制二因子：TOTP 已可校验，但 login 未强制第二步（新功能）。
-- [ ] 已签发未过期 JWT 的中间件 DB 回查/即时失效（当前靠 login 拒绝 disabled + 禁用时清 sessions 缓解）。
-- [ ] 电子表格“合并单元格”：需 colspan/rowspan 渲染模型，本轮先移除了无功能的死按钮（新功能）。
-- [ ] DOCX 导入 `docx_to_writer` 尚不识别 `<w:numPr>` 还原为 `Block::List`（导出已是真列表；导入还原为后续工作）。
+- [x] 协作实时编辑的“发送 Operation”链路：Writer 编辑输入现发送带 `client_id`、单调 counter 与 `base_version` 的 `Replace` Operation；客户端消费服务端 Operation、过滤自身回显并实时更新编辑器，服务端在连接后下发版本基线、拒绝未来版本/重复操作，并持久化实际转换后的 Operation。新增消息形状、远端文本还原及 session 边界测试。
+- [x] 登录强制二因子：`LoginRequest`/登录页已接入可选 TOTP code；账户启用 TOTP 后，服务端在密码校验通过后强制验证 RFC 6238 code 或一次性备用码，缺失/错误/重复使用均拒绝签发 JWT并计入失败尝试。备用码改为 Argon2 哈希存储并原子消费。新增“缺失/错误拒绝、TOTP/备用码放行、备用码不可复用”集成测试。
+- [x] 已签发未过期 JWT 的中间件 DB 回查/即时失效：注册和登录签发 JWT 时同步创建哈希 session；认证中间件每次请求校验 session 存在、active、未过期及用户未禁用，并使用数据库中的实时角色。改密/重置密码会撤销全部活动 session；新增 session 撤销后旧 JWT 立即 401 的集成测试。
+- [x] 电子表格“合并单元格”：Calc 已恢复合并/取消合并按钮，完成越界/重叠校验、锚点选择、`rowspan`/`colspan` 渲染、隐藏单元格跳过、undo/redo 与 JSON 持久化，并在插入/删除行列及工作表删除/换序时同步调整合并区域；XLSX 导入/导出保留 `<mergeCells>`。新增水合、非法区域清洗、行列变更与 XLSX 往返测试。
+- [x] DOCX 导入 `docx_to_writer` 识别 `word/numbering.xml` 与段落 `<w:numPr>`，按 `numId`/`ilvl` 将连续段落还原为有序或无序 `Block::List`，嵌套项恢复到 `ListItem.children`；表格单元格内列表同样支持。新增有序、无序及嵌套列表往返测试。
 
 ## 最终验证
 
 - [x] `cargo fmt --all -- --check` 通过。
 - [x] `cargo check --workspace --all-targets` 通过且无编译 warning。
-- [x] `cargo test --workspace --all-targets` 全部通过，其中服务端 API 集成测试 130 项通过。
+- [x] `cargo test --workspace --all-targets` 全部通过（collab 12、doc-engine 82、export 43、frontend 14、server API 集成测试 132 项等）。
+- [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
 - [x] 前端中英文 i18n JSON 解析通过，Playwright `--list` 成功发现 87 项测试，说明测试源码可加载。
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` 尚未清零：现有失败项为 `collapsible_if`、`derivable_impls`、`unnecessary_sort_by`、`should_implement_trait` 等风格/可维护性 lint；本轮没有用 `allow` 批量压制，留待独立机械清理。
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 已清零；逐项修复嵌套条件、可派生 Default、无效 clone、冗余闭包/排序以及易与 `FromStr` 混淆的 helper 命名，未使用全局 `allow` 压制。

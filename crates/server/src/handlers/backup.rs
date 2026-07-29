@@ -160,7 +160,7 @@ pub async fn list_backups(depot: &mut Depot, res: &mut Response) {
                     .as_ref()
                     .ok()
                     .and_then(|m| m.modified().ok())
-                    .map(|t| chrono::DateTime::<Utc>::from(t))
+                    .map(chrono::DateTime::<Utc>::from)
                     .unwrap_or_else(Utc::now);
 
                 // Extract the timestamp portion from the filename for the id.
@@ -189,7 +189,7 @@ pub async fn list_backups(depot: &mut Depot, res: &mut Response) {
     }
 
     // Sort by created_at descending.
-    backups.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    backups.sort_by_key(|backup| std::cmp::Reverse(backup.created_at));
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(backups)));

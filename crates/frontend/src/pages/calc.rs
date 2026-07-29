@@ -38,6 +38,218 @@ struct SheetLite {
     name: String,
     #[serde(default)]
     cells: serde_json::Value,
+    #[serde(default)]
+    merged_cells: Vec<MergedRangeLite>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct CellRefLite {
+    row: u32,
+    col: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct MergedRangeLite {
+    start: CellRefLite,
+    end: CellRefLite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MergedRange {
+    start: (u32, u32),
+    end: (u32, u32),
+}
+
+impl MergedRange {
+    fn normalized(self) -> Self {
+        Self {
+            start: (self.start.0.min(self.end.0), self.start.1.min(self.end.1)),
+            end: (self.start.0.max(self.end.0), self.start.1.max(self.end.1)),
+        }
+    }
+
+    fn contains(self, cell: (u32, u32)) -> bool {
+        in_selection(cell, self.start, self.end)
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        let a = self.normalized();
+        let b = other.normalized();
+        a.start.0 <= b.end.0 && a.end.0 >= b.start.0 && a.start.1 <= b.end.1 && a.end.1 >= b.start.1
+    }
+
+    fn row_span(self) -> u32 {
+        let range = self.normalized();
+        range.end.0 - range.start.0 + 1
+    }
+
+    fn col_span(self) -> u32 {
+        let range = self.normalized();
+        range.end.1 - range.start.1 + 1
+    }
+}
+
+fn merged_range_at(
+    merged: &HashMap<usize, Vec<MergedRange>>,
+    sheet: usize,
+    cell: (u32, u32),
+) -> Option<MergedRange> {
+    merged
+        .get(&sheet)?
+        .iter()
+        .copied()
+        .find(|range| range.contains(cell))
+        .map(MergedRange::normalized)
+}
+
+fn sanitize_merged_ranges(ranges: impl IntoIterator<Item = MergedRange>) -> Vec<MergedRange> {
+    let mut sanitized: Vec<MergedRange> = Vec::new();
+    for range in ranges {
+        let range = range.normalized();
+        if range.start == range.end
+            || range.end.0 >= NUM_ROWS
+            || range.end.1 >= NUM_COLS
+            || sanitized.iter().any(|existing| existing.overlaps(range))
+        {
+            continue;
+        }
+        sanitized.push(range);
+    }
+    sanitized
+}
+
+fn merged_range_overlaps(
+    merged: &HashMap<usize, Vec<MergedRange>>,
+    sheet: usize,
+    start: (u32, u32),
+    end: (u32, u32),
+) -> bool {
+    let requested = MergedRange { start, end }.normalized();
+    merged
+        .get(&sheet)
+        .is_some_and(|ranges| ranges.iter().any(|range| range.overlaps(requested)))
+}
+
+fn workbook_replace_from_operation(
+    payload: &serde_json::Value,
+) -> Option<(String, serde_json::Value)> {
+    let user_id = payload.get("user_id")?.as_str()?.to_string();
+    let op_type = payload.get("op_type")?;
+    if op_type.get("type")?.as_str()? != "Replace" {
+        return None;
+    }
+    let path = op_type.get("path")?.as_array()?;
+    if path.len() != 1 || path[0].as_str()? != "workbook" {
+        return None;
+    }
+    Some((user_id, op_type.get("new_value")?.clone()))
+}
+
+fn insert_row_in_merged(merged: &mut HashMap<usize, Vec<MergedRange>>, sheet: usize, at: u32) {
+    if let Some(ranges) = merged.get_mut(&sheet) {
+        *ranges = ranges
+            .iter()
+            .copied()
+            .filter_map(|range| {
+                let mut range = range.normalized();
+                if at <= range.start.0 {
+                    range.start.0 += 1;
+                    range.end.0 += 1;
+                } else if at <= range.end.0 {
+                    range.end.0 += 1;
+                }
+                (range.end.0 < NUM_ROWS).then_some(range)
+            })
+            .collect();
+    }
+}
+
+fn delete_row_from_merged(merged: &mut HashMap<usize, Vec<MergedRange>>, sheet: usize, at: u32) {
+    if let Some(ranges) = merged.get_mut(&sheet) {
+        *ranges = ranges
+            .iter()
+            .copied()
+            .filter_map(|range| {
+                let mut range = range.normalized();
+                if at < range.start.0 {
+                    range.start.0 -= 1;
+                    range.end.0 -= 1;
+                } else if at <= range.end.0 {
+                    if range.start.0 == range.end.0 {
+                        return None;
+                    }
+                    range.end.0 -= 1;
+                }
+                (range.start != range.end).then_some(range)
+            })
+            .collect();
+    }
+}
+
+fn insert_col_in_merged(merged: &mut HashMap<usize, Vec<MergedRange>>, sheet: usize, at: u32) {
+    if let Some(ranges) = merged.get_mut(&sheet) {
+        *ranges = ranges
+            .iter()
+            .copied()
+            .filter_map(|range| {
+                let mut range = range.normalized();
+                if at <= range.start.1 {
+                    range.start.1 += 1;
+                    range.end.1 += 1;
+                } else if at <= range.end.1 {
+                    range.end.1 += 1;
+                }
+                (range.end.1 < NUM_COLS).then_some(range)
+            })
+            .collect();
+    }
+}
+
+fn delete_col_from_merged(merged: &mut HashMap<usize, Vec<MergedRange>>, sheet: usize, at: u32) {
+    if let Some(ranges) = merged.get_mut(&sheet) {
+        *ranges = ranges
+            .iter()
+            .copied()
+            .filter_map(|range| {
+                let mut range = range.normalized();
+                if at < range.start.1 {
+                    range.start.1 -= 1;
+                    range.end.1 -= 1;
+                } else if at <= range.end.1 {
+                    if range.start.1 == range.end.1 {
+                        return None;
+                    }
+                    range.end.1 -= 1;
+                }
+                (range.start != range.end).then_some(range)
+            })
+            .collect();
+    }
+}
+
+fn delete_sheet_from_merged(merged: &mut HashMap<usize, Vec<MergedRange>>, sheet: usize) {
+    let old = std::mem::take(merged);
+    for (index, ranges) in old {
+        if index == sheet {
+            continue;
+        }
+        merged.insert(if index > sheet { index - 1 } else { index }, ranges);
+    }
+}
+
+fn swap_sheets_in_merged(
+    merged: &mut HashMap<usize, Vec<MergedRange>>,
+    first: usize,
+    second: usize,
+) {
+    let first_ranges = merged.remove(&first);
+    let second_ranges = merged.remove(&second);
+    if let Some(ranges) = first_ranges {
+        merged.insert(second, ranges);
+    }
+    if let Some(ranges) = second_ranges {
+        merged.insert(first, ranges);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -133,8 +345,18 @@ impl CellStyle {
 struct CalcSnapshot {
     cells: HashMap<(usize, u32, u32), String>,
     styles: HashMap<(usize, u32, u32), CellStyle>,
+    merged_cells: HashMap<usize, Vec<MergedRange>>,
     sheets: Vec<String>,
 }
+
+type CellKey = (usize, u32, u32);
+type HydratedWorkbook = (
+    Vec<String>,
+    HashMap<CellKey, String>,
+    HashMap<CellKey, CellStyle>,
+    HashMap<usize, Vec<MergedRange>>,
+);
+type SortRow = (u32, Vec<(u32, String)>, Vec<(u32, CellStyle)>);
 
 #[derive(Clone, PartialEq)]
 struct AutoFilter {
@@ -303,22 +525,26 @@ fn string_field(v: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
-fn hydrate_workbook(
-    content: &serde_json::Value,
-) -> (
-    Vec<String>,
-    HashMap<(usize, u32, u32), String>,
-    HashMap<(usize, u32, u32), CellStyle>,
-) {
+fn hydrate_workbook(content: &serde_json::Value) -> HydratedWorkbook {
     let wb: WorkbookLite = match serde_json::from_value(content.clone()) {
         Ok(w) => w,
-        Err(_) => return (Vec::new(), HashMap::new(), HashMap::new()),
+        Err(_) => {
+            return (Vec::new(), HashMap::new(), HashMap::new(), HashMap::new());
+        }
     };
     let mut names = Vec::new();
     let mut cells = HashMap::new();
     let mut styles = HashMap::new();
+    let mut merged_cells = HashMap::new();
     for (sheet_idx, sheet) in wb.sheets.iter().enumerate() {
         names.push(sheet.name.clone());
+        let ranges = sanitize_merged_ranges(sheet.merged_cells.iter().map(|range| MergedRange {
+            start: (range.start.row, range.start.col),
+            end: (range.end.row, range.end.col),
+        }));
+        if !ranges.is_empty() {
+            merged_cells.insert(sheet_idx, ranges);
+        }
         // `cells` may be either a HashMap object {"row,col": Cell} OR
         // a JSON object whose keys are JSON-encoded CellRef. Serde JSON
         // serializes HashMap<CellRef, Cell> as an array of [CellRef, Cell]
@@ -391,20 +617,19 @@ fn hydrate_workbook(
             }
         }
     }
-    (names, cells, styles)
+    (names, cells, styles, merged_cells)
 }
 
 const FORMULA_INPUT_ID: &str = "calc-formula-input";
 
 fn focus_formula_input() {
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        if let Some(el) = doc.get_element_by_id(FORMULA_INPUT_ID) {
-            if let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() {
-                let _ = input.focus();
-                let len = input.value().len() as u32;
-                let _ = input.set_selection_range(len, len);
-            }
-        }
+    if let Some(doc) = web_sys::window().and_then(|w| w.document())
+        && let Some(el) = doc.get_element_by_id(FORMULA_INPUT_ID)
+        && let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>()
+    {
+        let _ = input.focus();
+        let len = input.value().len() as u32;
+        let _ = input.set_selection_range(len, len);
     }
 }
 
@@ -462,6 +687,8 @@ fn evaluated_numeric(
 
 mod eval {
     use std::collections::{HashMap, HashSet};
+
+    type EvaluatedArg = (Option<(u32, u32)>, f64);
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum EvalError {
@@ -807,7 +1034,7 @@ mod eval {
         sheet_idx: usize,
         cells: &HashMap<(usize, u32, u32), String>,
         visit: &mut HashSet<(usize, u32, u32)>,
-    ) -> Result<Vec<(Option<(u32, u32)>, f64)>, EvalError> {
+    ) -> Result<Vec<EvaluatedArg>, EvalError> {
         let mut out = Vec::new();
         for a in args {
             match a {
@@ -1055,19 +1282,20 @@ pub fn Calc(id: String) -> Element {
     let _ = use_context::<Signal<String>>().read();
     // ── Cell data ────────────────────────────────────────────────────────
     // Key: (sheet_index, row, col)  Value: raw text / formula
-    let mut cells = use_signal(|| HashMap::<(usize, u32, u32), String>::new());
-    let mut cell_styles = use_signal(|| HashMap::<(usize, u32, u32), CellStyle>::new());
+    let mut cells = use_signal(HashMap::<(usize, u32, u32), String>::new);
+    let mut cell_styles = use_signal(HashMap::<(usize, u32, u32), CellStyle>::new);
+    let mut merged_cells = use_signal(HashMap::<usize, Vec<MergedRange>>::new);
 
     // ── Active cell & editing ────────────────────────────────────────────
     let mut active_cell = use_signal(|| (0u32, 0u32));
-    let mut formula_bar = use_signal(|| String::new());
+    let mut formula_bar = use_signal(String::new);
     let mut is_editing = use_signal(|| false);
 
     // ── Multi-cell selection ─────────────────────────────────────────────
     let mut selection_start = use_signal(|| None::<(u32, u32)>);
     let mut selection_end = use_signal(|| None::<(u32, u32)>);
     let mut is_selecting = use_signal(|| false);
-    let mut extra_selection = use_signal(|| Vec::<(u32, u32)>::new());
+    let mut extra_selection = use_signal(Vec::<(u32, u32)>::new);
 
     // ── Drag-to-fill state ───────────────────────────────────────────────
     let mut fill_mode = use_signal(|| None::<FillState>);
@@ -1087,11 +1315,11 @@ pub fn Calc(id: String) -> Element {
     let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
     let mut loaded = use_signal(|| false);
 
-    let mut undo_stack = use_signal(|| Vec::<CalcSnapshot>::new());
-    let mut redo_stack = use_signal(|| Vec::<CalcSnapshot>::new());
+    let mut undo_stack = use_signal(Vec::<CalcSnapshot>::new);
+    let mut redo_stack = use_signal(Vec::<CalcSnapshot>::new);
 
     let mut find_open = use_signal(|| false);
-    let mut find_matches = use_signal(|| Vec::<(usize, u32, u32)>::new());
+    let mut find_matches = use_signal(Vec::<(usize, u32, u32)>::new);
     let mut find_index = use_signal(|| 0usize);
     let mut find_info = use_signal(String::new);
 
@@ -1112,11 +1340,13 @@ pub fn Calc(id: String) -> Element {
     let mut autofilter = use_signal(|| None::<AutoFilter>);
     let mut filter_dropdown = use_signal(|| None::<u32>);
     let mut chart_view = use_signal(|| None::<ChartData>);
+    let mut last_collab_content = use_signal(|| serde_json::Value::Null);
 
     let push_snapshot = move || {
         let snap = CalcSnapshot {
             cells: cells.read().clone(),
             styles: cell_styles.read().clone(),
+            merged_cells: merged_cells.read().clone(),
             sheets: sheets.read().clone(),
         };
         {
@@ -1145,12 +1375,14 @@ pub fn Calc(id: String) -> Element {
         }
         if let Some(Ok(doc)) = doc_resource.read().as_ref() {
             doc_title.set(doc.name.clone());
-            let (names, hydrated, styles) = hydrate_workbook(&doc.content);
+            let (names, hydrated, styles, hydrated_merges) = hydrate_workbook(&doc.content);
             if !names.is_empty() {
                 sheets.set(names);
             }
             cells.set(hydrated);
             cell_styles.set(styles);
+            merged_cells.set(hydrated_merges);
+            last_collab_content.set(doc.content.clone());
             active_sheet.set(0);
             loaded.set(true);
         }
@@ -1160,6 +1392,12 @@ pub fn Calc(id: String) -> Element {
     use_effect(move || {
         let token = auth.read().token.clone().unwrap_or_default();
         let doc_id = doc_id_for_ws.clone();
+        let self_id = auth
+            .read()
+            .user
+            .as_ref()
+            .map(|user| user.id.to_string())
+            .unwrap_or_default();
         let mut presence_for_msg = presence;
         let on_message = move |msg: CollabMessage| match msg {
             CollabMessage::UserJoined {
@@ -1181,6 +1419,23 @@ pub fn Calc(id: String) -> Element {
                 let mut list = presence_for_msg.write();
                 list.retain(|c| c.user_id != user_id);
             }
+            CollabMessage::Operation(payload) => {
+                let Some((author_id, content)) = workbook_replace_from_operation(&payload) else {
+                    return;
+                };
+                if author_id == self_id {
+                    return;
+                }
+                let (names, hydrated, styles, hydrated_merges) = hydrate_workbook(&content);
+                if !names.is_empty() {
+                    sheets.set(names);
+                }
+                cells.set(hydrated);
+                cell_styles.set(styles);
+                merged_cells.set(hydrated_merges);
+                last_collab_content.set(content);
+                saved_status.set(crate::i18n::t("common.saved"));
+            }
             _ => {}
         };
         let on_state = move |s: ConnectionState| {
@@ -1191,10 +1446,10 @@ pub fn Calc(id: String) -> Element {
     });
 
     use_drop(move || {
-        if let Some(handle) = ws_handle.write().take() {
-            if let Some(ws) = handle.current_ws() {
-                let _ = ws.close();
-            }
+        if let Some(handle) = ws_handle.write().take()
+            && let Some(ws) = handle.current_ws()
+        {
+            let _ = ws.close();
         }
     });
 
@@ -1204,6 +1459,7 @@ pub fn Calc(id: String) -> Element {
         let names = sheets.read().clone();
         let cells_ref = cells.read();
         let styles_ref = cell_styles.read();
+        let merged_ref = merged_cells.read();
         let mut per_sheet: Vec<Vec<serde_json::Value>> = names.iter().map(|_| Vec::new()).collect();
         let mut emitted: std::collections::HashSet<(usize, u32, u32)> =
             std::collections::HashSet::new();
@@ -1229,12 +1485,11 @@ pub fn Calc(id: String) -> Element {
                     "value": { "type": "Text", "value": value }
                 })
             };
-            if let Some(style) = styles_ref.get(&(*si, *r, *c)) {
-                if let Some(style_json) = style_to_json(style) {
-                    if let Some(obj) = cell.as_object_mut() {
-                        obj.insert("style".to_string(), style_json);
-                    }
-                }
+            if let Some(style) = styles_ref.get(&(*si, *r, *c))
+                && let Some(style_json) = style_to_json(style)
+                && let Some(obj) = cell.as_object_mut()
+            {
+                obj.insert("style".to_string(), style_json);
             }
             per_sheet[*si].push(serde_json::json!([cref, cell]));
             emitted.insert((*si, *r, *c));
@@ -1260,7 +1515,25 @@ pub fn Calc(id: String) -> Element {
         let sheets_json: Vec<serde_json::Value> = names
             .iter()
             .enumerate()
-            .map(|(i, name)| serde_json::json!({ "name": name, "cells": per_sheet[i] }))
+            .map(|(i, name)| {
+                let ranges: Vec<serde_json::Value> = merged_ref
+                    .get(&i)
+                    .into_iter()
+                    .flatten()
+                    .map(|range| {
+                        let range = range.normalized();
+                        serde_json::json!({
+                            "start": { "row": range.start.0, "col": range.start.1 },
+                            "end": { "row": range.end.0, "col": range.end.1 },
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "name": name,
+                    "cells": per_sheet[i],
+                    "merged_cells": ranges,
+                })
+            })
             .collect();
         serde_json::json!({ "sheets": sheets_json })
     };
@@ -1283,16 +1556,47 @@ pub fn Calc(id: String) -> Element {
         }
     };
 
+    let mut broadcast_workbook = move |body: &serde_json::Value| {
+        let previous = last_collab_content.read().clone();
+        if previous == *body {
+            return;
+        }
+        let user_id = auth
+            .read()
+            .user
+            .as_ref()
+            .map(|user| user.id.to_string())
+            .unwrap_or_default();
+        if user_id.is_empty() {
+            return;
+        }
+        if let Some(handle) = ws_handle.read().as_ref()
+            && handle
+                .send_operation(
+                    &user_id,
+                    serde_json::json!({
+                        "type": "Replace",
+                        "path": ["workbook"],
+                        "old_value": previous,
+                        "new_value": body,
+                    }),
+                )
+                .is_ok()
+        {
+            last_collab_content.set(body.clone());
+        }
+    };
+
     let schedule_save = {
         let save_timer = save_timer.clone();
         let perform_save = perform_save.clone();
-        let serialize_workbook = serialize_workbook.clone();
         move || {
             if !*loaded.read() {
                 return;
             }
             saved_status.set(crate::i18n::t("common.unsaved"));
             let body = serialize_workbook();
+            broadcast_workbook(&body);
             let token = auth.read().token.clone().unwrap_or_default();
             let status = saved_status;
             let perform_save = perform_save.clone();
@@ -1306,17 +1610,29 @@ pub fn Calc(id: String) -> Element {
     let flush_save = {
         let save_timer = save_timer.clone();
         let perform_save = perform_save.clone();
-        let serialize_workbook = serialize_workbook.clone();
         move || {
             if !*loaded.read() {
                 return;
             }
             save_timer.borrow_mut().take();
             let body = serialize_workbook();
+            broadcast_workbook(&body);
             let token = auth.read().token.clone().unwrap_or_default();
             perform_save(body, saved_status, token);
         }
     };
+
+    use_effect(move || {
+        let cell = *active_cell.read();
+        let sheet = *active_sheet.read();
+        if let Some(range) = merged_range_at(&merged_cells.read(), sheet, cell)
+            && cell != range.start
+        {
+            active_cell.set(range.start);
+            selection_start.set(Some(range.start));
+            selection_end.set(Some(range.end));
+        }
+    });
 
     use_effect(move || {
         let (r, c) = *active_cell.read();
@@ -1331,7 +1647,7 @@ pub fn Calc(id: String) -> Element {
     // Helper: commit the current formula bar contents into the cell map.
     let commit_formula_bar = {
         let mut schedule_save = schedule_save.clone();
-        let mut push_snapshot = push_snapshot.clone();
+        let mut push_snapshot = push_snapshot;
         move || {
             let value = formula_bar.read().clone();
             let (r, c) = *active_cell.read();
@@ -1370,13 +1686,13 @@ pub fn Calc(id: String) -> Element {
                 let mut non_empty: u32 = 0;
                 for r in min_row..=max_row {
                     for c in min_col..=max_col {
-                        if let Some(val) = cells_ref.get(&(sheet_idx, r, c)) {
-                            if !val.is_empty() {
-                                non_empty += 1;
-                                if let Some(n) = evaluated_numeric(val, sheet_idx, &cells_ref) {
-                                    sum += n;
-                                    numeric_count += 1;
-                                }
+                        if let Some(val) = cells_ref.get(&(sheet_idx, r, c))
+                            && !val.is_empty()
+                        {
+                            non_empty += 1;
+                            if let Some(n) = evaluated_numeric(val, sheet_idx, &cells_ref) {
+                                sum += n;
+                                numeric_count += 1;
                             }
                         }
                     }
@@ -1415,9 +1731,9 @@ pub fn Calc(id: String) -> Element {
             // ── Keyboard navigation ──────────────────────────────────────
             onkeydown: {
                 let mut schedule_save = schedule_save.clone();
-                let flush_save = flush_save.clone();
+                let mut flush_save = flush_save.clone();
                 let mut commit_formula_bar = commit_formula_bar.clone();
-                let mut push_snapshot = push_snapshot.clone();
+                let mut push_snapshot = push_snapshot;
                 move |evt: KeyboardEvent| {
                 let key = evt.key();
                 let modifiers = evt.modifiers();
@@ -1427,7 +1743,7 @@ pub fn Calc(id: String) -> Element {
                     // Arrow keys — move active cell (only when not editing)
                     Key::ArrowUp if !*is_editing.read() => {
                         evt.prevent_default();
-                        if r > 0 { r -= 1; }
+                        r = r.saturating_sub(1);
                     }
                     Key::ArrowDown if !*is_editing.read() => {
                         evt.prevent_default();
@@ -1435,7 +1751,7 @@ pub fn Calc(id: String) -> Element {
                     }
                     Key::ArrowLeft if !*is_editing.read() => {
                         evt.prevent_default();
-                        if c > 0 { c -= 1; }
+                        c = c.saturating_sub(1);
                     }
                     Key::ArrowRight if !*is_editing.read() => {
                         evt.prevent_default();
@@ -1449,7 +1765,7 @@ pub fn Calc(id: String) -> Element {
                             commit_formula_bar();
                         }
                         if modifiers.contains(Modifiers::SHIFT) {
-                            if c > 0 { c -= 1; }
+                            c = c.saturating_sub(1);
                         } else if c + 1 < NUM_COLS {
                             c += 1;
                         }
@@ -1512,11 +1828,13 @@ pub fn Calc(id: String) -> Element {
                             let current = CalcSnapshot {
                                 cells: cells.read().clone(),
                                 styles: cell_styles.read().clone(),
+                                merged_cells: merged_cells.read().clone(),
                                 sheets: sheets.read().clone(),
                             };
                             redo_stack.write().push(current);
                             cells.set(snap.cells);
                             cell_styles.set(snap.styles);
+                            merged_cells.set(snap.merged_cells);
                             sheets.set(snap.sheets);
                             saved_status.set("Unsaved changes".to_string());
                             schedule_save();
@@ -1536,11 +1854,13 @@ pub fn Calc(id: String) -> Element {
                             let current = CalcSnapshot {
                                 cells: cells.read().clone(),
                                 styles: cell_styles.read().clone(),
+                                merged_cells: merged_cells.read().clone(),
                                 sheets: sheets.read().clone(),
                             };
                             undo_stack.write().push(current);
                             cells.set(snap.cells);
                             cell_styles.set(snap.styles);
+                            merged_cells.set(snap.merged_cells);
                             sheets.set(snap.sheets);
                             saved_status.set("Unsaved changes".to_string());
                             schedule_save();
@@ -1590,7 +1910,7 @@ pub fn Calc(id: String) -> Element {
 
             onpaste: {
                 let mut schedule_save = schedule_save.clone();
-                let mut push_snapshot = push_snapshot.clone();
+                let mut push_snapshot = push_snapshot;
                 move |evt: Event<ClipboardData>| {
                     use dioxus::web::WebEventExt;
                     let Some(web_evt) = evt.try_as_web_event() else { return; };
@@ -1626,7 +1946,7 @@ pub fn Calc(id: String) -> Element {
             // Global mouseup to stop drag-select even outside cells
             onmouseup: {
                 let mut schedule_save = schedule_save.clone();
-                let mut push_snapshot = push_snapshot.clone();
+                let mut push_snapshot = push_snapshot;
                 move |_| {
                 is_selecting.set(false);
                 let current_fill = *fill_mode.read();
@@ -1660,8 +1980,8 @@ pub fn Calc(id: String) -> Element {
                             let sr_i = ((r - o_min_r) as usize) % src_rows;
                             let sc_i = ((c - o_min_c) as usize) % src_cols;
                             let mut val = src[sr_i][sc_i].clone();
-                            if src_rows == 1 && src_cols == 1 {
-                                if let Ok(n) = val.parse::<f64>() {
+                            if src_rows == 1 && src_cols == 1
+                                && let Ok(n) = val.parse::<f64>() {
                                     let offset = if r != o_min_r {
                                         (r as i64) - (o_min_r as i64)
                                     } else {
@@ -1669,7 +1989,6 @@ pub fn Calc(id: String) -> Element {
                                     };
                                     val = format!("{}", n + offset as f64);
                                 }
-                            }
                             if val.is_empty() {
                                 writer.remove(&(si, r, c));
                             } else {
@@ -1720,7 +2039,7 @@ pub fn Calc(id: String) -> Element {
 
             // ── Menubar ──────────────────────────────────────────────────
             {
-                let flush_for_menu = flush_save.clone();
+                let mut flush_for_menu = flush_save.clone();
                 let id_for_menu = id.clone();
                 let bus_for_menu = toast_bus;
                 let nav_for_menu = nav;
@@ -1743,8 +2062,8 @@ pub fn Calc(id: String) -> Element {
                                     versions_open.set(!cur);
                                 }
                                 "toggle-theme" => {
-                                    if let Some(window) = web_sys::window() {
-                                        if let Some(el) = window.document().and_then(|d| d.document_element()) {
+                                    if let Some(window) = web_sys::window()
+                                        && let Some(el) = window.document().and_then(|d| d.document_element()) {
                                             let cur = el.get_attribute("data-theme").unwrap_or_default();
                                             let next = if cur == "dark" { "light" } else { "dark" };
                                             let _ = el.set_attribute("data-theme", next);
@@ -1752,7 +2071,6 @@ pub fn Calc(id: String) -> Element {
                                                 let _ = storage.set_item("theme", next);
                                             }
                                         }
-                                    }
                                 }
                                 "print" => {
                                     if let Some(w) = web_sys::window() { let _ = w.print(); }
@@ -1790,7 +2108,7 @@ pub fn Calc(id: String) -> Element {
                 let mut schedule_save_pct = schedule_save.clone();
                 let mut schedule_save_d0 = schedule_save.clone();
                 let mut schedule_save_d2 = schedule_save.clone();
-                let mut push_snapshot_tg = push_snapshot.clone();
+                let mut push_snapshot_tg = push_snapshot;
                 let apply_toggle = move |which: u8| {
                     if *loaded.read() {
                         push_snapshot_tg();
@@ -1825,7 +2143,7 @@ pub fn Calc(id: String) -> Element {
                         }
                     }
                 };
-                let mut push_snapshot_fmt = push_snapshot.clone();
+                let mut push_snapshot_fmt = push_snapshot;
                 let apply_format = move |fmt: &'static str| {
                     if *loaded.read() {
                         push_snapshot_fmt();
@@ -1848,7 +2166,7 @@ pub fn Calc(id: String) -> Element {
                 // Generic visual-style applier (alignment / colours / fonts).
                 // The mutation is a zero-capture fn pointer so the closure can
                 // be cheaply cloned across multiple controls.
-                let mut push_snapshot_v = push_snapshot.clone();
+                let mut push_snapshot_v = push_snapshot;
                 let mut schedule_save_v = schedule_save.clone();
                 let apply_visual = move |mutate: fn(&mut CellStyle, &str), arg: &str| {
                     if *loaded.read() {
@@ -1879,18 +2197,93 @@ pub fn Calc(id: String) -> Element {
                 let apply_text_color = apply_visual.clone();
                 let apply_font = apply_visual.clone();
                 let apply_font_size = apply_visual.clone();
-                let mut push_snapshot_sort = push_snapshot.clone();
+                let mut push_snapshot_merge = push_snapshot;
+                let mut schedule_save_merge = schedule_save.clone();
+                let mut apply_merge = move || {
+                    let (Some(start), Some(end)) =
+                        (*selection_start.read(), *selection_end.read())
+                    else {
+                        push_toast(
+                            toast_bus,
+                            ToastKind::Warning,
+                            crate::i18n::t("editor.calc.merge_select_range"),
+                        );
+                        return;
+                    };
+                    let requested = MergedRange { start, end }.normalized();
+                    if requested.start == requested.end {
+                        push_toast(
+                            toast_bus,
+                            ToastKind::Warning,
+                            crate::i18n::t("editor.calc.merge_select_range"),
+                        );
+                        return;
+                    }
+                    let si = *active_sheet.read();
+                    let existing = merged_cells
+                        .read()
+                        .get(&si)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(index) = existing
+                        .iter()
+                        .position(|range| range.normalized() == requested)
+                    {
+                        push_snapshot_merge();
+                        let mut all = merged_cells.write();
+                        if let Some(ranges) = all.get_mut(&si) {
+                            ranges.remove(index);
+                            if ranges.is_empty() {
+                                all.remove(&si);
+                            }
+                        }
+                        schedule_save_merge();
+                        return;
+                    }
+                    if existing.iter().any(|range| range.overlaps(requested)) {
+                        push_toast(
+                            toast_bus,
+                            ToastKind::Warning,
+                            crate::i18n::t("editor.calc.merge_overlap"),
+                        );
+                        return;
+                    }
+
+                    push_snapshot_merge();
+                    {
+                        let mut values = cells.write();
+                        let mut styles = cell_styles.write();
+                        for row in requested.start.0..=requested.end.0 {
+                            for col in requested.start.1..=requested.end.1 {
+                                if (row, col) != requested.start {
+                                    values.remove(&(si, row, col));
+                                    styles.remove(&(si, row, col));
+                                }
+                            }
+                        }
+                    }
+                    merged_cells
+                        .write()
+                        .entry(si)
+                        .or_default()
+                        .push(requested);
+                    active_cell.set(requested.start);
+                    selection_start.set(Some(requested.start));
+                    selection_end.set(Some(requested.end));
+                    schedule_save_merge();
+                };
+                let mut push_snapshot_sort = push_snapshot;
                 let mut schedule_save_sort = schedule_save.clone();
-                let apply_toggle_b = apply_toggle.clone();
-                let apply_toggle_i = apply_toggle.clone();
-                let apply_toggle_u = apply_toggle.clone();
-                let apply_format_c = apply_format.clone();
-                let apply_format_p = apply_format.clone();
-                let apply_format_d0 = apply_format.clone();
-                let apply_format_d2 = apply_format.clone();
+                let apply_toggle_b = apply_toggle;
+                let apply_toggle_i = apply_toggle;
+                let apply_toggle_u = apply_toggle;
+                let apply_format_c = apply_format;
+                let apply_format_p = apply_format;
+                let apply_format_d0 = apply_format;
+                let apply_format_d2 = apply_format;
                 let mut borders_open = use_signal(|| false);
                 let mut schedule_save_borders = schedule_save.clone();
-                let mut push_snapshot_b = push_snapshot.clone();
+                let mut push_snapshot_b = push_snapshot;
                 let apply_borders = move |op: BorderOp| {
                     if *loaded.read() {
                         push_snapshot_b();
@@ -1953,6 +2346,7 @@ pub fn Calc(id: String) -> Element {
                 let alignl_label = crate::i18n::t("editor.align_left");
                 let alignc_label = crate::i18n::t("editor.align_center");
                 let alignr_label = crate::i18n::t("editor.align_right");
+                let merge_label = crate::i18n::t("editor.calc.merge_cells");
                 let sortaz_label = crate::i18n::t("editor.calc.sort_az");
                 let filter_label = crate::i18n::t("editor.calc.filter");
                 let fn_label = crate::i18n::t("editor.calc.insert_function");
@@ -1998,7 +2392,7 @@ pub fn Calc(id: String) -> Element {
                                 aria_label: "{bold_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
-                                    let mut f = apply_toggle_b.clone();
+                                    let mut f = apply_toggle_b;
                                     f(0);
                                     schedule_save_bold();
                                 },
@@ -2010,7 +2404,7 @@ pub fn Calc(id: String) -> Element {
                                 aria_label: "{italic_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
-                                    let mut f = apply_toggle_i.clone();
+                                    let mut f = apply_toggle_i;
                                     f(1);
                                     schedule_save_italic();
                                 },
@@ -2022,7 +2416,7 @@ pub fn Calc(id: String) -> Element {
                                 aria_label: "{underline_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
-                                    let mut f = apply_toggle_u.clone();
+                                    let mut f = apply_toggle_u;
                                     f(2);
                                     schedule_save_under();
                                 },
@@ -2037,7 +2431,7 @@ pub fn Calc(id: String) -> Element {
                                 aria_label: "{curr_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
-                                    let mut f = apply_format_c.clone();
+                                    let mut f = apply_format_c;
                                     f("currency");
                                     schedule_save_curr();
                                 },
@@ -2049,7 +2443,7 @@ pub fn Calc(id: String) -> Element {
                                 aria_label: "{pct_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
-                                    let mut f = apply_format_p.clone();
+                                    let mut f = apply_format_p;
                                     f("percent");
                                     schedule_save_pct();
                                 },
@@ -2061,7 +2455,7 @@ pub fn Calc(id: String) -> Element {
                                 aria_label: "{dec0_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
-                                    let mut f = apply_format_d0.clone();
+                                    let mut f = apply_format_d0;
                                     f("decimal0");
                                     schedule_save_d0();
                                 },
@@ -2073,7 +2467,7 @@ pub fn Calc(id: String) -> Element {
                                 aria_label: "{dec2_label}",
                                 onmousedown: move |evt: MouseEvent| evt.prevent_default(),
                                 onclick: move |_| {
-                                    let mut f = apply_format_d2.clone();
+                                    let mut f = apply_format_d2;
                                     f("decimal2");
                                     schedule_save_d2();
                                 },
@@ -2156,6 +2550,14 @@ pub fn Calc(id: String) -> Element {
                                 },
                                 "R"
                             }
+                            button {
+                                class: "toolbar-btn",
+                                title: "{merge_label}",
+                                aria_label: "{merge_label}",
+                                onmousedown: move |evt: MouseEvent| evt.prevent_default(),
+                                onclick: move |_| apply_merge(),
+                                "\u{229E}"
+                            }
                         }
                         div { class: "toolbar-separator" }
                         div { class: "toolbar-group",
@@ -2174,12 +2576,21 @@ pub fn Calc(id: String) -> Element {
                                         push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.range_needs_two_rows"));
                                         return;
                                     }
+                                    let si = *active_sheet.read();
+                                    if merged_range_overlaps(
+                                        &merged_cells.read(),
+                                        si,
+                                        (r1, c1),
+                                        (r2, c2),
+                                    ) {
+                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
+                                        return;
+                                    }
                                     if *loaded.read() {
                                         push_snapshot_sort();
                                     }
-                                    let si = *active_sheet.read();
                                     // Snapshot the selected block (cells + styles) per row.
-                                    let mut rows: Vec<(u32, Vec<(u32, String)>, Vec<(u32, CellStyle)>)> = Vec::new();
+                                    let mut rows: Vec<SortRow> = Vec::new();
                                     {
                                         let cur = cells.read();
                                         let cur_styles = cell_styles.read();
@@ -2199,7 +2610,7 @@ pub fn Calc(id: String) -> Element {
                                     }
                                     // Sort by the value in the leftmost selected column (numeric-aware).
                                     rows.sort_by(|a, b| {
-                                        let key = |row: &(u32, Vec<(u32, String)>, Vec<(u32, CellStyle)>)| {
+                                        let key = |row: &SortRow| {
                                             row.1.iter().find(|(c, _)| *c == c1).map(|(_, v)| v.clone()).unwrap_or_default()
                                         };
                                         let ka = key(a);
@@ -2342,13 +2753,11 @@ pub fn Calc(id: String) -> Element {
                                     formula_bar.set(val);
                                     address_input.set(cell_ref(r, c));
                                     address_error.set(false);
-                                    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                                        if let Some(el) = doc.query_selector(".cell.active").ok().flatten() {
-                                            if let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
+                                    if let Some(doc) = web_sys::window().and_then(|w| w.document())
+                                        && let Some(el) = doc.query_selector(".cell.active").ok().flatten()
+                                            && let Ok(html_el) = el.dyn_into::<web_sys::HtmlElement>() {
                                                 html_el.scroll_into_view_with_bool(false);
                                             }
-                                        }
-                                    }
                                 }
                                 _ => {
                                     address_error.set(true);
@@ -2494,6 +2903,17 @@ pub fn Calc(id: String) -> Element {
                                 }
                                 for col in 0..NUM_COLS {
                                     {
+                                        let merge = merged_range_at(
+                                            &merged_cells.read(),
+                                            sheet_idx,
+                                            (row, col),
+                                        );
+                                        let is_covered = merge
+                                            .map(|range| range.start != (row, col))
+                                            .unwrap_or(false);
+                                        if is_covered {
+                                            rsx! {}
+                                        } else {
                                         let is_active = (row, col) == (active_row, active_col);
                                         let sel_s = *selection_start.read();
                                         let sel_e = *selection_end.read();
@@ -2530,8 +2950,11 @@ pub fn Calc(id: String) -> Element {
                                         if style.borders.right { style_classes.push_str(" border-r"); }
                                         if style.borders.bottom { style_classes.push_str(" border-b"); }
                                         if style.borders.left { style_classes.push_str(" border-l"); }
+                                        if merge.is_some() { style_classes.push_str(" cell-merged"); }
                                         let class_str = format!("{base_class}{style_classes}");
                                         let inline_style = style.inline_css();
+                                        let row_span = merge.map(MergedRange::row_span).unwrap_or(1);
+                                        let col_span = merge.map(MergedRange::col_span).unwrap_or(1);
                                         let evaluated = evaluate_cell_display(&cell_value, si, &cells.read());
                                         let display = if style.number_format.is_empty() || style.number_format == "general" {
                                             evaluated
@@ -2544,6 +2967,8 @@ pub fn Calc(id: String) -> Element {
                                             td {
                                                 class: "{class_str}",
                                                 style: "{inline_style}",
+                                                rowspan: "{row_span}",
+                                                colspan: "{col_span}",
 
                                                 onmousedown: move |evt: MouseEvent| {
                                                     if *is_editing.read() {
@@ -2642,6 +3067,7 @@ pub fn Calc(id: String) -> Element {
                                                 }
                                             }
                                         }
+                                        }
                                     }
                                 }
                             }
@@ -2667,7 +3093,7 @@ pub fn Calc(id: String) -> Element {
                         let tab_name = name.clone();
                         let mut commit_formula_bar = commit_formula_bar.clone();
                         let mut schedule_save_tab = schedule_save.clone();
-                        let mut push_snapshot_tab = push_snapshot.clone();
+                        let mut push_snapshot_tab = push_snapshot;
                         rsx! {
                             div {
                                 class: "{tab_class}",
@@ -2758,7 +3184,7 @@ pub fn Calc(id: String) -> Element {
             if let Some((kind, idx, mx, my)) = *header_menu.read() {
                 {
                     let schedule_save_hm = schedule_save.clone();
-                    let push_snapshot_hm = push_snapshot.clone();
+                    let push_snapshot_hm = push_snapshot;
                     let si = *active_sheet.read();
                     rsx! {
                         div {
@@ -2778,8 +3204,18 @@ pub fn Calc(id: String) -> Element {
                                         button {
                                             onclick: {
                                                 let mut s = schedule_save_hm.clone();
-                                                let mut p = push_snapshot_hm.clone();
+                                                let mut p = push_snapshot_hm;
                                                 move |_| {
+                                                    if merged_range_overlaps(
+                                                        &merged_cells.read(),
+                                                        si,
+                                                        (0, idx),
+                                                        (NUM_ROWS - 1, idx),
+                                                    ) {
+                                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
+                                                        header_menu.set(None);
+                                                        return;
+                                                    }
                                                     if *loaded.read() { p(); }
                                                     let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
                                                     for ((s_i, r, c), v) in cells.read().iter() {
@@ -2803,6 +3239,11 @@ pub fn Calc(id: String) -> Element {
                                                         }
                                                     }
                                                     cell_styles.set(new_styles);
+                                                    insert_row_in_merged(
+                                                        &mut merged_cells.write(),
+                                                        si,
+                                                        idx,
+                                                    );
                                                     header_menu.set(None);
                                                     s();
                                                 }
@@ -2812,8 +3253,18 @@ pub fn Calc(id: String) -> Element {
                                         button {
                                             onclick: {
                                                 let mut s = schedule_save_hm.clone();
-                                                let mut p = push_snapshot_hm.clone();
+                                                let mut p = push_snapshot_hm;
                                                 move |_| {
+                                                    if merged_range_overlaps(
+                                                        &merged_cells.read(),
+                                                        si,
+                                                        (0, idx),
+                                                        (NUM_ROWS - 1, idx),
+                                                    ) {
+                                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
+                                                        header_menu.set(None);
+                                                        return;
+                                                    }
                                                     if *loaded.read() { p(); }
                                                     let target = idx + 1;
                                                     let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
@@ -2838,6 +3289,11 @@ pub fn Calc(id: String) -> Element {
                                                         }
                                                     }
                                                     cell_styles.set(new_styles);
+                                                    insert_row_in_merged(
+                                                        &mut merged_cells.write(),
+                                                        si,
+                                                        target,
+                                                    );
                                                     header_menu.set(None);
                                                     s();
                                                 }
@@ -2847,7 +3303,7 @@ pub fn Calc(id: String) -> Element {
                                         button {
                                             onclick: {
                                                 let mut s = schedule_save_hm.clone();
-                                                let mut p = push_snapshot_hm.clone();
+                                                let mut p = push_snapshot_hm;
                                                 move |_| {
                                                     if *loaded.read() { p(); }
                                                     let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
@@ -2878,6 +3334,11 @@ pub fn Calc(id: String) -> Element {
                                                         }
                                                     }
                                                     cell_styles.set(new_styles);
+                                                    delete_row_from_merged(
+                                                        &mut merged_cells.write(),
+                                                        si,
+                                                        idx,
+                                                    );
                                                     header_menu.set(None);
                                                     s();
                                                 }
@@ -2889,7 +3350,7 @@ pub fn Calc(id: String) -> Element {
                                         button {
                                             onclick: {
                                                 let mut s = schedule_save_hm.clone();
-                                                let mut p = push_snapshot_hm.clone();
+                                                let mut p = push_snapshot_hm;
                                                 move |_| {
                                                     if *loaded.read() { p(); }
                                                     let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
@@ -2914,6 +3375,11 @@ pub fn Calc(id: String) -> Element {
                                                         }
                                                     }
                                                     cell_styles.set(new_styles);
+                                                    insert_col_in_merged(
+                                                        &mut merged_cells.write(),
+                                                        si,
+                                                        idx,
+                                                    );
                                                     header_menu.set(None);
                                                     s();
                                                 }
@@ -2923,7 +3389,7 @@ pub fn Calc(id: String) -> Element {
                                         button {
                                             onclick: {
                                                 let mut s = schedule_save_hm.clone();
-                                                let mut p = push_snapshot_hm.clone();
+                                                let mut p = push_snapshot_hm;
                                                 move |_| {
                                                     if *loaded.read() { p(); }
                                                     let target = idx + 1;
@@ -2949,6 +3415,11 @@ pub fn Calc(id: String) -> Element {
                                                         }
                                                     }
                                                     cell_styles.set(new_styles);
+                                                    insert_col_in_merged(
+                                                        &mut merged_cells.write(),
+                                                        si,
+                                                        target,
+                                                    );
                                                     header_menu.set(None);
                                                     s();
                                                 }
@@ -2958,7 +3429,7 @@ pub fn Calc(id: String) -> Element {
                                         button {
                                             onclick: {
                                                 let mut s = schedule_save_hm.clone();
-                                                let mut p = push_snapshot_hm.clone();
+                                                let mut p = push_snapshot_hm;
                                                 move |_| {
                                                     if *loaded.read() { p(); }
                                                     let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
@@ -2989,6 +3460,11 @@ pub fn Calc(id: String) -> Element {
                                                         }
                                                     }
                                                     cell_styles.set(new_styles);
+                                                    delete_col_from_merged(
+                                                        &mut merged_cells.write(),
+                                                        si,
+                                                        idx,
+                                                    );
                                                     header_menu.set(None);
                                                     s();
                                                 }
@@ -2998,7 +3474,7 @@ pub fn Calc(id: String) -> Element {
                                         button {
                                             onclick: {
                                                 let mut s = schedule_save_hm.clone();
-                                                let mut p = push_snapshot_hm.clone();
+                                                let mut p = push_snapshot_hm;
                                                 move |_| {
                                                     if *loaded.read() { p(); }
                                                     let mut pairs: Vec<(u32, String)> = cells
@@ -3029,7 +3505,7 @@ pub fn Calc(id: String) -> Element {
                                         button {
                                             onclick: {
                                                 let mut s = schedule_save_hm.clone();
-                                                let mut p = push_snapshot_hm.clone();
+                                                let mut p = push_snapshot_hm;
                                                 move |_| {
                                                     if *loaded.read() { p(); }
                                                     let mut pairs: Vec<(u32, String)> = cells
@@ -3069,7 +3545,7 @@ pub fn Calc(id: String) -> Element {
             if let Some((sidx, mx, my)) = *sheet_menu.read() {
                 {
                     let schedule_save_sm = schedule_save.clone();
-                    let push_snapshot_sm = push_snapshot.clone();
+                    let push_snapshot_sm = push_snapshot;
                     let cur_name = sheets.read().get(sidx).cloned().unwrap_or_default();
                     rsx! {
                         div {
@@ -3098,7 +3574,7 @@ pub fn Calc(id: String) -> Element {
                                 button {
                                     onclick: {
                                         let mut s = schedule_save_sm.clone();
-                                        let mut p = push_snapshot_sm.clone();
+                                        let mut p = push_snapshot_sm;
                                         move |_| {
                                             if sheets.read().len() <= 1 {
                                                 sheet_menu.set(None);
@@ -3120,6 +3596,10 @@ pub fn Calc(id: String) -> Element {
                                                 new_styles.insert((ns, *r, *c), v.clone());
                                             }
                                             cell_styles.set(new_styles);
+                                            delete_sheet_from_merged(
+                                                &mut merged_cells.write(),
+                                                sidx,
+                                            );
                                             let cur = *active_sheet.read();
                                             let new_active = if cur >= sheets.read().len() {
                                                 sheets.read().len() - 1
@@ -3138,7 +3618,7 @@ pub fn Calc(id: String) -> Element {
                                 button {
                                     onclick: {
                                         let mut s = schedule_save_sm.clone();
-                                        let mut p = push_snapshot_sm.clone();
+                                        let mut p = push_snapshot_sm;
                                         move |_| {
                                             if sidx == 0 {
                                                 sheet_menu.set(None);
@@ -3160,6 +3640,11 @@ pub fn Calc(id: String) -> Element {
                                                 new_styles.insert((ns, *r, *c), v.clone());
                                             }
                                             cell_styles.set(new_styles);
+                                            swap_sheets_in_merged(
+                                                &mut merged_cells.write(),
+                                                a,
+                                                b,
+                                            );
                                             let cur = *active_sheet.read();
                                             if cur == a { active_sheet.set(b); }
                                             else if cur == b { active_sheet.set(a); }
@@ -3172,7 +3657,7 @@ pub fn Calc(id: String) -> Element {
                                 button {
                                     onclick: {
                                         let mut s = schedule_save_sm.clone();
-                                        let mut p = push_snapshot_sm.clone();
+                                        let mut p = push_snapshot_sm;
                                         move |_| {
                                             if sidx + 1 >= sheets.read().len() {
                                                 sheet_menu.set(None);
@@ -3194,6 +3679,11 @@ pub fn Calc(id: String) -> Element {
                                                 new_styles.insert((ns, *r, *c), v.clone());
                                             }
                                             cell_styles.set(new_styles);
+                                            swap_sheets_in_merged(
+                                                &mut merged_cells.write(),
+                                                a,
+                                                b,
+                                            );
                                             let cur = *active_sheet.read();
                                             if cur == a { active_sheet.set(b); }
                                             else if cur == b { active_sheet.set(a); }
@@ -3265,11 +3755,21 @@ pub fn Calc(id: String) -> Element {
                                         class: "toolbar-btn",
                                         onclick: {
                                             let mut s = schedule_save.clone();
-                                            let mut p = push_snapshot.clone();
+                                            let mut p = push_snapshot;
                                             move |_| {
-                                                if *loaded.read() { p(); }
                                                 let si = autofilter.read().as_ref().map(|f| f.sheet).unwrap_or(0);
                                                 let (start_row, end_row) = autofilter.read().as_ref().map(|f| (f.start_row, f.end_row)).unwrap_or((0,0));
+                                                if merged_range_overlaps(
+                                                    &merged_cells.read(),
+                                                    si,
+                                                    (start_row.saturating_add(1), col),
+                                                    (end_row, col),
+                                                ) {
+                                                    push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
+                                                    filter_dropdown.set(None);
+                                                    return;
+                                                }
+                                                if *loaded.read() { p(); }
                                                 let mut pairs: Vec<(u32, String)> = cells.read().iter()
                                                     .filter(|((sh, r, c), _)| *sh == si && *c == col && *r > start_row && *r <= end_row)
                                                     .map(|((_, r, _), v)| (*r, v.clone()))
@@ -3294,11 +3794,21 @@ pub fn Calc(id: String) -> Element {
                                         class: "toolbar-btn",
                                         onclick: {
                                             let mut s = schedule_save.clone();
-                                            let mut p = push_snapshot.clone();
+                                            let mut p = push_snapshot;
                                             move |_| {
-                                                if *loaded.read() { p(); }
                                                 let si = autofilter.read().as_ref().map(|f| f.sheet).unwrap_or(0);
                                                 let (start_row, end_row) = autofilter.read().as_ref().map(|f| (f.start_row, f.end_row)).unwrap_or((0,0));
+                                                if merged_range_overlaps(
+                                                    &merged_cells.read(),
+                                                    si,
+                                                    (start_row.saturating_add(1), col),
+                                                    (end_row, col),
+                                                ) {
+                                                    push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
+                                                    filter_dropdown.set(None);
+                                                    return;
+                                                }
+                                                if *loaded.read() { p(); }
                                                 let mut pairs: Vec<(u32, String)> = cells.read().iter()
                                                     .filter(|((sh, r, c), _)| *sh == si && *c == col && *r > start_row && *r <= end_row)
                                                     .map(|((_, r, _), v)| (*r, v.clone()))
@@ -3466,7 +3976,7 @@ pub fn Calc(id: String) -> Element {
                 },
                 on_replace: {
                     let mut schedule_save = schedule_save.clone();
-                    let mut push_snapshot = push_snapshot.clone();
+                    let mut push_snapshot = push_snapshot;
                     let bus = toast_bus;
                     move |(find, replace): (String, String)| {
                         if find.is_empty() { return; }
@@ -3490,7 +4000,7 @@ pub fn Calc(id: String) -> Element {
                 },
                 on_replace_all: {
                     let mut schedule_save = schedule_save.clone();
-                    let mut push_snapshot = push_snapshot.clone();
+                    let mut push_snapshot = push_snapshot;
                     let bus = toast_bus;
                     move |(find, replace): (String, String)| {
                         if find.is_empty() { return; }
@@ -3538,7 +4048,7 @@ pub fn Calc(id: String) -> Element {
                                     saved_status.set(crate::i18n::t("common.unsaved"));
                                 }
                             }
-                            other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", &other)),
+                            other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
                         }
                     }
                 },
@@ -3551,6 +4061,10 @@ pub fn Calc(id: String) -> Element {
 #[cfg(test)]
 mod eval_tests {
     use super::eval::{EvalError, evaluate};
+    use super::{
+        MergedRange, delete_col_from_merged, delete_row_from_merged, hydrate_workbook,
+        insert_col_in_merged, insert_row_in_merged, sanitize_merged_ranges,
+    };
     use std::collections::HashMap;
 
     fn make(items: &[((usize, u32, u32), &str)]) -> HashMap<(usize, u32, u32), String> {
@@ -3630,5 +4144,83 @@ mod eval_tests {
     fn dollar_absolute_refs_ignored() {
         let cells = make(&[((0, 0, 0), "5")]);
         assert_eq!(evaluate("$A$1+1", 0, &cells).unwrap(), 6.0);
+    }
+
+    #[test]
+    fn hydrate_workbook_preserves_merged_ranges() {
+        let content = serde_json::json!({
+            "sheets": [{
+                "name": "Sheet1",
+                "cells": [],
+                "merged_cells": [{
+                    "start": {"row": 3, "col": 4},
+                    "end": {"row": 1, "col": 2}
+                }]
+            }]
+        });
+
+        let (_, _, _, merged) = hydrate_workbook(&content);
+        assert_eq!(
+            merged.get(&0),
+            Some(&vec![MergedRange {
+                start: (1, 2),
+                end: (3, 4),
+            }])
+        );
+    }
+
+    #[test]
+    fn merged_ranges_follow_row_and_column_edits() {
+        let mut merged = HashMap::from([(
+            0,
+            vec![MergedRange {
+                start: (1, 1),
+                end: (2, 2),
+            }],
+        )]);
+
+        insert_row_in_merged(&mut merged, 0, 2);
+        insert_col_in_merged(&mut merged, 0, 2);
+        assert_eq!(
+            merged[&0][0],
+            MergedRange {
+                start: (1, 1),
+                end: (3, 3),
+            }
+        );
+
+        delete_row_from_merged(&mut merged, 0, 1);
+        delete_col_from_merged(&mut merged, 0, 1);
+        assert_eq!(
+            merged[&0][0],
+            MergedRange {
+                start: (1, 1),
+                end: (2, 2),
+            }
+        );
+    }
+
+    #[test]
+    fn merged_range_sanitization_rejects_overlap_and_out_of_bounds() {
+        let valid = MergedRange {
+            start: (1, 1),
+            end: (2, 2),
+        };
+        let sanitized = sanitize_merged_ranges([
+            valid,
+            MergedRange {
+                start: (2, 2),
+                end: (3, 3),
+            },
+            MergedRange {
+                start: (99, 0),
+                end: (100, 1),
+            },
+            MergedRange {
+                start: (4, 4),
+                end: (4, 4),
+            },
+        ]);
+        assert_eq!(sanitized, vec![valid]);
     }
 }

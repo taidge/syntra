@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Write};
 
 use calamine::{Data, Reader, Xlsx};
-use contrix_doc_engine::calc::{CellRef, CellValue, Sheet, Workbook};
+use contrix_doc_engine::calc::{CellRef, CellValue, MergedRange, Sheet, Workbook};
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 /// Convert a [`Workbook`] to a `.xlsx` byte vector (ZIP archive with Open XML).
@@ -153,12 +153,12 @@ fn build_shared_strings(wb: &Workbook) -> (Vec<String>, HashMap<String, usize>) 
 
     for sheet in &wb.sheets {
         for cell in sheet.cells.values() {
-            if let CellValue::Text(ref s) = cell.value {
-                if !index.contains_key(s) {
-                    let idx = strings.len();
-                    strings.push(s.clone());
-                    index.insert(s.clone(), idx);
-                }
+            if let CellValue::Text(ref s) = cell.value
+                && !index.contains_key(s)
+            {
+                let idx = strings.len();
+                strings.push(s.clone());
+                index.insert(s.clone(), idx);
             }
         }
     }
@@ -174,94 +174,107 @@ fn sheet_to_xml(sheet: &Sheet, ss_index: &HashMap<String, usize>) -> String {
 <sheetData>"#,
     );
 
-    if sheet.cells.is_empty() {
-        xml.push_str("</sheetData></worksheet>");
-        return xml;
+    if !sheet.cells.is_empty() {
+        // Determine bounding rectangle.
+        let max_row = sheet.cells.keys().map(|r| r.row).max().unwrap_or(0);
+        let max_col = sheet.cells.keys().map(|r| r.col).max().unwrap_or(0);
+
+        for row in 0..=max_row {
+            // Collect cells in this row.
+            let mut row_cells: Vec<(u32, &contrix_doc_engine::calc::Cell)> = Vec::new();
+            for col in 0..=max_col {
+                if let Some(cell) = sheet.get_cell(row, col) {
+                    row_cells.push((col, cell));
+                }
+            }
+            if row_cells.is_empty() {
+                continue;
+            }
+
+            xml.push_str(&format!("<row r=\"{}\">", row + 1)); // 1-based row number
+
+            for (col, cell) in &row_cells {
+                let cell_ref = CellRef::new(row, *col).to_a1();
+
+                match (&cell.value, &cell.formula) {
+                    // Formula cell — emit <f> and optionally a cached <v>.
+                    (_, Some(formula)) => {
+                        xml.push_str(&format!("<c r=\"{}\">", cell_ref));
+                        xml.push_str(&format!("<f>{}</f>", escape_xml(formula)));
+                        // If there is a cached value, emit it.
+                        match &cell.value {
+                            CellValue::Number(n) => {
+                                xml.push_str(&format!("<v>{}</v>", n));
+                            }
+                            CellValue::Text(s) => {
+                                // For formula cells with text results, inline the
+                                // string rather than using the shared strings table.
+                                xml.push_str(&format!("<v>{}</v>", escape_xml(s)));
+                            }
+                            _ => {}
+                        }
+                        xml.push_str("</c>");
+                    }
+                    // Number
+                    (CellValue::Number(n), None) => {
+                        xml.push_str(&format!("<c r=\"{}\" t=\"n\"><v>{}</v></c>", cell_ref, n));
+                    }
+                    // Text — reference shared string
+                    (CellValue::Text(s), None) => {
+                        if let Some(idx) = ss_index.get(s) {
+                            xml.push_str(&format!(
+                                "<c r=\"{}\" t=\"s\"><v>{}</v></c>",
+                                cell_ref, idx
+                            ));
+                        }
+                    }
+                    // Boolean
+                    (CellValue::Boolean(b), None) => {
+                        xml.push_str(&format!(
+                            "<c r=\"{}\" t=\"b\"><v>{}</v></c>",
+                            cell_ref,
+                            if *b { 1 } else { 0 }
+                        ));
+                    }
+                    // Date — store as inline string
+                    (CellValue::Date(d), None) => {
+                        xml.push_str(&format!(
+                            "<c r=\"{}\" t=\"inlineStr\"><is><t>{}</t></is></c>",
+                            cell_ref,
+                            escape_xml(d)
+                        ));
+                    }
+                    // Error — store as error type
+                    (CellValue::Error(e), None) => {
+                        xml.push_str(&format!(
+                            "<c r=\"{}\" t=\"e\"><v>{}</v></c>",
+                            cell_ref,
+                            escape_xml(e)
+                        ));
+                    }
+                    // Empty
+                    (CellValue::Empty, None) => {}
+                }
+            }
+
+            xml.push_str("</row>");
+        }
     }
 
-    // Determine bounding rectangle.
-    let max_row = sheet.cells.keys().map(|r| r.row).max().unwrap_or(0);
-    let max_col = sheet.cells.keys().map(|r| r.col).max().unwrap_or(0);
-
-    for row in 0..=max_row {
-        // Collect cells in this row.
-        let mut row_cells: Vec<(u32, &contrix_doc_engine::calc::Cell)> = Vec::new();
-        for col in 0..=max_col {
-            if let Some(cell) = sheet.get_cell(row, col) {
-                row_cells.push((col, cell));
-            }
+    xml.push_str("</sheetData>");
+    if !sheet.merged_cells.is_empty() {
+        xml.push_str(&format!(
+            "<mergeCells count=\"{}\">",
+            sheet.merged_cells.len()
+        ));
+        for range in &sheet.merged_cells {
+            let start = range.start.to_a1();
+            let end = range.end.to_a1();
+            xml.push_str(&format!("<mergeCell ref=\"{start}:{end}\"/>"));
         }
-        if row_cells.is_empty() {
-            continue;
-        }
-
-        xml.push_str(&format!("<row r=\"{}\">", row + 1)); // 1-based row number
-
-        for (col, cell) in &row_cells {
-            let cell_ref = CellRef::new(row, *col).to_a1();
-
-            match (&cell.value, &cell.formula) {
-                // Formula cell — emit <f> and optionally a cached <v>.
-                (_, Some(formula)) => {
-                    xml.push_str(&format!("<c r=\"{}\">", cell_ref));
-                    xml.push_str(&format!("<f>{}</f>", escape_xml(formula)));
-                    // If there is a cached value, emit it.
-                    match &cell.value {
-                        CellValue::Number(n) => {
-                            xml.push_str(&format!("<v>{}</v>", n));
-                        }
-                        CellValue::Text(s) => {
-                            // For formula cells with text results, inline the
-                            // string rather than using the shared strings table.
-                            xml.push_str(&format!("<v>{}</v>", escape_xml(s)));
-                        }
-                        _ => {}
-                    }
-                    xml.push_str("</c>");
-                }
-                // Number
-                (CellValue::Number(n), None) => {
-                    xml.push_str(&format!("<c r=\"{}\" t=\"n\"><v>{}</v></c>", cell_ref, n));
-                }
-                // Text — reference shared string
-                (CellValue::Text(s), None) => {
-                    if let Some(idx) = ss_index.get(s) {
-                        xml.push_str(&format!("<c r=\"{}\" t=\"s\"><v>{}</v></c>", cell_ref, idx));
-                    }
-                }
-                // Boolean
-                (CellValue::Boolean(b), None) => {
-                    xml.push_str(&format!(
-                        "<c r=\"{}\" t=\"b\"><v>{}</v></c>",
-                        cell_ref,
-                        if *b { 1 } else { 0 }
-                    ));
-                }
-                // Date — store as inline string
-                (CellValue::Date(d), None) => {
-                    xml.push_str(&format!(
-                        "<c r=\"{}\" t=\"inlineStr\"><is><t>{}</t></is></c>",
-                        cell_ref,
-                        escape_xml(d)
-                    ));
-                }
-                // Error — store as error type
-                (CellValue::Error(e), None) => {
-                    xml.push_str(&format!(
-                        "<c r=\"{}\" t=\"e\"><v>{}</v></c>",
-                        cell_ref,
-                        escape_xml(e)
-                    ));
-                }
-                // Empty
-                (CellValue::Empty, None) => {}
-            }
-        }
-
-        xml.push_str("</row>");
+        xml.push_str("</mergeCells>");
     }
-
-    xml.push_str("</sheetData></worksheet>");
+    xml.push_str("</worksheet>");
     xml
 }
 
@@ -283,6 +296,18 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
     let cursor = Cursor::new(bytes.to_vec());
     let mut xlsx: Xlsx<_> = Xlsx::new(cursor).map_err(|e| e.to_string())?;
     let sheet_names = xlsx.sheet_names().to_vec();
+    xlsx.load_merged_regions().map_err(|e| e.to_string())?;
+    let merged_by_sheet: HashMap<String, Vec<calamine::Dimensions>> = sheet_names
+        .iter()
+        .map(|name| {
+            let regions = xlsx
+                .merged_regions_by_sheet(name)
+                .into_iter()
+                .map(|(_, _, dimensions)| *dimensions)
+                .collect();
+            (name.clone(), regions)
+        })
+        .collect();
 
     let title = sheet_names
         .first()
@@ -306,6 +331,15 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
             if let Some(cv) = data_to_cell_value(value) {
                 sheet.set_cell(abs_row, abs_col, cv);
             }
+        }
+        if let Some(regions) = merged_by_sheet.get(name) {
+            sheet.merged_cells = regions
+                .iter()
+                .map(|dimensions| MergedRange {
+                    start: CellRef::new(dimensions.start.0, dimensions.start.1),
+                    end: CellRef::new(dimensions.end.0, dimensions.end.1),
+                })
+                .collect();
         }
         wb.sheets.push(sheet);
     }
@@ -338,7 +372,7 @@ fn data_to_cell_value(data: &Data) -> Option<CellValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contrix_doc_engine::calc::{CellValue, Workbook};
+    use contrix_doc_engine::calc::{CellRef, CellValue, MergedRange, Workbook};
 
     #[test]
     fn test_xlsx_generation() {
@@ -432,7 +466,7 @@ mod tests {
         wb.sheets[0].name = "Alpha".into();
         wb.sheets[0].set_cell(0, 0, CellValue::Text("Hello".into()));
         wb.sheets[0].set_cell(0, 1, CellValue::Number(42.0));
-        wb.sheets[0].set_cell(1, 0, CellValue::Number(3.14));
+        wb.sheets[0].set_cell(1, 0, CellValue::Number(314.0 / 100.0));
         wb.add_sheet("Beta".to_string());
         wb.sheets[1].set_cell(0, 0, CellValue::Text("World".into()));
         wb.sheets[1].set_cell(2, 3, CellValue::Number(99.0));
@@ -453,7 +487,7 @@ mod tests {
             ref v => panic!("expected number, got {:?}", v),
         }
         match parsed.sheets[0].get_cell(1, 0).unwrap().value {
-            CellValue::Number(n) => assert!((n - 3.14).abs() < 1e-9),
+            CellValue::Number(n) => assert!((n - (314.0 / 100.0)).abs() < 1e-9),
             ref v => panic!("expected number, got {:?}", v),
         }
         match &parsed.sheets[1].get_cell(0, 0).unwrap().value {
@@ -464,6 +498,33 @@ mod tests {
             CellValue::Number(n) => assert_eq!(n, 99.0),
             ref v => panic!("expected number, got {:?}", v),
         }
+    }
+
+    #[test]
+    fn test_xlsx_merged_cells_round_trip() {
+        let mut wb = Workbook::new("Merged".into());
+        wb.sheets[0].set_cell(0, 0, CellValue::Text("Heading".into()));
+        wb.sheets[0].merged_cells.push(MergedRange {
+            start: CellRef::new(0, 0),
+            end: CellRef::new(1, 2),
+        });
+
+        let bytes = workbook_to_xlsx(&wb).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut sheet_xml = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("xl/worksheets/sheet1.xml").unwrap(),
+            &mut sheet_xml,
+        )
+        .unwrap();
+        assert!(sheet_xml.contains(r#"<mergeCell ref="A1:C2"/>"#));
+        drop(archive);
+
+        let parsed = xlsx_to_workbook(&bytes).unwrap();
+        assert_eq!(parsed.sheets[0].merged_cells.len(), 1);
+        let merged = &parsed.sheets[0].merged_cells[0];
+        assert_eq!(merged.start, CellRef::new(0, 0));
+        assert_eq!(merged.end, CellRef::new(1, 2));
     }
 
     #[test]

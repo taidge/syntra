@@ -120,7 +120,7 @@ pub struct Blockquote {
 // ---------------------------------------------------------------------------
 
 /// A contiguous run of text sharing the same formatting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TextRun {
     pub text: String,
     pub bold: bool,
@@ -134,25 +134,6 @@ pub struct TextRun {
     pub link: Option<String>,
     pub superscript: bool,
     pub subscript: bool,
-}
-
-impl Default for TextRun {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            bold: false,
-            italic: false,
-            underline: false,
-            strikethrough: false,
-            font_family: None,
-            font_size: None,
-            color: None,
-            background_color: None,
-            link: None,
-            superscript: false,
-            subscript: false,
-        }
-    }
 }
 
 impl TextRun {
@@ -204,18 +185,13 @@ pub enum Orientation {
 }
 
 /// Text alignment within a block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Alignment {
+    #[default]
     Left,
     Center,
     Right,
     Justify,
-}
-
-impl Default for Alignment {
-    fn default() -> Self {
-        Self::Left
-    }
 }
 
 /// Vertical spacing around a block (in points).
@@ -324,7 +300,7 @@ impl WriterDocument {
 
     /// Count every word across all blocks (recursively).
     pub fn word_count(&self) -> usize {
-        self.body.iter().map(|b| block_word_count(b)).sum()
+        self.body.iter().map(block_word_count).sum()
     }
 
     /// Extract plain text from every block, separated by newlines.

@@ -93,7 +93,7 @@ pub fn FileList(
                                                     div { class: "file-name", "{file_name}" }
                                                 }
                                             }
-                                            {render_grid_actions(file, token.clone(), on_refresh.clone())}
+                                            {render_grid_actions(file, token.clone(), on_refresh)}
                                         }
                                     }
                                 }
@@ -113,7 +113,7 @@ pub fn FileList(
                             }
                             tbody {
                                 for file in rows {
-                                    {render_list_row(file, token.clone(), on_open_folder.clone(), on_refresh.clone())}
+                                    {render_list_row(file, token.clone(), on_open_folder, on_refresh)}
                                 }
                             }
                         }
@@ -198,7 +198,7 @@ fn format_size(bytes: i64) -> String {
 fn render_grid_actions(file: FileResponse, token: String, on_refresh: EventHandler<()>) -> Element {
     rsx! {
         div { class: "file-card-actions",
-            {render_rename_button(file.clone(), token.clone(), on_refresh.clone())}
+            {render_rename_button(file.clone(), token.clone(), on_refresh)}
             {render_delete_button(file, token, on_refresh)}
         }
     }
@@ -246,7 +246,7 @@ fn render_list_row(
             td { "{size}" }
             td { "{modified}" }
             td { class: "file-actions",
-                {render_rename_button(file.clone(), token.clone(), on_refresh.clone())}
+                {render_rename_button(file.clone(), token.clone(), on_refresh)}
                 {render_delete_button(file, token, on_refresh)}
             }
         }

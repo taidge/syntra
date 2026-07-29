@@ -21,7 +21,7 @@ pub fn sheet_to_csv(sheet: &Sheet) -> String {
             }
             let text = sheet
                 .get_cell(row, col)
-                .map(|c| cell_display_value(c))
+                .map(cell_display_value)
                 .unwrap_or_default();
             csv.push_str(&csv_escape(&text));
         }

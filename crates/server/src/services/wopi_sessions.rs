@@ -17,6 +17,12 @@ pub struct WopiSessionStore {
     sessions: Mutex<HashMap<String, WopiSession>>,
 }
 
+impl Default for WopiSessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WopiSessionStore {
     pub fn new() -> Self {
         Self {

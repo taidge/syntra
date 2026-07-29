@@ -248,19 +248,19 @@ pub async fn create_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
             .first::<String>(&mut conn)
             .optional()
             .unwrap_or(None);
-        if let Some(owner_id) = owner {
-            if owner_id != uid {
-                crate::services::NotificationService::create(
-                    &state.db,
-                    &state.notifications,
-                    &owner_id,
-                    "comment",
-                    "New comment",
-                    "Someone commented on your document",
-                    Some(&format!("/documents/{doc_id_param}")),
-                )
-                .await;
-            }
+        if let Some(owner_id) = owner
+            && owner_id != uid
+        {
+            crate::services::NotificationService::create(
+                &state.db,
+                &state.notifications,
+                &owner_id,
+                "comment",
+                "New comment",
+                "Someone commented on your document",
+                Some(&format!("/documents/{doc_id_param}")),
+            )
+            .await;
         }
     }
 

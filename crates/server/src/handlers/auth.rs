@@ -18,13 +18,16 @@ use contrix_core::dto::{
 };
 use contrix_core::error::AppError;
 use contrix_core::models::{
-    NewLoginAttempt, NewPasswordResetToken, NewUser, PasswordResetToken, User, UserRole,
+    NewLoginAttempt, NewPasswordResetToken, NewSession, NewUser, PasswordResetToken, TotpSecret,
+    User, UserRole,
 };
 use contrix_core::schema::login_attempts::dsl as la;
 use contrix_core::schema::password_reset_tokens::dsl as prt;
+use contrix_core::schema::sessions::dsl as sess;
+use contrix_core::schema::totp_secrets::dsl as ts;
 use contrix_core::schema::users::dsl as u;
 
-use crate::middleware::auth::{JwtClaims, get_user_id};
+use crate::middleware::auth::{JwtClaims, get_user_id, hash_token};
 use crate::services::password::PasswordService;
 use crate::state::AppState;
 
@@ -51,6 +54,43 @@ fn generate_jwt(
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .map_err(|e| AppError::Internal(format!("JWT generation failed: {e}")))
+}
+
+fn create_session(
+    conn: &mut diesel::SqliteConnection,
+    user_id: &str,
+    token: &str,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    expiry_hours: u64,
+) -> Result<(), AppError> {
+    let now = Utc::now();
+    let session = NewSession {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.to_owned(),
+        token_hash: hash_token(token),
+        ip_address,
+        user_agent,
+        is_active: true,
+        created_at: now.to_rfc3339(),
+        expires_at: (now + chrono::Duration::hours(expiry_hours as i64)).to_rfc3339(),
+        last_activity_at: now.to_rfc3339(),
+    };
+    diesel::insert_into(sess::sessions)
+        .values(&session)
+        .execute(conn)
+        .map(|_| ())
+        .map_err(|e| AppError::Database(format!("Failed to create session: {e}")))
+}
+
+fn revoke_user_sessions(conn: &mut diesel::SqliteConnection, user_id: &str) {
+    let _ = diesel::update(
+        sess::sessions
+            .filter(sess::user_id.eq(user_id))
+            .filter(sess::is_active.eq(true)),
+    )
+    .set(sess::is_active.eq(false))
+    .execute(conn);
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +236,22 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             return;
         }
     };
+
+    if let Err(e) = create_session(
+        &mut conn,
+        &user_id_val.to_string(),
+        &token,
+        Some(req.remote_addr().to_string()),
+        req.headers()
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        state.config.auth.jwt_expiry_hours,
+    ) {
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Json(ApiResponse::<()>::err(e.to_response())));
+        return;
+    }
 
     let profile = UserProfile {
         id: user_id_val,
@@ -343,6 +399,56 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         return;
     }
 
+    // Password verification is only the first factor when TOTP is enabled.
+    let enabled_totp = match ts::totp_secrets
+        .filter(ts::user_id.eq(&user_row.id))
+        .filter(ts::is_enabled.eq(true))
+        .first::<TotpSecret>(&mut conn)
+        .optional()
+    {
+        Ok(value) => value,
+        Err(e) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+    if let Some(totp) = enabled_totp {
+        let code = body.totp_code.as_deref().unwrap_or_default();
+        let second_factor_valid =
+            match crate::handlers::totp::verify_second_factor(&mut conn, &totp, code) {
+                Ok(valid) => valid,
+                Err(error) => {
+                    res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                    res.render(Json(ApiResponse::<()>::err(error.to_response())));
+                    return;
+                }
+            };
+        if !second_factor_valid {
+            let _ = diesel::insert_into(la::login_attempts)
+                .values(&NewLoginAttempt {
+                    id: Uuid::new_v4().to_string(),
+                    ip_address: ip_address.clone(),
+                    email: body.email.clone(),
+                    success: false,
+                    attempted_at: Utc::now().to_rfc3339(),
+                })
+                .execute(&mut conn);
+            res.status_code(StatusCode::UNAUTHORIZED);
+            let message = if code.is_empty() {
+                "TOTP code required"
+            } else {
+                "Invalid TOTP code"
+            };
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Auth(message.into()).to_response(),
+            )));
+            return;
+        }
+    }
+
     // Record successful login attempt
     let _ = diesel::insert_into(la::login_attempts)
         .values(&NewLoginAttempt {
@@ -366,9 +472,11 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         "auth.login",
         "user",
         &user_row.id,
-        None,
-        Some(&ip_address),
-        user_agent.as_deref(),
+        crate::services::AuditContext {
+            details: None,
+            ip_address: Some(&ip_address),
+            user_agent: user_agent.as_deref(),
+        },
     );
 
     // Update last_login_at.
@@ -378,7 +486,7 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         .execute(&mut conn);
 
     let user_id_uuid: Uuid = user_row.id.parse().unwrap_or_default();
-    let role = UserRole::from_str(&user_row.role);
+    let role = UserRole::parse_lossy(&user_row.role);
 
     let token = match generate_jwt(
         &user_row.id,
@@ -393,6 +501,19 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             return;
         }
     };
+
+    if let Err(e) = create_session(
+        &mut conn,
+        &user_row.id,
+        &token,
+        Some(ip_address.clone()),
+        user_agent.clone(),
+        state.config.auth.jwt_expiry_hours,
+    ) {
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Json(ApiResponse::<()>::err(e.to_response())));
+        return;
+    }
 
     let profile = UserProfile {
         id: user_id_uuid,
@@ -454,7 +575,7 @@ pub async fn me(depot: &mut Depot, res: &mut Response) {
                 email: user_row.email,
                 display_name: user_row.display_name,
                 avatar_url: user_row.avatar_url,
-                role: UserRole::from_str(&user_row.role),
+                role: UserRole::parse_lossy(&user_row.role),
                 storage_used: user_row.storage_used,
                 storage_quota: user_row.storage_quota.unwrap_or(0),
             };
@@ -549,7 +670,7 @@ pub async fn update_me(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 email: user_row.email,
                 display_name: user_row.display_name,
                 avatar_url: user_row.avatar_url,
-                role: UserRole::from_str(&user_row.role),
+                role: UserRole::parse_lossy(&user_row.role),
                 storage_used: user_row.storage_used,
                 storage_quota: user_row.storage_quota.unwrap_or(0),
             };
@@ -693,6 +814,9 @@ pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Res
         )));
         return;
     }
+    // Changing a password invalidates every previously issued access token,
+    // including the token used for this request.
+    revoke_user_sessions(&mut conn, &uid);
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(
@@ -898,6 +1022,7 @@ pub async fn reset_password(req: &mut Request, depot: &mut Depot, res: &mut Resp
         )));
         return;
     }
+    revoke_user_sessions(&mut conn, &token_row.user_id);
 
     // Mark token as used.
     let _ = diesel::update(prt::password_reset_tokens.filter(prt::id.eq(&token_row.id)))

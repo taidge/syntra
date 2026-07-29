@@ -235,7 +235,7 @@ fn text_run_to_md(run: &TextRun, out: &mut String) {
         }
         if run.italic {
             prefix.push('*');
-            suffix.insert_str(0, "*");
+            suffix.insert(0, '*');
         }
     }
 

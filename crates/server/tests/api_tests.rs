@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestServer;
+use contrix_server::handlers::totp::current_totp_code;
 
 // ===========================================================================
 // Auth tests
@@ -2067,7 +2068,7 @@ async fn test_room_member_can_access_room_files_and_upload_inherits_room_id() {
             path: "/Room Folder".to_string(),
             mime_type: None,
             size: 0,
-            owner_id: owner_id,
+            owner_id,
             parent_id: None,
             is_folder: true,
             is_trashed: false,
@@ -3410,6 +3411,143 @@ async fn test_totp_setup() {
     );
     let backup_codes = body["data"]["backup_codes"].as_array().unwrap();
     assert_eq!(backup_codes.len(), 8);
+}
+
+#[tokio::test]
+async fn test_totp_enabled_login_requires_valid_second_factor() {
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("totp-user", "totp@test.com", "password123")
+        .await;
+
+    let setup = server
+        .client
+        .post(server.url("/api/v1/totp/setup"))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(setup.status(), 201);
+    let setup_body: serde_json::Value = setup.json().await.unwrap();
+    let secret = setup_body["data"]["secret"].as_str().unwrap();
+    let backup_code = setup_body["data"]["backup_codes"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let code = current_totp_code(secret).unwrap();
+
+    let verify = server
+        .client
+        .post(server.url("/api/v1/totp/verify"))
+        .headers(server.auth_header(&token))
+        .json(&serde_json::json!({ "code": code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(verify.status(), 200);
+
+    let missing = server
+        .client
+        .post(server.url("/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "totp@test.com",
+            "password": "password123"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 401);
+
+    let invalid = server
+        .client
+        .post(server.url("/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "totp@test.com",
+            "password": "password123",
+            "totp_code": "000000"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), 401);
+
+    let valid = server
+        .client
+        .post(server.url("/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "totp@test.com",
+            "password": "password123",
+            "totp_code": current_totp_code(secret).unwrap()
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(valid.status(), 200);
+    let valid_body: serde_json::Value = valid.json().await.unwrap();
+    assert!(valid_body["data"]["token"].as_str().is_some());
+
+    let backup = server
+        .client
+        .post(server.url("/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "totp@test.com",
+            "password": "password123",
+            "totp_code": backup_code
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(backup.status(), 200);
+
+    let reused = server
+        .client
+        .post(server.url("/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "totp@test.com",
+            "password": "password123",
+            "totp_code": backup_code
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reused.status(), 401);
+}
+
+#[tokio::test]
+async fn test_revoked_session_invalidates_jwt_immediately() {
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("session-user", "session@test.com", "password123")
+        .await;
+
+    let sessions = server
+        .client
+        .get(server.url("/api/v1/sessions"))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sessions.status(), 200);
+    let sessions_body: serde_json::Value = sessions.json().await.unwrap();
+    let session_id = sessions_body["data"][0]["id"].as_str().unwrap();
+
+    let revoked = server
+        .client
+        .delete(server.url(&format!("/api/v1/sessions/{session_id}")))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), 200);
+
+    let me = server
+        .client
+        .get(server.url("/api/v1/auth/me"))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 401);
 }
 
 // ===========================================================================

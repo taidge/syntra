@@ -9,6 +9,12 @@ use crate::services::StorageBackend;
 /// Service that generates thumbnails for uploaded image files.
 pub struct ThumbnailService;
 
+impl Default for ThumbnailService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThumbnailService {
     pub fn new() -> Self {
         Self

@@ -77,17 +77,15 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let room_id_for_new_folder = if let Some(parent_id) = parent_id_str.as_deref() {
         match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
             Ok(Some(parent)) => {
-                if let Some(requested_room_id) = requested_room_id.as_deref() {
-                    if parent.room_id.as_deref() != Some(requested_room_id) {
-                        res.status_code(StatusCode::BAD_REQUEST);
-                        res.render(Json(ApiResponse::<()>::err(
-                            AppError::Validation(
-                                "room_id must match the parent folder room".into(),
-                            )
+                if let Some(requested_room_id) = requested_room_id.as_deref()
+                    && parent.room_id.as_deref() != Some(requested_room_id)
+                {
+                    res.status_code(StatusCode::BAD_REQUEST);
+                    res.render(Json(ApiResponse::<()>::err(
+                        AppError::Validation("room_id must match the parent folder room".into())
                             .to_response(),
-                        )));
-                        return;
-                    }
+                    )));
+                    return;
                 }
                 parent.room_id.clone()
             }

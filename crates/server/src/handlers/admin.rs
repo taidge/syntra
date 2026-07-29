@@ -317,14 +317,14 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
     // Restrict role to a known set so arbitrary strings can't be written.
     const VALID_ROLES: &[&str] = &["admin", "editor", "viewer", "disabled"];
-    if let Some(role) = body.role.as_deref() {
-        if !VALID_ROLES.contains(&role) {
-            res.status_code(StatusCode::BAD_REQUEST);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Validation("Invalid role".into()).to_response(),
-            )));
-            return;
-        }
+    if let Some(role) = body.role.as_deref()
+        && !VALID_ROLES.contains(&role)
+    {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("Invalid role".into()).to_response(),
+        )));
+        return;
     }
 
     let mut conn = match state.db.get() {
@@ -340,29 +340,29 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
     // Prevent removing the last remaining admin (downgrade or disable), which
     // would otherwise lock everyone out of admin functions.
-    if let Some(new_role) = body.role.as_deref() {
-        if new_role != "admin" {
-            let is_target_admin = u::users
-                .filter(u::id.eq(&user_id_param))
+    if let Some(new_role) = body.role.as_deref()
+        && new_role != "admin"
+    {
+        let is_target_admin = u::users
+            .filter(u::id.eq(&user_id_param))
+            .filter(u::role.eq("admin"))
+            .count()
+            .get_result::<i64>(&mut conn)
+            .unwrap_or(0)
+            > 0;
+        if is_target_admin {
+            let admin_count = u::users
                 .filter(u::role.eq("admin"))
                 .count()
                 .get_result::<i64>(&mut conn)
-                .unwrap_or(0)
-                > 0;
-            if is_target_admin {
-                let admin_count = u::users
-                    .filter(u::role.eq("admin"))
-                    .count()
-                    .get_result::<i64>(&mut conn)
-                    .unwrap_or(0);
-                if admin_count <= 1 {
-                    res.status_code(StatusCode::BAD_REQUEST);
-                    res.render(Json(ApiResponse::<()>::err(
-                        AppError::Validation("Cannot remove the last administrator".into())
-                            .to_response(),
-                    )));
-                    return;
-                }
+                .unwrap_or(0);
+            if admin_count <= 1 {
+                res.status_code(StatusCode::BAD_REQUEST);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::Validation("Cannot remove the last administrator".into())
+                        .to_response(),
+                )));
+                return;
             }
         }
     }
@@ -408,9 +408,11 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 "user.update",
                 "user",
                 &user_id_param,
-                details.as_deref(),
-                audit_ip.as_deref(),
-                audit_ua.as_deref(),
+                crate::services::AuditContext {
+                    details: details.as_deref(),
+                    ip_address: audit_ip.as_deref(),
+                    user_agent: audit_ua.as_deref(),
+                },
             );
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
@@ -516,9 +518,11 @@ pub async fn disable_user(req: &mut Request, depot: &mut Depot, res: &mut Respon
                 "user.disable",
                 "user",
                 &user_id_param,
-                None,
-                ip.as_deref(),
-                ua.as_deref(),
+                crate::services::AuditContext {
+                    details: None,
+                    ip_address: ip.as_deref(),
+                    user_agent: ua.as_deref(),
+                },
             );
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(

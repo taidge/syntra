@@ -22,7 +22,7 @@ pub fn FileManager() -> Element {
     let auth = use_context::<Signal<AuthState>>();
     let nav = use_navigator();
     let mut show_new_folder_modal = use_signal(|| false);
-    let mut new_folder_name = use_signal(|| String::new());
+    let mut new_folder_name = use_signal(String::new);
     let mut folder_error = use_signal(|| None::<String>);
     let mut upload_error = use_signal(|| None::<String>);
     let mut current_parent_id = use_signal(|| None::<Uuid>);
@@ -90,8 +90,8 @@ pub fn FileManager() -> Element {
                             refresh_key.set(next);
                         }
 
-                        if let Some(resp) = imported {
-                            if let Some(doc_id) = resp.document_id {
+                        if let Some(resp) = imported
+                            && let Some(doc_id) = resp.document_id {
                                 let ext = resp.name
                                     .rsplit('.')
                                     .next()
@@ -107,7 +107,6 @@ pub fn FileManager() -> Element {
                                     nav.push(route);
                                 }
                             }
-                        }
                     });
                 },
 
@@ -187,8 +186,8 @@ pub fn FileManager() -> Element {
                                     refresh_key.set(next);
                                 }
 
-                                if let Some(resp) = imported {
-                                    if let Some(doc_id) = resp.document_id {
+                                if let Some(resp) = imported
+                                    && let Some(doc_id) = resp.document_id {
                                         let ext = resp.name
                                             .rsplit('.')
                                             .next()
@@ -204,7 +203,6 @@ pub fn FileManager() -> Element {
                                             nav.push(route);
                                         }
                                     }
-                                }
                             });
                         },
                     }

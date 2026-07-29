@@ -175,10 +175,10 @@ async fn main() -> anyhow::Result<()> {
     // 3. Ensure data directories exist before connecting
     // -----------------------------------------------------------------------
     let db_path = sqlite_url_to_path(&config.database.url)?;
-    if let Some(parent) = std::path::Path::new(&db_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
+    if let Some(parent) = std::path::Path::new(&db_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent).await?;
     }
 
     // -----------------------------------------------------------------------

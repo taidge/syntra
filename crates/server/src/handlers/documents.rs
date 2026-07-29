@@ -180,17 +180,15 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let room_id_for_new_document = if let Some(parent_id) = parent_id_str.as_deref() {
         match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
             Ok(Some(parent)) => {
-                if let Some(requested_room_id) = requested_room_id.as_deref() {
-                    if parent.room_id.as_deref() != Some(requested_room_id) {
-                        res.status_code(StatusCode::BAD_REQUEST);
-                        res.render(Json(ApiResponse::<()>::err(
-                            AppError::Validation(
-                                "room_id must match the parent folder room".into(),
-                            )
+                if let Some(requested_room_id) = requested_room_id.as_deref()
+                    && parent.room_id.as_deref() != Some(requested_room_id)
+                {
+                    res.status_code(StatusCode::BAD_REQUEST);
+                    res.render(Json(ApiResponse::<()>::err(
+                        AppError::Validation("room_id must match the parent folder room".into())
                             .to_response(),
-                        )));
-                        return;
-                    }
+                    )));
+                    return;
                 }
                 parent.room_id.clone()
             }
@@ -402,7 +400,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
             created_val,
             updated_val,
         ))) => {
-            let doc_type = DocumentType::from_str(&doc_type_str);
+            let doc_type = DocumentType::parse_lossy(&doc_type_str);
             let content: serde_json::Value = content_opt
                 .as_deref()
                 .and_then(|v| serde_json::from_str(v).ok())
@@ -709,10 +707,10 @@ pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         ))
         .execute(&mut conn);
 
-    if let Some(ref search_svc) = state.search {
-        if let Err(e) = search_svc.remove_document(&resolved_doc_id) {
-            tracing::warn!("Failed to remove document {resolved_doc_id} from search index: {e}");
-        }
+    if let Some(ref search_svc) = state.search
+        && let Err(e) = search_svc.remove_document(&resolved_doc_id)
+    {
+        tracing::warn!("Failed to remove document {resolved_doc_id} from search index: {e}");
     }
 
     crate::services::WebhookService::fire_event(
@@ -901,7 +899,7 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
 
     let content_str = content_opt.unwrap_or_default();
-    let doc_type = DocumentType::from_str(&doc_type_str);
+    let doc_type = DocumentType::parse_lossy(&doc_type_str);
     let content: serde_json::Value = serde_json::from_str(&content_str).unwrap_or_default();
 
     // Perform the export based on doc type and format.
@@ -1335,16 +1333,13 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
     };
 
     // Verify ownership.
-    let count: i64 = match d::documents
+    let count: i64 = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(&resolved_doc_id))
         .filter(f::owner_id.eq(&uid))
         .count()
         .get_result(&mut conn)
-    {
-        Ok(c) => c,
-        Err(_) => 0,
-    };
+        .unwrap_or_default();
 
     if count == 0 {
         res.status_code(StatusCode::NOT_FOUND);

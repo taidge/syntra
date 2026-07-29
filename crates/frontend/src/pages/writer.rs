@@ -69,10 +69,10 @@ fn cursor_offset(v: &serde_json::Value) -> Option<u32> {
     if let Some(n) = v.as_u64() {
         return Some(n as u32);
     }
-    if let Some(obj) = v.as_object() {
-        if let Some(o) = obj.get("offset").and_then(|x| x.as_u64()) {
-            return Some(o as u32);
-        }
+    if let Some(obj) = v.as_object()
+        && let Some(o) = obj.get("offset").and_then(|x| x.as_u64())
+    {
+        return Some(o as u32);
     }
     None
 }
@@ -152,10 +152,10 @@ const WRITER_BODY_ID: &str = "writer-body";
 
 fn exec_cmd(name: &str, value: Option<&str>) {
     if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        if let Some(el) = doc.get_element_by_id(WRITER_BODY_ID) {
-            if let Some(html_el) = el.dyn_ref::<web_sys::HtmlElement>() {
-                let _ = html_el.focus();
-            }
+        if let Some(el) = doc.get_element_by_id(WRITER_BODY_ID)
+            && let Some(html_el) = el.dyn_ref::<web_sys::HtmlElement>()
+        {
+            let _ = html_el.focus();
         }
         if let Ok(html_doc) = doc.dyn_into::<web_sys::HtmlDocument>() {
             let val = value.unwrap_or("");
@@ -170,6 +170,45 @@ fn editor_text() -> String {
         .and_then(|d| d.get_element_by_id(WRITER_BODY_ID))
         .and_then(|el| el.dyn_ref::<web_sys::HtmlElement>().map(|h| h.inner_text()))
         .unwrap_or_default()
+}
+
+fn plain_text_to_html(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            let escaped = line
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            if escaped.is_empty() {
+                "<div><br></div>".to_string()
+            } else {
+                format!("<div>{escaped}</div>")
+            }
+        })
+        .collect()
+}
+
+fn writer_replace_from_operation(payload: &serde_json::Value) -> Option<(String, String)> {
+    let user_id = payload.get("user_id")?.as_str()?.to_string();
+    let op_type = payload.get("op_type")?;
+    if op_type.get("type")?.as_str()? != "Replace" {
+        return None;
+    }
+    let path = op_type.get("path")?.as_array()?;
+    if path.len() != 1 || path[0].as_str()? != "body_text" {
+        return None;
+    }
+    let text = op_type.get("new_value")?.as_str()?.to_string();
+    Some((user_id, text))
+}
+
+fn apply_writer_text_to_dom(text: &str) {
+    if let Some(body) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(WRITER_BODY_ID))
+    {
+        body.set_inner_html(&plain_text_to_html(text));
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -470,21 +509,8 @@ pub fn Writer(id: String) -> Element {
             doc_title.set(doc.name.clone());
             let text = writer_content_to_plain(&doc.content);
             let wc = text.split_whitespace().count() as u32;
-            let cc = text.len() as u32;
-            let html = text
-                .split('\n')
-                .map(|line| {
-                    let escaped = line
-                        .replace('&', "&amp;")
-                        .replace('<', "&lt;")
-                        .replace('>', "&gt;");
-                    if escaped.is_empty() {
-                        "<div><br></div>".to_string()
-                    } else {
-                        format!("<div>{escaped}</div>")
-                    }
-                })
-                .collect::<String>();
+            let cc = text.chars().count() as u32;
+            let html = plain_text_to_html(&text);
             initial_html.set(html);
             doc_body_text.set(text);
             word_count.set(wc);
@@ -541,15 +567,15 @@ pub fn Writer(id: String) -> Element {
                         if off.is_some() {
                             existing.position = off;
                         }
-                        if let Some(u) = parsed.username {
-                            if existing.username.is_empty() {
-                                existing.username = u;
-                            }
+                        if let Some(u) = parsed.username
+                            && existing.username.is_empty()
+                        {
+                            existing.username = u;
                         }
-                        if let Some(c) = parsed.color {
-                            if existing.color.is_empty() {
-                                existing.color = c;
-                            }
+                        if let Some(c) = parsed.color
+                            && existing.color.is_empty()
+                        {
+                            existing.color = c;
                         }
                     } else {
                         list.push(RemoteCursor {
@@ -560,6 +586,23 @@ pub fn Writer(id: String) -> Element {
                         });
                     }
                 }
+            }
+            CollabMessage::Operation(payload) => {
+                let Some((author_id, text)) = writer_replace_from_operation(&payload) else {
+                    return;
+                };
+                if author_id == self_id {
+                    return;
+                }
+                let wc = text.split_whitespace().count() as u32;
+                let cc = text.chars().count() as u32;
+                apply_writer_text_to_dom(&text);
+                initial_html.set(plain_text_to_html(&text));
+                doc_body_text.set(text);
+                word_count.set(wc);
+                char_count.set(cc);
+                page_count.set(estimate_page_count(cc));
+                saved_status.set(crate::i18n::t("common.saved"));
             }
             _ => {}
         };
@@ -622,10 +665,10 @@ pub fn Writer(id: String) -> Element {
     });
 
     use_drop(move || {
-        if let Some(handle) = ws_handle.write().take() {
-            if let Some(ws) = handle.current_ws() {
-                let _ = ws.close();
-            }
+        if let Some(handle) = ws_handle.write().take()
+            && let Some(ws) = handle.current_ws()
+        {
+            let _ = ws.close();
         }
     });
 
@@ -675,12 +718,10 @@ pub fn Writer(id: String) -> Element {
                 insert_tracked_text(&data, "#2563eb", &author);
                 let v = *tick_inner.read();
                 tick_inner.set(v.wrapping_add(1));
-            } else if input_type.starts_with("delete") {
-                if wrap_selection_as_deleted(&author) {
-                    evt.prevent_default();
-                    let v = *tick_inner.read();
-                    tick_inner.set(v.wrapping_add(1));
-                }
+            } else if input_type.starts_with("delete") && wrap_selection_as_deleted(&author) {
+                evt.prevent_default();
+                let v = *tick_inner.read();
+                tick_inner.set(v.wrapping_add(1));
             }
         });
         let _ = body.add_event_listener_with_callback("beforeinput", cb.as_ref().unchecked_ref());
@@ -865,8 +906,8 @@ pub fn Writer(id: String) -> Element {
                                     changes_tick.set(v.wrapping_add(1));
                                 }
                                 "toggle-theme" => {
-                                    if let Some(window) = web_sys::window() {
-                                        if let Some(el) = window.document().and_then(|d| d.document_element()) {
+                                    if let Some(window) = web_sys::window()
+                                        && let Some(el) = window.document().and_then(|d| d.document_element()) {
                                             let cur = el.get_attribute("data-theme").unwrap_or_default();
                                             let next = if cur == "dark" { "light" } else { "dark" };
                                             let _ = el.set_attribute("data-theme", next);
@@ -874,7 +915,6 @@ pub fn Writer(id: String) -> Element {
                                                 let _ = storage.set_item("theme", next);
                                             }
                                         }
-                                    }
                                 }
                                 "format-bold" => { exec_cmd("bold", None); schedule_for_menu(); }
                                 "format-italic" => { exec_cmd("italic", None); schedule_for_menu(); }
@@ -1190,14 +1230,29 @@ pub fn Writer(id: String) -> Element {
                                     dangerous_inner_html: "{initial_html}",
                                     oninput: {
                                         let mut schedule_save = schedule_save.clone();
+                                        let self_id = local_user_id.clone();
                                         move |_evt: FormEvent| {
                                             let text = editor_text();
+                                            let previous = doc_body_text.read().clone();
                                             let wc = text.split_whitespace().count() as u32;
-                                            let cc = text.len() as u32;
+                                            let cc = text.chars().count() as u32;
                                             word_count.set(wc);
                                             char_count.set(cc);
                                             page_count.set(estimate_page_count(cc));
-                                            doc_body_text.set(text);
+                                            if previous != text {
+                                                if let Some(handle) = ws_handle.read().as_ref() {
+                                                    let _ = handle.send_operation(
+                                                        &self_id,
+                                                        serde_json::json!({
+                                                            "type": "Replace",
+                                                            "path": ["body_text"],
+                                                            "old_value": previous,
+                                                            "new_value": text.clone(),
+                                                        }),
+                                                    );
+                                                }
+                                                doc_body_text.set(text);
+                                            }
                                             schedule_save();
                                             if *track_pane_open.read() {
                                                 let v = *changes_tick.read();
@@ -1326,13 +1381,11 @@ pub fn Writer(id: String) -> Element {
                             "paste" => exec_cmd("paste", None),
                             "delete" => exec_cmd("delete", None),
                             "insert-link" => {
-                                if let Some(window) = web_sys::window() {
-                                    if let Ok(Some(url)) = window.prompt_with_message(&crate::i18n::t("editor.writer.link_prompt")) {
-                                        if !url.is_empty() {
+                                if let Some(window) = web_sys::window()
+                                    && let Ok(Some(url)) = window.prompt_with_message(&crate::i18n::t("editor.writer.link_prompt"))
+                                        && !url.is_empty() {
                                             exec_cmd("createLink", Some(&url));
                                         }
-                                    }
-                                }
                             }
                             other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
                         }
@@ -1431,5 +1484,43 @@ pub fn Writer(id: String) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod collaboration_tests {
+    use super::writer_replace_from_operation;
+    use crate::collab_client::CollabMessage;
+
+    #[test]
+    fn server_operation_message_restores_writer_text() {
+        let message: CollabMessage = serde_json::from_value(serde_json::json!({
+            "type": "Operation",
+            "id": {
+                "counter": 7,
+                "client_id": "4fd6e510-cf0c-4693-a623-f7a11bb62eef"
+            },
+            "timestamp": "2026-07-29T10:00:00Z",
+            "user_id": "70b7564f-a186-4cec-bdb2-adcb94cb95cb",
+            "base_version": 3,
+            "op_type": {
+                "type": "Replace",
+                "path": ["body_text"],
+                "old_value": "before",
+                "new_value": "after"
+            }
+        }))
+        .unwrap();
+
+        let CollabMessage::Operation(payload) = message else {
+            panic!("expected operation message");
+        };
+        assert_eq!(
+            writer_replace_from_operation(&payload),
+            Some((
+                "70b7564f-a186-4cec-bdb2-adcb94cb95cb".to_string(),
+                "after".to_string()
+            ))
+        );
     }
 }

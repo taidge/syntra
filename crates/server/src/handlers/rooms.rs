@@ -50,7 +50,7 @@ fn room_model_to_response(row: Room, member_count: u32) -> RoomResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
         description: row.description,
-        room_type: RoomType::from_str(&row.room_type),
+        room_type: RoomType::parse_lossy(&row.room_type),
         owner_id: row.owner_id.parse().unwrap_or_default(),
         is_archived: row.is_archived,
         member_count,

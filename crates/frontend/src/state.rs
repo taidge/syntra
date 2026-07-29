@@ -50,6 +50,7 @@ pub struct ErrorBody {
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    pub totp_code: Option<String>,
 }
 
 /// Request body for `POST /auth/register`.
@@ -130,10 +131,9 @@ pub fn load_auth_state() -> AuthState {
 pub fn persist_auth_state(state: &AuthState) {
     if let Some(storage) =
         web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        && let Ok(serialized) = serde_json::to_string(state)
     {
-        if let Ok(serialized) = serde_json::to_string(state) {
-            let _ = storage.set_item(AUTH_STORAGE_KEY, &serialized);
-        }
+        let _ = storage.set_item(AUTH_STORAGE_KEY, &serialized);
     }
 }
 
@@ -185,20 +185,17 @@ async fn fetch_with_opts(
 
     if !resp.ok() {
         // Try to extract a body for a better error message.
-        if let Ok(text_promise) = resp.text() {
-            if let Ok(text_val) = JsFuture::from(text_promise).await {
-                if let Some(text) = text_val.as_string() {
-                    // Attempt to parse the envelope error.
-                    if let Ok(envelope) =
-                        serde_json::from_str::<ApiResponse<serde_json::Value>>(&text)
-                    {
-                        if let Some(err) = envelope.error {
-                            return Err(err.message);
-                        }
-                    }
-                    return Err(format!("HTTP {}: {}", resp.status(), text));
-                }
+        if let Ok(text_promise) = resp.text()
+            && let Ok(text_val) = JsFuture::from(text_promise).await
+            && let Some(text) = text_val.as_string()
+        {
+            // Attempt to parse the envelope error.
+            if let Ok(envelope) = serde_json::from_str::<ApiResponse<serde_json::Value>>(&text)
+                && let Some(err) = envelope.error
+            {
+                return Err(err.message);
             }
+            return Err(format!("HTTP {}: {}", resp.status(), text));
         }
         return Err(format!("HTTP {}", resp.status()));
     }
@@ -303,18 +300,13 @@ pub async fn export_document(doc_id: &str, format: &str, token: &str) -> Result<
         .map_err(|_| "fetch did not return a Response".to_string())?;
 
     if !resp.ok() {
-        if let Ok(text_promise) = resp.text() {
-            if let Ok(text_val) = JsFuture::from(text_promise).await {
-                if let Some(text) = text_val.as_string() {
-                    if let Ok(envelope) =
-                        serde_json::from_str::<ApiResponse<serde_json::Value>>(&text)
-                    {
-                        if let Some(err) = envelope.error {
-                            return Err(err.message);
-                        }
-                    }
-                }
-            }
+        if let Ok(text_promise) = resp.text()
+            && let Ok(text_val) = JsFuture::from(text_promise).await
+            && let Some(text) = text_val.as_string()
+            && let Ok(envelope) = serde_json::from_str::<ApiResponse<serde_json::Value>>(&text)
+            && let Some(err) = envelope.error
+        {
+            return Err(err.message);
         }
         return Err(format!("HTTP {}", resp.status()));
     }
@@ -405,10 +397,10 @@ pub async fn upload_file(
         .ok_or_else(|| "response body is not a string".to_string())?;
 
     if !resp.ok() {
-        if let Ok(envelope) = serde_json::from_str::<ApiResponse<serde_json::Value>>(&text) {
-            if let Some(err) = envelope.error {
-                return Err(err.message);
-            }
+        if let Ok(envelope) = serde_json::from_str::<ApiResponse<serde_json::Value>>(&text)
+            && let Some(err) = envelope.error
+        {
+            return Err(err.message);
         }
         return Err(format!("HTTP {}: {}", resp.status(), text));
     }

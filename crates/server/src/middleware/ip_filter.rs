@@ -159,7 +159,6 @@ impl IpFilter {
                     }
                 })));
                 ctrl.skip_rest();
-                return;
             }
         } else {
             // Denylist mode: block the client if it matches a "deny" rule.
@@ -177,7 +176,6 @@ impl IpFilter {
                     }
                 })));
                 ctrl.skip_rest();
-                return;
             }
         }
     }

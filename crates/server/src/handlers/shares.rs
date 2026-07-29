@@ -149,25 +149,25 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
                 }),
             );
 
-            if let Some(target) = body.shared_with_user_id.map(|u| u.to_string()) {
-                if target != uid {
-                    let from_username = contrix_core::schema::users::dsl::users
-                        .filter(contrix_core::schema::users::dsl::id.eq(&uid))
-                        .select(contrix_core::schema::users::dsl::username)
-                        .first::<String>(&mut conn)
-                        .unwrap_or_else(|_| "Someone".to_string());
-                    let file_id = body.file_id.to_string();
-                    crate::services::NotificationService::create(
-                        &state.db,
-                        &state.notifications,
-                        &target,
-                        "share",
-                        "New share",
-                        &format!("{from_username} shared a file with you"),
-                        Some(&format!("/files/{file_id}")),
-                    )
-                    .await;
-                }
+            if let Some(target) = body.shared_with_user_id.map(|u| u.to_string())
+                && target != uid
+            {
+                let from_username = contrix_core::schema::users::dsl::users
+                    .filter(contrix_core::schema::users::dsl::id.eq(&uid))
+                    .select(contrix_core::schema::users::dsl::username)
+                    .first::<String>(&mut conn)
+                    .unwrap_or_else(|_| "Someone".to_string());
+                let file_id = body.file_id.to_string();
+                crate::services::NotificationService::create(
+                    &state.db,
+                    &state.notifications,
+                    &target,
+                    "share",
+                    "New share",
+                    &format!("{from_username} shared a file with you"),
+                    Some(&format!("/files/{file_id}")),
+                )
+                .await;
             }
 
             let resp = ShareResponse {
@@ -260,7 +260,7 @@ pub async fn get_share(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 file_id: fid.parse().unwrap_or_default(),
                 shared_by_user_id: sby.parse().unwrap_or_default(),
                 shared_with_user_id: sw.as_deref().and_then(|v| v.parse().ok()),
-                permission: SharePermission::from_str(&perm),
+                permission: SharePermission::parse_lossy(&perm),
                 public_token: pt,
                 expires_at: exp
                     .as_deref()
@@ -524,7 +524,7 @@ pub async fn list_file_shares(req: &mut Request, depot: &mut Depot, res: &mut Re
                         file_id: fid.parse().unwrap_or_default(),
                         shared_by_user_id: sby.parse().unwrap_or_default(),
                         shared_with_user_id: sw.as_deref().and_then(|v| v.parse().ok()),
-                        permission: SharePermission::from_str(&perm),
+                        permission: SharePermission::parse_lossy(&perm),
                         public_token: pt,
                         expires_at: exp
                             .as_deref()
@@ -606,16 +606,15 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
     };
 
     // Reject expired shares.
-    if let Some(exp) = expires_at {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&exp) {
-            if dt.with_timezone(&Utc) < Utc::now() {
-                res.status_code(StatusCode::GONE);
-                res.render(Json(ApiResponse::<()>::err(
-                    AppError::NotFound("This share has expired".into()).to_response(),
-                )));
-                return;
-            }
-        }
+    if let Some(exp) = expires_at
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&exp)
+        && dt.with_timezone(&Utc) < Utc::now()
+    {
+        res.status_code(StatusCode::GONE);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::NotFound("This share has expired".into()).to_response(),
+        )));
+        return;
     }
 
     // Enforce the share password when one is set.

@@ -1,23 +1,14 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use diesel::prelude::*;
-use salvo::prelude::*;
-use sha2::{Digest, Sha256};
-
 use contrix_core::dto::{ApiResponse, SessionResponse};
 use contrix_core::error::AppError;
 use contrix_core::schema::sessions::dsl as s;
+use diesel::prelude::*;
+use salvo::prelude::*;
 
-use crate::middleware::auth::get_user_id;
+use crate::middleware::auth::{get_user_id, hash_token};
 use crate::state::AppState;
-
-/// Hash the bearer token to match against the `token_hash` column.
-fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
 
 /// Try to resolve the current session id from the Authorization header.
 /// Falls back to the most-recently-active session for the user.

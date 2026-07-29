@@ -106,22 +106,22 @@ fn element_bbox(e: &serde_json::Value) -> Option<(f64, f64, f64, f64)> {
             let mut max_x = f64::NEG_INFINITY;
             let mut max_y = f64::NEG_INFINITY;
             for p in pts {
-                if let Some(arr) = p.as_array() {
-                    if arr.len() == 2 {
-                        let x = arr[0].as_f64().unwrap_or(0.0);
-                        let y = arr[1].as_f64().unwrap_or(0.0);
-                        if x < min_x {
-                            min_x = x;
-                        }
-                        if y < min_y {
-                            min_y = y;
-                        }
-                        if x > max_x {
-                            max_x = x;
-                        }
-                        if y > max_y {
-                            max_y = y;
-                        }
+                if let Some(arr) = p.as_array()
+                    && arr.len() == 2
+                {
+                    let x = arr[0].as_f64().unwrap_or(0.0);
+                    let y = arr[1].as_f64().unwrap_or(0.0);
+                    if x < min_x {
+                        min_x = x;
+                    }
+                    if y < min_y {
+                        min_y = y;
+                    }
+                    if x > max_x {
+                        max_x = x;
+                    }
+                    if y > max_y {
+                        max_y = y;
                     }
                 }
             }
@@ -152,10 +152,13 @@ fn bbox_contains(b: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
 
 fn find_element_at(elements: &[serde_json::Value], x: f64, y: f64) -> Option<usize> {
     for (i, el) in elements.iter().enumerate().rev() {
-        if let Some((x1, y1, x2, y2)) = element_bbox(el) {
-            if x >= x1 - 4.0 && x <= x2 + 4.0 && y >= y1 - 4.0 && y <= y2 + 4.0 {
-                return Some(i);
-            }
+        if let Some((x1, y1, x2, y2)) = element_bbox(el)
+            && x >= x1 - 4.0
+            && x <= x2 + 4.0
+            && y >= y1 - 4.0
+            && y <= y2 + 4.0
+        {
+            return Some(i);
         }
     }
     None
@@ -451,8 +454,8 @@ pub fn Whiteboard(id: String) -> Element {
     let mut doc_title = use_signal(|| crate::i18n::t("editor.whiteboard.untitled"));
     let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
     let mut zoom = use_signal(|| 100u32);
-    let mut elements = use_signal(|| Vec::<serde_json::Value>::new());
-    let mut undo_stack = use_signal(|| Vec::<Vec<serde_json::Value>>::new());
+    let mut elements = use_signal(Vec::<serde_json::Value>::new);
+    let mut undo_stack = use_signal(Vec::<Vec<serde_json::Value>>::new);
     let mut loaded = use_signal(|| false);
     let mut draft = use_signal(|| None::<DraftStroke>);
     let mut is_drawing = use_signal(|| false);
@@ -522,7 +525,6 @@ pub fn Whiteboard(id: String) -> Element {
     let schedule_save = {
         let save_timer = save_timer.clone();
         let perform_save = perform_save.clone();
-        let serialize_whiteboard = serialize_whiteboard.clone();
         move || {
             if !*loaded.read() {
                 return;
@@ -542,7 +544,6 @@ pub fn Whiteboard(id: String) -> Element {
     let flush_save = {
         let save_timer = save_timer.clone();
         let perform_save = perform_save.clone();
-        let serialize_whiteboard = serialize_whiteboard.clone();
         move || {
             if !*loaded.read() {
                 return;
@@ -651,8 +652,8 @@ pub fn Whiteboard(id: String) -> Element {
                                     }
                                 }
                                 "toggle-theme" => {
-                                    if let Some(window) = web_sys::window() {
-                                        if let Some(el) = window.document().and_then(|d| d.document_element()) {
+                                    if let Some(window) = web_sys::window()
+                                        && let Some(el) = window.document().and_then(|d| d.document_element()) {
                                             let cur = el.get_attribute("data-theme").unwrap_or_default();
                                             let next = if cur == "dark" { "light" } else { "dark" };
                                             let _ = el.set_attribute("data-theme", next);
@@ -660,7 +661,6 @@ pub fn Whiteboard(id: String) -> Element {
                                                 let _ = storage.set_item("theme", next);
                                             }
                                         }
-                                    }
                                 }
                                 "print" => {
                                     if let Some(w) = web_sys::window() { let _ = w.print(); }
@@ -1081,7 +1081,7 @@ pub fn Whiteboard(id: String) -> Element {
                                         .and_then(|v| v.as_array())
                                         .map(|a| a.iter().filter_map(|p| {
                                             let arr = p.as_array()?;
-                                            Some((arr.get(0)?.as_f64()?, arr.get(1)?.as_f64()?))
+                                            Some((arr.first()?.as_f64()?, arr.get(1)?.as_f64()?))
                                         }).collect())
                                         .unwrap_or_default();
                                     let d = pen_path_d(&pts);
@@ -1307,8 +1307,8 @@ pub fn Whiteboard(id: String) -> Element {
                                     move |evt: KeyboardEvent| {
                                         if evt.key() == Key::Enter {
                                             evt.prevent_default();
-                                            if let Some((p, c)) = text_input.read().clone() {
-                                                if !c.is_empty() {
+                                            if let Some((p, c)) = text_input.read().clone()
+                                                && !c.is_empty() {
                                                     push_undo_snapshot();
                                                     elements.write().push(serde_json::json!({
                                                         "type": "text",
@@ -1320,7 +1320,6 @@ pub fn Whiteboard(id: String) -> Element {
                                                     }));
                                                     schedule_save();
                                                 }
-                                            }
                                             text_input.set(None);
                                         } else if evt.key() == Key::Escape {
                                             evt.prevent_default();
@@ -1329,8 +1328,8 @@ pub fn Whiteboard(id: String) -> Element {
                                     }
                                 },
                                 onblur: move |_| {
-                                    if let Some((p, c)) = text_input.read().clone() {
-                                        if !c.is_empty() {
+                                    if let Some((p, c)) = text_input.read().clone()
+                                        && !c.is_empty() {
                                             elements.write().push(serde_json::json!({
                                                 "type": "text",
                                                 "x": p.0,
@@ -1340,7 +1339,6 @@ pub fn Whiteboard(id: String) -> Element {
                                                 "size": 16,
                                             }));
                                         }
-                                    }
                                     text_input.set(None);
                                 },
                             }

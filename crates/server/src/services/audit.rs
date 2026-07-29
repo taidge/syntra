@@ -8,6 +8,13 @@ use contrix_core::schema::activity_logs::dsl as al;
 
 pub struct AuditService;
 
+#[derive(Default)]
+pub struct AuditContext<'a> {
+    pub details: Option<&'a str>,
+    pub ip_address: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+}
+
 impl AuditService {
     /// Log an activity to the `activity_logs` table.
     ///
@@ -19,9 +26,7 @@ impl AuditService {
         action: &str,
         resource_type: &str,
         resource_id: &str,
-        details: Option<&str>,
-        ip_address: Option<&str>,
-        user_agent: Option<&str>,
+        context: AuditContext<'_>,
     ) {
         let entry = NewActivityLog {
             id: Uuid::new_v4().to_string(),
@@ -29,10 +34,10 @@ impl AuditService {
             action: action.to_string(),
             resource_type: resource_type.to_string(),
             resource_id: resource_id.to_string(),
-            details: details.map(|s| s.to_string()),
+            details: context.details.map(|s| s.to_string()),
             created_at: Utc::now().to_rfc3339(),
-            ip_address: ip_address.map(|s| s.to_string()),
-            user_agent: user_agent.map(|s| s.to_string()),
+            ip_address: context.ip_address.map(|s| s.to_string()),
+            user_agent: context.user_agent.map(|s| s.to_string()),
         };
 
         if let Err(e) = diesel::insert_into(al::activity_logs)

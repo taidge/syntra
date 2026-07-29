@@ -23,7 +23,7 @@ impl UserRole {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s {
             "admin" => UserRole::Admin,
             "viewer" => UserRole::Viewer,
@@ -142,7 +142,7 @@ impl DocumentType {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s {
             "writer" => DocumentType::Writer,
             "calc" => DocumentType::Calc,
@@ -233,7 +233,7 @@ impl SharePermission {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s {
             "write" => SharePermission::Write,
             "admin" => SharePermission::Admin,
@@ -337,7 +337,7 @@ impl NotificationType {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s {
             "share" => NotificationType::Share,
             "comment" => NotificationType::Comment,
@@ -434,7 +434,7 @@ impl RoomType {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_lossy(s: &str) -> Self {
         match s {
             "custom" => RoomType::Custom,
             "public" => RoomType::Public,

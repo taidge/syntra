@@ -121,8 +121,7 @@ fn slide_to_xml(slide: &Slide) -> String {
 <p:grpSpPr/>"#,
     );
 
-    let mut sp_id: u32 = 2;
-    for element in &slide.elements {
+    for (sp_id, element) in (2_u32..).zip(slide.elements.iter()) {
         match element {
             SlideElement::TextBox(tb) => text_box_to_xml(tb, sp_id, &mut xml),
             SlideElement::Shape(shape) => shape_to_xml(shape, sp_id, &mut xml),
@@ -142,7 +141,6 @@ fn slide_to_xml(slide: &Slide) -> String {
                 placeholder_box_to_xml(0.0, 0.0, 200.0, 50.0, "[Group]", sp_id, &mut xml)
             }
         }
-        sp_id += 1;
     }
 
     xml.push_str("</p:spTree></p:cSld></p:sld>");
@@ -431,10 +429,8 @@ fn parse_slide_texts(xml: &str) -> Result<Vec<String>, String> {
                         in_txbody = true;
                     }
                 }
-                b"a:t" => {
-                    if in_txbody {
-                        in_t = true;
-                    }
+                b"a:t" if in_txbody => {
+                    in_t = true;
                 }
                 _ => {}
             },

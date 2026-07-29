@@ -77,7 +77,7 @@ async fn perform_conversion(
     };
 
     let content_str = content_opt.unwrap_or_default();
-    let doc_type = DocumentType::from_str(&doc_type_str);
+    let doc_type = DocumentType::parse_lossy(&doc_type_str);
     let content: serde_json::Value = serde_json::from_str(&content_str).unwrap_or_default();
 
     // Perform the export based on doc type and format.

@@ -8,8 +8,9 @@ use crate::state::{self, AuthResponseData, AuthState, LoginRequest, UserInfo};
 pub fn Login() -> Element {
     let mut auth = use_context::<Signal<AuthState>>();
     let nav = use_navigator();
-    let mut email = use_signal(|| String::new());
-    let mut password = use_signal(|| String::new());
+    let mut email = use_signal(String::new);
+    let mut password = use_signal(String::new);
+    let mut totp_code = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut loading = use_signal(|| false);
 
@@ -18,6 +19,7 @@ pub fn Login() -> Element {
 
         let email_val = email.read().clone();
         let password_val = password.read().clone();
+        let totp_code_val = totp_code.read().trim().to_string();
 
         // Basic client-side validation
         if email_val.is_empty() || password_val.is_empty() {
@@ -28,11 +30,12 @@ pub fn Login() -> Element {
         loading.set(true);
         error.set(None);
 
-        let nav = nav.clone();
+        let nav = nav;
         spawn(async move {
             let body = LoginRequest {
                 email: email_val,
                 password: password_val,
+                totp_code: (!totp_code_val.is_empty()).then_some(totp_code_val),
             };
             match state::api_post::<AuthResponseData, _>("/auth/login", &body, "").await {
                 Ok(resp) => {
@@ -97,6 +100,29 @@ pub fn Login() -> Element {
                             value: "{password}",
                             oninput: move |e| password.set(e.value()),
                         }
+                    }
+
+                    div { class: "form-group",
+                        label { r#for: "totp-code", {crate::i18n::t("auth.totp_code")} }
+                        input {
+                            id: "totp-code",
+                            r#type: "text",
+                            inputmode: "text",
+                            maxlength: "8",
+                            autocomplete: "one-time-code",
+                            class: "form-input",
+                            placeholder: crate::i18n::t("auth.totp_placeholder"),
+                            value: "{totp_code}",
+                            oninput: move |e| {
+                                let filtered: String = e.value()
+                                    .chars()
+                                    .filter(|c| c.is_ascii_hexdigit())
+                                    .take(8)
+                                    .collect();
+                                totp_code.set(filtered);
+                            },
+                        }
+                        small { class: "form-hint", {crate::i18n::t("auth.totp_hint")} }
                     }
 
                     if let Some(err) = error() {

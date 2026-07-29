@@ -29,13 +29,11 @@ pub fn MobileBar() -> Element {
             button {
                 class: "mobile-bar-item",
                 onclick: move |_| {
-                    if let Some(window) = web_sys::window() {
-                        if let Some(doc) = window.document() {
-                            if let Ok(event) = web_sys::CustomEvent::new("contrix:open-ai") {
+                    if let Some(window) = web_sys::window()
+                        && let Some(doc) = window.document()
+                            && let Ok(event) = web_sys::CustomEvent::new("contrix:open-ai") {
                                 let _ = doc.dispatch_event(&event);
                             }
-                        }
-                    }
                 },
                 aria_label: "{ai_label}",
                 span { class: "mobile-bar-icon", "\u{2728}" }

@@ -46,17 +46,14 @@ pub fn Profile() -> Element {
     let pw_status = use_signal(String::new);
     let mut initialized = use_signal(|| false);
 
-    {
-        let me = me.clone();
-        use_effect(move || {
-            if !*initialized.read() {
-                if let Some(Ok(p)) = me.read().as_ref() {
-                    display_name.set(p.display_name.clone().unwrap_or_default());
-                    initialized.set(true);
-                }
-            }
-        });
-    }
+    use_effect(move || {
+        if !*initialized.read()
+            && let Some(Ok(p)) = me.read().as_ref()
+        {
+            display_name.set(p.display_name.clone().unwrap_or_default());
+            initialized.set(true);
+        }
+    });
 
     let _locale = use_context::<Signal<String>>();
     let title = crate::i18n::t("profile.title");

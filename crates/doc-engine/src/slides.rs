@@ -374,7 +374,7 @@ pub struct ElementGroup {
 ///
 /// This mirrors [`crate::writer::TextRun`] but is a standalone type to keep
 /// the modules decoupled.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlideTextRun {
     pub text: String,
     pub bold: bool,
@@ -385,22 +385,6 @@ pub struct SlideTextRun {
     pub font_size: Option<f32>,
     pub color: Option<String>,
     pub link: Option<String>,
-}
-
-impl Default for SlideTextRun {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            bold: false,
-            italic: false,
-            underline: false,
-            strikethrough: false,
-            font_family: None,
-            font_size: None,
-            color: None,
-            link: None,
-        }
-    }
 }
 
 impl SlideTextRun {
@@ -538,10 +522,8 @@ fn elements_contain_text(elements: &[SlideElement], lower_query: &str) -> bool {
                     }
                 }
             }
-            SlideElement::Group(group) => {
-                if elements_contain_text(&group.elements, lower_query) {
-                    return true;
-                }
+            SlideElement::Group(group) if elements_contain_text(&group.elements, lower_query) => {
+                return true;
             }
             _ => {}
         }

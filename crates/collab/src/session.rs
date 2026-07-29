@@ -169,12 +169,21 @@ impl CollabSession {
     }
 
     /// Apply an operation, bump the version, broadcast it, and return the
-    /// new version number.
+    /// new version together with the transformed operation.
     ///
     /// Before acceptance the operation is transformed against every operation
-    /// that was applied *after* the client's last known version (inferred
-    /// from the operation's counter).
-    pub fn apply_operation(&mut self, mut op: Operation) -> Result<u64, String> {
+    /// that was applied after the client's explicit `base_version`.
+    pub fn apply_operation(&mut self, mut op: Operation) -> Result<(u64, Operation), String> {
+        if op.base_version > self.version {
+            return Err(format!(
+                "operation base version {} is ahead of server version {}",
+                op.base_version, self.version
+            ));
+        }
+        if self.operations.iter().any(|existing| existing.id == op.id) {
+            return Err("duplicate operation id".to_string());
+        }
+
         // Transform against every operation applied after the version this op
         // was generated against. `base_version` is the server version the
         // client had seen — NOT the per-client Lamport counter, which bears no
@@ -211,7 +220,7 @@ impl CollabSession {
             );
         }
 
-        Ok(self.version)
+        Ok((self.version, op))
     }
 
     /// Undo the last operation by the given user.
@@ -267,5 +276,64 @@ impl CollabSession {
     /// `true` when there are no participants.
     pub fn is_empty(&self) -> bool {
         self.participants.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operation::{OpType, Operation};
+
+    fn insert(user_id: Uuid, client_id: Uuid, counter: u64, base_version: u64) -> Operation {
+        Operation::new(
+            user_id,
+            client_id,
+            counter,
+            OpType::Insert {
+                path: vec!["body".into()],
+                index: 0,
+                content: "x".into(),
+            },
+        )
+        .with_base_version(base_version)
+    }
+
+    #[test]
+    fn rejects_future_base_version() {
+        let mut session = CollabSession::new(Uuid::new_v4());
+        let op = insert(Uuid::new_v4(), Uuid::new_v4(), 1, 1);
+        assert!(session.apply_operation(op).is_err());
+        assert_eq!(session.version, 0);
+    }
+
+    #[test]
+    fn rejects_duplicate_operation_id() {
+        let mut session = CollabSession::new(Uuid::new_v4());
+        let op = insert(Uuid::new_v4(), Uuid::new_v4(), 1, 0);
+        session.apply_operation(op.clone()).unwrap();
+        assert!(session.apply_operation(op).is_err());
+        assert_eq!(session.version, 1);
+    }
+
+    #[test]
+    fn returns_the_transformed_operation() {
+        let mut session = CollabSession::new(Uuid::new_v4());
+        let first = insert(Uuid::new_v4(), Uuid::new_v4(), 1, 0);
+        session.apply_operation(first).unwrap();
+
+        let second = Operation::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            1,
+            OpType::Insert {
+                path: vec!["body".into()],
+                index: 1,
+                content: "y".into(),
+            },
+        )
+        .with_base_version(0);
+        let (version, applied) = session.apply_operation(second).unwrap();
+        assert_eq!(version, 2);
+        assert!(matches!(applied.op_type, OpType::Insert { index: 2, .. }));
     }
 }

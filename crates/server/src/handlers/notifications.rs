@@ -70,7 +70,7 @@ pub async fn list_notifications(depot: &mut Depot, res: &mut Response) {
                 .map(
                     |(nid, ntype, ntitle, nmsg, nlink, nread, ncat)| NotificationResponse {
                         id: nid.parse().unwrap_or_default(),
-                        notification_type: NotificationType::from_str(&ntype),
+                        notification_type: NotificationType::parse_lossy(&ntype),
                         title: ntitle,
                         message: nmsg.unwrap_or_default(),
                         link: nlink,

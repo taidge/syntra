@@ -132,17 +132,31 @@ async fn handle_ws(
             Err(_) => return,
         };
 
+    // Establish the version baseline before the client sends its first
+    // operation. The editor has already loaded document content via HTTP, so
+    // this message carries only the collaboration session version.
+    let version = collab.session_version(document_id).await.unwrap_or(0);
+    let initial = CollabMessage::DocumentState {
+        content: serde_json::Value::Null,
+        version,
+    };
+    if let Ok(text) = serde_json::to_string(&initial)
+        && ws.send(Message::text(text)).await.is_err()
+    {
+        collab.leave_session(document_id, user_id).await;
+        return;
+    }
+
     loop {
         tokio::select! {
             // Broadcast channel -> WebSocket (send to client).
             msg = rx.recv() => {
                 match msg {
                     Ok(collab_msg) => {
-                        if let Ok(text) = serde_json::to_string(&collab_msg) {
-                            if ws.send(Message::text(text)).await.is_err() {
+                        if let Ok(text) = serde_json::to_string(&collab_msg)
+                            && ws.send(Message::text(text)).await.is_err() {
                                 break;
                             }
-                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // Missed some messages, continue.
@@ -157,30 +171,52 @@ async fn handle_ws(
             msg = ws.recv() => {
                 match msg {
                     Some(Ok(msg)) => {
-                        if let Ok(text) = msg.as_str() {
-                            if let Ok(collab_msg) = serde_json::from_str::<CollabMessage>(text) {
+                        if let Ok(text) = msg.as_str()
+                            && let Ok(collab_msg) = serde_json::from_str::<CollabMessage>(text) {
                                 match collab_msg {
                                     CollabMessage::Operation(mut op) => {
                                         // Never trust the client-supplied author;
                                         // bind the operation to the authenticated user.
                                         op.user_id = user_id;
-                                        let version = collab.apply_operation(document_id, op.clone()).await;
-                                        // Persist to DB
-                                        if let Ok(ver) = &version {
-                                            if let Ok(mut conn) = state.db.get() {
-                                                use diesel::prelude::*;
-                                                use contrix_core::schema::operation_log::dsl as ol;
-                                                use contrix_core::models::NewOperationLogEntry;
-                                                let entry = NewOperationLogEntry {
-                                                    id: Uuid::new_v4().to_string(),
-                                                    document_id: document_id.to_string(),
-                                                    user_id: op.user_id.to_string(),
-                                                    op_type: serde_json::to_string(&op.op_type).unwrap_or_default(),
-                                                    op_data: serde_json::to_string(&op).unwrap_or_default(),
-                                                    version: *ver as i32,
-                                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                        match collab.apply_operation(document_id, op).await {
+                                            Ok((version, applied_op)) => {
+                                                // Persist the transformed operation that the
+                                                // server actually broadcast/applied, not the
+                                                // client's pre-transform payload.
+                                                if let Ok(mut conn) = state.db.get() {
+                                                    use contrix_core::models::NewOperationLogEntry;
+                                                    use contrix_core::schema::operation_log::dsl as ol;
+                                                    use diesel::prelude::*;
+                                                    let entry = NewOperationLogEntry {
+                                                        id: Uuid::new_v4().to_string(),
+                                                        document_id: document_id.to_string(),
+                                                        user_id: applied_op.user_id.to_string(),
+                                                        op_type: serde_json::to_string(&applied_op.op_type).unwrap_or_default(),
+                                                        op_data: serde_json::to_string(&applied_op).unwrap_or_default(),
+                                                        version: version as i32,
+                                                        created_at: chrono::Utc::now().to_rfc3339(),
+                                                    };
+                                                    if let Err(error) = diesel::insert_into(ol::operation_log)
+                                                        .values(&entry)
+                                                        .execute(&mut conn)
+                                                    {
+                                                        tracing::error!(
+                                                            document_id = %document_id,
+                                                            version,
+                                                            "failed to persist collaboration operation: {error}"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                let response = CollabMessage::Error {
+                                                    message: error,
                                                 };
-                                                let _ = diesel::insert_into(ol::operation_log).values(&entry).execute(&mut conn);
+                                                if let Ok(text) = serde_json::to_string(&response)
+                                                    && ws.send(Message::text(text)).await.is_err()
+                                                {
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
@@ -193,7 +229,6 @@ async fn handle_ws(
                                     _ => {}
                                 }
                             }
-                        }
                     }
                     Some(Err(_)) | None => {
                         // Client disconnected.

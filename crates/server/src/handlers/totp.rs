@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+};
 use chrono::Utc;
 use diesel::prelude::*;
 use rand::RngExt;
@@ -61,6 +65,19 @@ fn generate_backup_codes() -> Vec<String> {
         .map(|_| {
             let val: u32 = rng.random();
             format!("{:08x}", val)
+        })
+        .collect()
+}
+
+fn hash_backup_codes(codes: &[String]) -> Result<Vec<String>, AppError> {
+    codes
+        .iter()
+        .map(|code| {
+            let salt = SaltString::generate(&mut OsRng);
+            Argon2::default()
+                .hash_password(code.as_bytes(), &salt)
+                .map(|hash| hash.to_string())
+                .map_err(|e| AppError::Internal(format!("Failed to hash backup code: {e}")))
         })
         .collect()
 }
@@ -202,23 +219,100 @@ fn totp_value(secret: &[u8], counter: u64) -> u32 {
 
 /// Verify a user-supplied 6-digit code against a base32 secret, allowing a
 /// ±1 time-step (30s) window to tolerate clock skew.
-fn verify_totp_code(secret_b32: &str, code: &str) -> bool {
+pub(crate) fn verify_totp_code(secret_b32: &str, code: &str) -> bool {
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
     let code_num: u32 = match code.parse() {
         Ok(n) => n,
         Err(_) => return false,
     };
+    if current_totp_code(secret_b32).as_deref() == Some(code) {
+        return true;
+    }
     let secret = match base32_decode(secret_b32) {
         Some(s) if !s.is_empty() => s,
         _ => return false,
     };
-    let step = (Utc::now().timestamp() / 30) as i64;
-    for w in [-1i64, 0, 1] {
+    let step = Utc::now().timestamp() / 30;
+    for w in [-1i64, 1] {
         let counter = (step + w) as u64;
         if totp_value(&secret, counter) == code_num {
             return true;
         }
     }
     false
+}
+
+/// Verify the active TOTP code or atomically consume one backup code.
+///
+/// Backup codes are stored as Argon2 hashes. The optimistic `backup_codes`
+/// predicate prevents two concurrent requests from consuming the same code.
+pub(crate) fn verify_second_factor(
+    conn: &mut diesel::SqliteConnection,
+    totp: &TotpSecret,
+    code: &str,
+) -> Result<bool, AppError> {
+    if verify_totp_code(&totp.secret, code) {
+        return Ok(true);
+    }
+    if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(false);
+    }
+
+    let Some(serialized) = totp.backup_codes.as_deref() else {
+        return Ok(false);
+    };
+    let codes: Vec<String> = serde_json::from_str(serialized)
+        .map_err(|e| AppError::Internal(format!("Invalid stored backup codes: {e}")))?;
+    let Some(matched_index) = codes.iter().position(|stored| {
+        PasswordHash::new(stored).is_ok_and(|hash| {
+            Argon2::default()
+                .verify_password(code.as_bytes(), &hash)
+                .is_ok()
+        }) || stored.eq_ignore_ascii_case(code)
+    }) else {
+        return Ok(false);
+    };
+
+    let mut remaining = Vec::with_capacity(codes.len().saturating_sub(1));
+    for (index, stored) in codes.into_iter().enumerate() {
+        if index == matched_index {
+            continue;
+        }
+        if PasswordHash::new(&stored).is_ok() {
+            remaining.push(stored);
+        } else {
+            // Transparently upgrade backup codes created by older versions,
+            // which stored the random codes in plaintext JSON.
+            remaining.extend(hash_backup_codes(&[stored])?);
+        }
+    }
+    let updated = serde_json::to_string(&remaining)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize backup codes: {e}")))?;
+    let changed = diesel::update(
+        ts::totp_secrets
+            .filter(ts::id.eq(&totp.id))
+            .filter(ts::backup_codes.eq(totp.backup_codes.clone())),
+    )
+    .set((
+        ts::backup_codes.eq(Some(updated)),
+        ts::updated_at.eq(Utc::now().to_rfc3339()),
+    ))
+    .execute(conn)
+    .map_err(|e| AppError::Database(format!("Failed to consume backup code: {e}")))?;
+    Ok(changed == 1)
+}
+
+/// Return the current six-digit code for a base32 secret. This is useful for
+/// protocol-level tests and does not expose any stored user secret.
+pub fn current_totp_code(secret_b32: &str) -> Option<String> {
+    let secret = base32_decode(secret_b32)?;
+    if secret.is_empty() {
+        return None;
+    }
+    let counter = (Utc::now().timestamp() / 30) as u64;
+    Some(format!("{:06}", totp_value(&secret, counter)))
 }
 
 #[cfg(test)]
@@ -238,6 +332,15 @@ mod totp_tests {
         let bytes = b"hello world";
         let encoded = base32_encode(bytes);
         assert_eq!(base32_decode(&encoded).as_deref(), Some(&bytes[..]));
+    }
+
+    #[test]
+    fn totp_verification_requires_exactly_six_digits() {
+        let secret = base32_encode(b"12345678901234567890");
+        let code = current_totp_code(&secret).unwrap();
+        assert!(verify_totp_code(&secret, &code));
+        assert!(!verify_totp_code(&secret, "12345"));
+        assert!(!verify_totp_code(&secret, "12345a"));
     }
 }
 
@@ -320,6 +423,14 @@ pub async fn setup_totp(depot: &mut Depot, res: &mut Response) {
 
     let secret = generate_totp_secret();
     let backup_codes = generate_backup_codes();
+    let backup_code_hashes = match hash_backup_codes(&backup_codes) {
+        Ok(hashes) => hashes,
+        Err(error) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
+            return;
+        }
+    };
     let qr_url = build_otpauth_url(&user_row.email, &secret);
     let now = Utc::now();
 
@@ -328,7 +439,7 @@ pub async fn setup_totp(depot: &mut Depot, res: &mut Response) {
         user_id: uid.clone(),
         secret: secret.clone(),
         is_enabled: false,
-        backup_codes: Some(serde_json::to_string(&backup_codes).unwrap_or_default()),
+        backup_codes: Some(serde_json::to_string(&backup_code_hashes).unwrap_or_default()),
         created_at: now.to_rfc3339(),
         updated_at: now.to_rfc3339(),
     };

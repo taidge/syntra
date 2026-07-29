@@ -205,11 +205,11 @@ async fn deliver_with_retry(
 
         // Attach only the HMAC signature derived from the secret. The raw
         // secret is never transmitted — receivers verify via the signature.
-        if let Some(ref secret) = hook.secret {
-            if !secret.is_empty() {
-                let signature = compute_signature(secret, &payload);
-                request = request.header("X-Webhook-Signature", signature);
-            }
+        if let Some(ref secret) = hook.secret
+            && !secret.is_empty()
+        {
+            let signature = compute_signature(secret, &payload);
+            request = request.header("X-Webhook-Signature", signature);
         }
 
         let result = request.body(payload.clone()).send().await;

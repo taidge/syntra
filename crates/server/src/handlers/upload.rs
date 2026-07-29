@@ -107,12 +107,12 @@ fn verify_upload_destination(
             return Err(AppError::NotFound("Parent folder not found".into()));
         }
 
-        if let Some(requested_room_id) = room_id {
-            if parent.room_id.as_deref() != Some(requested_room_id) {
-                return Err(AppError::Validation(
-                    "room_id must match the parent folder room".into(),
-                ));
-            }
+        if let Some(requested_room_id) = room_id
+            && parent.room_id.as_deref() != Some(requested_room_id)
+        {
+            return Err(AppError::Validation(
+                "room_id must match the parent folder room".into(),
+            ));
         }
 
         Ok(parent.room_id)

@@ -58,12 +58,11 @@ pub fn PostMessageBridge() -> Element {
             match msg {
                 HostMessage::Ping => post_to_host(&HostMessage::Pong),
                 HostMessage::Save => {
-                    if let Some(window) = web_sys::window() {
-                        if let Some(doc) = window.document() {
-                            if let Ok(event) = web_sys::CustomEvent::new("contrix:save") {
-                                let _ = doc.dispatch_event(&event);
-                            }
-                        }
+                    if let Some(window) = web_sys::window()
+                        && let Some(doc) = window.document()
+                        && let Ok(event) = web_sys::CustomEvent::new("contrix:save")
+                    {
+                        let _ = doc.dispatch_event(&event);
                     }
                 }
                 HostMessage::LoadDocument { document_id } => {

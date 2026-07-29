@@ -8,10 +8,10 @@ use crate::state::{self, AuthResponseData, AuthState, RegisterRequest, UserInfo}
 pub fn Register() -> Element {
     let mut auth = use_context::<Signal<AuthState>>();
     let nav = use_navigator();
-    let mut username = use_signal(|| String::new());
-    let mut email = use_signal(|| String::new());
-    let mut password = use_signal(|| String::new());
-    let mut confirm_password = use_signal(|| String::new());
+    let mut username = use_signal(String::new);
+    let mut email = use_signal(String::new);
+    let mut password = use_signal(String::new);
+    let mut confirm_password = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut loading = use_signal(|| false);
 
@@ -40,7 +40,7 @@ pub fn Register() -> Element {
         loading.set(true);
         error.set(None);
 
-        let nav = nav.clone();
+        let nav = nav;
         spawn(async move {
             let body = RegisterRequest {
                 username: uname,

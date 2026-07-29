@@ -22,6 +22,10 @@ pub struct RegisterRequest {
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    /// Required when the account has TOTP enabled. Accepts either a six-digit
+    /// authenticator code or an unused eight-character backup code.
+    #[serde(default)]
+    pub totp_code: Option<String>,
 }
 
 /// Payload for the `POST /auth/forgot-password` endpoint.

@@ -174,7 +174,6 @@ pub fn Slides(id: String) -> Element {
     let schedule_save = {
         let save_timer = save_timer.clone();
         let perform_save = perform_save.clone();
-        let serialize_slides = serialize_slides.clone();
         move || {
             if !*loaded.read() {
                 return;
@@ -194,7 +193,6 @@ pub fn Slides(id: String) -> Element {
     let flush_save = {
         let save_timer = save_timer.clone();
         let perform_save = perform_save.clone();
-        let serialize_slides = serialize_slides.clone();
         move || {
             if !*loaded.read() {
                 return;
@@ -209,7 +207,7 @@ pub fn Slides(id: String) -> Element {
     let mut exit_present = move || {
         present_mode.set(false);
         if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-            let _ = doc.exit_fullscreen();
+            doc.exit_fullscreen();
         }
     };
 
@@ -269,12 +267,11 @@ pub fn Slides(id: String) -> Element {
             onkeydown: {
                 let flush_save = flush_save.clone();
                 move |evt: KeyboardEvent| {
-                    if evt.modifiers().contains(Modifiers::CONTROL) {
-                        if evt.key() == Key::Character("s".to_string()) {
+                    if evt.modifiers().contains(Modifiers::CONTROL)
+                        && evt.key() == Key::Character("s".to_string()) {
                             evt.prevent_default();
                             flush_save();
                         }
-                    }
                 }
             },
             div { class: "doc-title-bar",
@@ -303,11 +300,10 @@ pub fn Slides(id: String) -> Element {
                     class: "present-btn",
                     onclick: move |_| {
                         present_mode.set(true);
-                        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                            if let Some(el) = doc.get_element_by_id("present-stage") {
+                        if let Some(doc) = web_sys::window().and_then(|w| w.document())
+                            && let Some(el) = doc.get_element_by_id("present-stage") {
                                 let _ = el.request_fullscreen();
                             }
-                        }
                     },
                     {crate::i18n::t("editor.slides.present")}
                 }
@@ -343,8 +339,8 @@ pub fn Slides(id: String) -> Element {
                                     schedule_for_menu();
                                 }
                                 "toggle-theme" => {
-                                    if let Some(window) = web_sys::window() {
-                                        if let Some(el) = window.document().and_then(|d| d.document_element()) {
+                                    if let Some(window) = web_sys::window()
+                                        && let Some(el) = window.document().and_then(|d| d.document_element()) {
                                             let cur = el.get_attribute("data-theme").unwrap_or_default();
                                             let next = if cur == "dark" { "light" } else { "dark" };
                                             let _ = el.set_attribute("data-theme", next);
@@ -352,7 +348,6 @@ pub fn Slides(id: String) -> Element {
                                                 let _ = storage.set_item("theme", next);
                                             }
                                         }
-                                    }
                                 }
                                 "print" => {
                                     if let Some(w) = web_sys::window() { let _ = w.print(); }
@@ -406,8 +401,8 @@ pub fn Slides(id: String) -> Element {
                                     },
                                     ondrop: move |e| {
                                         e.prevent_default();
-                                        if let Some(from) = *drag_index.read() {
-                                            if from != i {
+                                        if let Some(from) = *drag_index.read()
+                                            && from != i {
                                                 let mut list = slides.write();
                                                 let item = list.remove(from);
                                                 list.insert(i, item);
@@ -422,7 +417,6 @@ pub fn Slides(id: String) -> Element {
                                                 }
                                                 schedule_save_drop();
                                             }
-                                        }
                                         drag_index.set(None);
                                     },
                                     onclick: move |_| current_slide.set(i),

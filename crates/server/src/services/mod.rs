@@ -10,7 +10,7 @@ pub mod thumbnail;
 pub mod webhook;
 pub mod wopi_sessions;
 
-pub use audit::AuditService;
+pub use audit::{AuditContext, AuditService};
 pub use email::EmailService;
 pub use notification::NotificationService;
 pub use notification_bus::NotificationBus;

@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use gloo_timers::callback::Timeout;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{CloseEvent, MessageEvent, WebSocket};
@@ -82,11 +83,39 @@ pub struct CollabHandle {
 
 struct HandleInner {
     ws: Option<WebSocket>,
+    client_id: Uuid,
+    counter: u64,
+    version: u64,
 }
 
 impl CollabHandle {
     pub fn current_ws(&self) -> Option<WebSocket> {
         self.inner.borrow().ws.clone()
+    }
+
+    /// Send a typed collaborative operation using this client's monotonic
+    /// counter and the latest server version observed on the socket.
+    pub fn send_operation(&self, user_id: &str, op_type: serde_json::Value) -> Result<(), String> {
+        let mut inner = self.inner.borrow_mut();
+        let ws = inner.ws.clone().ok_or("collaboration socket unavailable")?;
+        if ws.ready_state() != WebSocket::OPEN {
+            return Err("collaboration socket is not open".into());
+        }
+        inner.counter = inner.counter.saturating_add(1);
+        let message = serde_json::json!({
+            "type": "Operation",
+            "id": {
+                "counter": inner.counter,
+                "client_id": inner.client_id,
+            },
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "user_id": user_id,
+            "base_version": inner.version,
+            "op_type": op_type,
+        });
+        let text = serde_json::to_string(&message).map_err(|e| e.to_string())?;
+        ws.send_with_str(&text)
+            .map_err(|e| format!("websocket send failed: {e:?}"))
     }
 }
 
@@ -99,7 +128,12 @@ pub fn connect_with_reconnect(
     on_message: impl FnMut(CollabMessage) + 'static,
     on_state: impl FnMut(ConnectionState) + 'static,
 ) -> CollabHandle {
-    let inner = Rc::new(RefCell::new(HandleInner { ws: None }));
+    let inner = Rc::new(RefCell::new(HandleInner {
+        ws: None,
+        client_id: Uuid::new_v4(),
+        counter: 0,
+        version: 0,
+    }));
     let on_message = Rc::new(RefCell::new(on_message));
     let on_state = Rc::new(RefCell::new(on_state));
     let attempt = Rc::new(RefCell::new(0u32));
@@ -141,11 +175,24 @@ fn open_connection(
 
     {
         let on_message = on_message.clone();
+        let inner_for_message = inner.clone();
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |evt: MessageEvent| {
-            if let Some(text) = evt.data().as_string() {
-                if let Ok(msg) = serde_json::from_str::<CollabMessage>(&text) {
-                    (on_message.borrow_mut())(msg);
+            if let Some(text) = evt.data().as_string()
+                && let Ok(msg) = serde_json::from_str::<CollabMessage>(&text)
+            {
+                {
+                    let mut state = inner_for_message.borrow_mut();
+                    match &msg {
+                        CollabMessage::DocumentState { version, .. } => {
+                            state.version = *version;
+                        }
+                        CollabMessage::Operation(_) => {
+                            state.version = state.version.saturating_add(1);
+                        }
+                        _ => {}
+                    }
                 }
+                (on_message.borrow_mut())(msg);
             }
         });
         ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
