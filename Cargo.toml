@@ -29,10 +29,10 @@ diesel = { version = "2.3", features = ["sqlite", "r2d2", "chrono", "uuid"] }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 
 # Web
-salvo = { version = "0.89", features = ["cors", "jwt-auth", "logging", "websocket", "serve-static", "cookie", "compression"] }
+salvo = { version = "0.89", features = ["cors", "logging", "websocket", "serve-static", "cookie", "compression"] }
 
 # Auth
-jsonwebtoken = { version = "10", features = ["hmac"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs"] }
 argon2 = "0.5"
 
 # Utils
@@ -52,7 +52,7 @@ sha2 = "0.10"
 tantivy = "0.25"
 
 # Email
-lettre = "0.11"
+lettre = "0.11.23"
 
 # Image processing
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
@@ -67,5 +67,5 @@ reqwest = { version = "0.13", features = ["json"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Office format parsing
-quick-xml = "0.36"
-calamine = "0.26"
+quick-xml = "0.41"
+calamine = "0.36"

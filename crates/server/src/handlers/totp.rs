@@ -10,7 +10,7 @@ use rand::RngExt;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, TotpSetupResponse, TotpVerifyRequest};
+use contrix_core::dto::{ApiResponse, TotpSetupRequest, TotpSetupResponse, TotpVerifyRequest};
 use contrix_core::error::AppError;
 use contrix_core::models::{NewTotpSecret, TotpSecret, User};
 use contrix_core::schema::totp_secrets::dsl as ts;
@@ -58,13 +58,14 @@ fn generate_totp_secret() -> String {
     base32_encode(&bytes)
 }
 
-/// Generate 8 random backup codes as 8-character hex strings.
+/// Generate eight 128-bit backup codes as 32-character hex strings.
 fn generate_backup_codes() -> Vec<String> {
     let mut rng = rand::rng();
     (0..8)
         .map(|_| {
-            let val: u32 = rng.random();
-            format!("{:08x}", val)
+            let mut bytes = [0u8; 16];
+            rng.fill(&mut bytes);
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
         })
         .collect()
 }
@@ -256,7 +257,7 @@ pub(crate) fn verify_second_factor(
     if verify_totp_code(&totp.secret, code) {
         return Ok(true);
     }
-    if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !matches!(code.len(), 8 | 32) || !code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Ok(false);
     }
 
@@ -349,7 +350,7 @@ mod totp_tests {
 // ---------------------------------------------------------------------------
 
 #[handler]
-pub async fn setup_totp(depot: &mut Depot, res: &mut Response) {
+pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -368,6 +369,17 @@ pub async fn setup_totp(depot: &mut Depot, res: &mut Response) {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::Database(e.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+
+    let body: TotpSetupRequest = match req.parse_json().await {
+        Ok(body) => body,
+        Err(error) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(error.to_string()).to_response(),
             )));
             return;
         }
@@ -395,6 +407,18 @@ pub async fn setup_totp(depot: &mut Depot, res: &mut Response) {
             return;
         }
     };
+    let password_valid = PasswordHash::new(&user_row.password_hash).is_ok_and(|hash| {
+        Argon2::default()
+            .verify_password(body.current_password.as_bytes(), &hash)
+            .is_ok()
+    });
+    if !password_valid {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Auth("Current password is incorrect".into()).to_response(),
+        )));
+        return;
+    }
 
     // Delete any existing (not yet enabled) TOTP secret for this user so
     // we can start fresh.
@@ -575,7 +599,7 @@ pub async fn verify_totp(req: &mut Request, depot: &mut Depot, res: &mut Respons
 // ---------------------------------------------------------------------------
 
 #[handler]
-pub async fn disable_totp(depot: &mut Depot, res: &mut Response) {
+pub async fn disable_totp(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -598,6 +622,54 @@ pub async fn disable_totp(depot: &mut Depot, res: &mut Response) {
             return;
         }
     };
+
+    let body: TotpVerifyRequest = match req.parse_json().await {
+        Ok(body) => body,
+        Err(error) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(error.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+    let totp = match ts::totp_secrets
+        .filter(ts::user_id.eq(&uid))
+        .filter(ts::is_enabled.eq(true))
+        .first::<TotpSecret>(&mut conn)
+        .optional()
+    {
+        Ok(Some(totp)) => totp,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("No enabled TOTP configuration found".into()).to_response(),
+            )));
+            return;
+        }
+        Err(error) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(error.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+    match verify_second_factor(&mut conn, &totp, &body.code) {
+        Ok(true) => {}
+        Ok(false) => {
+            res.status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Auth("Invalid authentication code".into()).to_response(),
+            )));
+            return;
+        }
+        Err(error) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
+            return;
+        }
+    }
 
     match diesel::delete(ts::totp_secrets.filter(ts::user_id.eq(&uid))).execute(&mut conn) {
         Ok(0) => {

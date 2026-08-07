@@ -10,8 +10,7 @@ use salvo::prelude::*;
 use crate::middleware::auth::{get_user_id, hash_token};
 use crate::state::AppState;
 
-/// Try to resolve the current session id from the Authorization header.
-/// Falls back to the most-recently-active session for the user.
+/// Resolve the current session id from the Authorization header.
 fn resolve_current_session_id(
     req: &Request,
     uid: &str,
@@ -26,23 +25,10 @@ fn resolve_current_session_id(
 
     let token_hash_val = hash_token(token);
 
-    // First try an exact match on the hashed token.
-    if let Ok(Some(id)) = s::sessions
-        .filter(s::user_id.eq(uid))
-        .filter(s::is_active.eq(true))
-        .filter(s::token_hash.eq(&token_hash_val))
-        .select(s::id)
-        .first::<String>(conn)
-        .optional()
-    {
-        return Some(id);
-    }
-
-    // Fallback: most recent active session.
     s::sessions
         .filter(s::user_id.eq(uid))
         .filter(s::is_active.eq(true))
-        .order(s::last_activity_at.desc())
+        .filter(s::token_hash.eq(&token_hash_val))
         .select(s::id)
         .first::<String>(conn)
         .optional()
@@ -299,7 +285,8 @@ pub async fn revoke_all_sessions(req: &mut Request, depot: &mut Depot, res: &mut
         .set(s::is_active.eq(false))
         .execute(&mut conn),
         None => {
-            // Cannot identify current session — revoke all active sessions.
+            // This should be unreachable behind the JWT middleware, but fail
+            // closed if the bearer token cannot be tied to a session.
             diesel::update(
                 s::sessions
                     .filter(s::user_id.eq(&uid))

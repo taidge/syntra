@@ -110,11 +110,44 @@
 - [x] 电子表格“合并单元格”：Calc 已恢复合并/取消合并按钮，完成越界/重叠校验、锚点选择、`rowspan`/`colspan` 渲染、隐藏单元格跳过、undo/redo 与 JSON 持久化，并在插入/删除行列及工作表删除/换序时同步调整合并区域；XLSX 导入/导出保留 `<mergeCells>`。新增水合、非法区域清洗、行列变更与 XLSX 往返测试。
 - [x] DOCX 导入 `docx_to_writer` 识别 `word/numbering.xml` 与段落 `<w:numPr>`，按 `numId`/`ilvl` 将连续段落还原为有序或无序 `Block::List`，嵌套项恢复到 `ListItem.children`；表格单元格内列表同样支持。新增有序、无序及嵌套列表往返测试。
 
+## 第七轮复审（本轮新增发现并修复）
+
+- [x] TOTP 备用码原来只有 32 bit 熵、以明文保存且没有接入登录消费。现改为 128 bit 随机码、Argon2 哈希存储、一次性原子消费；兼容旧 8 位备用码并在使用后升级剩余哈希。登录输入和中英文提示已同步支持备用码。
+- [x] 已登录用户可在不再次证明身份的情况下覆盖 TOTP 配置或直接关闭二因子。`setup` 现强制校验当前密码，`disable` 现强制校验有效 TOTP/备用码；集成测试覆盖错误密码、无效验证码及备用码不可复用。
+- [x] JWT query 参数回退曾对所有受保护 HTTP API 生效，令 bearer token 更易进入访问日志。现仅在 `/api/v1/ws/` 且请求确为 WebSocket Upgrade 时接受 `?token=`；普通 HTTP query token 明确返回 401。
+- [x] Session 管理接口在无法取得当前 bearer token 时会回退到“最近一个 session”，可能操作错误会话。现只按当前 bearer token 的哈希精确定位，缺失时失败关闭。
+- [x] 注册流程先提交用户、后创建 session；session 写入失败会留下无法正常完成注册的孤儿账户。现将用户和 session 写入放入同一数据库事务。
+- [x] Calc 导入的合并区域可能越界、重叠或退化为单格，并且排序可穿过合并区域破坏语义。现统一规范化和过滤非法区域，对与合并区域相交的排序/自动筛选给出阻止提示，并补清洗测试。
+- [x] 复核 Calc 合并保护时发现保护逻辑误挂到“插入行”，且把行号当列号检查；真正的列标题排序未受保护。现移除错误的插行拦截，并在升序/降序列排序入口按完整列范围检查合并区域。
+- [x] DOCX 列表导出递归可以产生任意 `ilvl`，但 Word 编号定义未覆盖全部合法层级。现定义 OOXML 的 0..8 共九级编号，并将更深应用层级安全压平到第 8 级；测试逐级校验编号定义。
+- [x] Calc 已接入与 Writer 相同的协作 WebSocket，以整个 workbook 的 `Replace` Operation 同步本地保存和远端变更。当前是正确性优先的整文档同步基线；细粒度单元格 OT、Slides/Whiteboard 实时编辑仍属于后续架构演进，而非本轮残留死代码。
+
+## 第八轮复审（依赖安全与未完成接线）
+
+- [x] `cargo audit` 初始发现 16 个已知漏洞，覆盖 `lettre` 的 TLS 主机名校验、`quick-xml` 的恶意 XML 解析 DoS、Diesel SQLite 未对齐访问，以及 AWS-LC、rustls-webpki、QUIC 和 crossbeam 等传递依赖。已升级 `lettre`、`quick-xml`、`calamine` 并刷新兼容锁文件，复扫结果为 0 个已知漏洞。
+- [x] 唯一没有上游修复版本的 `rsa` Marvin timing advisory 来自并未使用的 Salvo JWT 扩展和 `jsonwebtoken` 默认 PEM/RustCrypto 特性。项目实际只签发/校验 HS256；现移除 Salvo `jwt-auth` 特性，并为 `jsonwebtoken` 关闭默认特性、显式选择已修补的 AWS-LC provider，从依赖图中彻底移除 RustCrypto `rsa` crate，同时避免未选择 provider 时的运行时 panic。
+- [x] `quick-xml 0.41` 移除了 `BytesText::unescape`，`calamine 0.36` 废弃了旧合并区域 API。DOCX/PPTX 导入现显式执行“按 XML 编码解码 + 实体反转义”，XLSX 导入改用 `merge_cells_by_sheet_name`，Office 往返测试继续覆盖这些路径。
+
+## 仍待处理（本轮不冒充已完成）
+
+- [ ] AI assistant 前端虽已调用 `/api/v1/ai/assist`，后端仍固定返回 501；完整实现需要文档访问控制、模型提供方配置、额度/超时、审计和输出安全策略。
+- [ ] OAuth redirect 会生成但不持久化 `state`，callback 固定返回 501；应在界面隐藏未配置入口，或完整实现 state/PKCE 校验、code exchange、账号绑定与 session 签发。
+- [ ] 管理员备份通过文件复制运行中的 SQLite，在线恢复还会覆盖连接池正在使用的数据库文件；应改用 SQLite Online Backup，并采用“校验后暂存、重启时原子切换”的恢复流程。
+- [ ] `/api/v1/ws/notifications` 后端 WebSocket 没有前端消费者；当前通知仍只能依赖 HTTP 获取，应接入并补断线重连/去重测试，或删除未使用端点。
+- [ ] TOTP setup/verify/disable 后端已完整，但前端账户设置没有管理入口；需补当前密码确认、二维码/secret 展示、备用码一次性展示下载与关闭二因子确认流程。
+- [ ] `cargo audit` 仍报告 1 个 informational/allowed warning：Tantivy 0.25 传递依赖的 `lru 0.12.5` 存在 `IterMut` soundness 问题，修复版本要求 `lru >=0.16.3`，超出 Tantivy 当前 semver 约束。项目代码未直接调用该迭代器；仍应跟踪 Tantivy 上游升级，不能把它误报为完全无 advisory。
+
+## 版本基线说明
+
+- 本地 `main` 已包含所有本地分支提交，且没有未合并的本地分支。
+- 当前 Git 配置没有任何 remote；`Cargo.toml` 声明的 `https://github.com/contrix-org/office` 返回 Repository not found，因此无法执行远端 `fetch/pull` 或证明远端 `main` 最新。恢复有效 remote 后应补做同步与推送。
+
 ## 最终验证
 
 - [x] `cargo fmt --all -- --check` 通过。
 - [x] `cargo check --workspace --all-targets` 通过且无编译 warning。
-- [x] `cargo test --workspace --all-targets` 全部通过（collab 12、doc-engine 82、export 43、frontend 14、server API 集成测试 132 项等）。
+- [x] `cargo test --workspace --all-targets` 全部通过，共执行 326 项（collab 12、doc-engine 82、export 43、frontend 16、server lib/main 各 20、server API 集成测试 133）。
 - [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
 - [x] 前端中英文 i18n JSON 解析通过，Playwright `--list` 成功发现 87 项测试，说明测试源码可加载。
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 已清零；逐项修复嵌套条件、可派生 Default、无效 clone、冗余闭包/排序以及易与 `FromStr` 混淆的 helper 命名，未使用全局 `allow` 压制。
+- [x] `cargo audit` 复扫为 0 个 vulnerability，另有 1 个已在“仍待处理”记录的 transitive informational warning（未配置 ignore）。

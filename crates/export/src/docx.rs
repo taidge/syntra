@@ -213,7 +213,9 @@ fn list_item_to_xml(item: &ListItem, ordered: bool, level: u32, xml: &mut String
     // numId 1 = bullet) defined in numbering.xml, at the given indent level.
     let num_id = if ordered { 2 } else { 1 };
 
-    list_item_paragraph(item, num_id, level, xml);
+    // A numbering definition has at most nine levels (0..=8). Keep deeper
+    // application nesting valid by flattening it into the deepest OOXML level.
+    list_item_paragraph(item, num_id, level.min(8), xml);
 
     for nested in &item.children {
         list_item_to_xml(nested, ordered, level + 1, xml);
@@ -396,7 +398,8 @@ fn read_core_title<R: std::io::Read + std::io::Seek>(
             Ok(Event::Start(e)) if e.name().as_ref() == b"dc:title" => in_title = true,
             Ok(Event::End(e)) if e.name().as_ref() == b"dc:title" => break,
             Ok(Event::Text(t)) if in_title => {
-                title.push_str(&t.unescape().ok()?);
+                let decoded = t.decode().ok()?;
+                title.push_str(&quick_xml::escape::unescape(&decoded).ok()?);
             }
             Ok(Event::Eof) => break,
             Err(_) => return None,
@@ -776,7 +779,10 @@ fn read_text_content(reader: &mut Reader<&[u8]>, end: &[u8]) -> Result<String, S
     let mut out = String::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Text(t)) => out.push_str(&t.unescape().map_err(|e| e.to_string())?),
+            Ok(Event::Text(t)) => {
+                let decoded = t.decode().map_err(|e| e.to_string())?;
+                out.push_str(&quick_xml::escape::unescape(&decoded).map_err(|e| e.to_string())?);
+            }
             Ok(Event::End(e)) if e.name().as_ref() == end => break,
             Ok(Event::Eof) => break,
             Err(e) => return Err(format!("xml text: {e}")),

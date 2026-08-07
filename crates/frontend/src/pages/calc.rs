@@ -130,6 +130,14 @@ fn merged_range_overlaps(
         .is_some_and(|ranges| ranges.iter().any(|range| range.overlaps(requested)))
 }
 
+fn merged_column_overlaps(
+    merged: &HashMap<usize, Vec<MergedRange>>,
+    sheet: usize,
+    column: u32,
+) -> bool {
+    merged_range_overlaps(merged, sheet, (0, column), (NUM_ROWS - 1, column))
+}
+
 fn workbook_replace_from_operation(
     payload: &serde_json::Value,
 ) -> Option<(String, serde_json::Value)> {
@@ -3206,16 +3214,6 @@ pub fn Calc(id: String) -> Element {
                                                 let mut s = schedule_save_hm.clone();
                                                 let mut p = push_snapshot_hm;
                                                 move |_| {
-                                                    if merged_range_overlaps(
-                                                        &merged_cells.read(),
-                                                        si,
-                                                        (0, idx),
-                                                        (NUM_ROWS - 1, idx),
-                                                    ) {
-                                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
-                                                        header_menu.set(None);
-                                                        return;
-                                                    }
                                                     if *loaded.read() { p(); }
                                                     let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
                                                     for ((s_i, r, c), v) in cells.read().iter() {
@@ -3255,16 +3253,6 @@ pub fn Calc(id: String) -> Element {
                                                 let mut s = schedule_save_hm.clone();
                                                 let mut p = push_snapshot_hm;
                                                 move |_| {
-                                                    if merged_range_overlaps(
-                                                        &merged_cells.read(),
-                                                        si,
-                                                        (0, idx),
-                                                        (NUM_ROWS - 1, idx),
-                                                    ) {
-                                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
-                                                        header_menu.set(None);
-                                                        return;
-                                                    }
                                                     if *loaded.read() { p(); }
                                                     let target = idx + 1;
                                                     let mut new_cells: HashMap<(usize, u32, u32), String> = HashMap::new();
@@ -3476,6 +3464,15 @@ pub fn Calc(id: String) -> Element {
                                                 let mut s = schedule_save_hm.clone();
                                                 let mut p = push_snapshot_hm;
                                                 move |_| {
+                                                    if merged_column_overlaps(
+                                                        &merged_cells.read(),
+                                                        si,
+                                                        idx,
+                                                    ) {
+                                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
+                                                        header_menu.set(None);
+                                                        return;
+                                                    }
                                                     if *loaded.read() { p(); }
                                                     let mut pairs: Vec<(u32, String)> = cells
                                                         .read()
@@ -3507,6 +3504,15 @@ pub fn Calc(id: String) -> Element {
                                                 let mut s = schedule_save_hm.clone();
                                                 let mut p = push_snapshot_hm;
                                                 move |_| {
+                                                    if merged_column_overlaps(
+                                                        &merged_cells.read(),
+                                                        si,
+                                                        idx,
+                                                    ) {
+                                                        push_toast(toast_bus, ToastKind::Warning, crate::i18n::t("editor.calc.merge_sort_blocked"));
+                                                        header_menu.set(None);
+                                                        return;
+                                                    }
                                                     if *loaded.read() { p(); }
                                                     let mut pairs: Vec<(u32, String)> = cells
                                                         .read()
@@ -4063,7 +4069,8 @@ mod eval_tests {
     use super::eval::{EvalError, evaluate};
     use super::{
         MergedRange, delete_col_from_merged, delete_row_from_merged, hydrate_workbook,
-        insert_col_in_merged, insert_row_in_merged, sanitize_merged_ranges,
+        insert_col_in_merged, insert_row_in_merged, merged_column_overlaps, sanitize_merged_ranges,
+        workbook_replace_from_operation,
     };
     use std::collections::HashMap;
 
@@ -4222,5 +4229,36 @@ mod eval_tests {
             },
         ]);
         assert_eq!(sanitized, vec![valid]);
+    }
+
+    #[test]
+    fn extracts_workbook_collaboration_replacement() {
+        let operation = serde_json::json!({
+            "user_id": "user-1",
+            "op_type": {
+                "type": "Replace",
+                "path": ["workbook"],
+                "old_value": null,
+                "new_value": {"sheets": []}
+            }
+        });
+        let (user_id, workbook) = workbook_replace_from_operation(&operation).unwrap();
+        assert_eq!(user_id, "user-1");
+        assert_eq!(workbook, serde_json::json!({"sheets": []}));
+    }
+
+    #[test]
+    fn merged_column_overlap_uses_column_coordinates() {
+        let mut merged = HashMap::new();
+        merged.insert(
+            0,
+            vec![MergedRange {
+                start: (5, 2),
+                end: (6, 3),
+            }],
+        );
+        assert!(merged_column_overlaps(&merged, 0, 2));
+        assert!(merged_column_overlaps(&merged, 0, 3));
+        assert!(!merged_column_overlaps(&merged, 0, 4));
     }
 }

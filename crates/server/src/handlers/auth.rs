@@ -212,17 +212,6 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         last_login_at: Some(now.to_rfc3339()),
     };
 
-    if let Err(e) = diesel::insert_into(u::users)
-        .values(&new_user)
-        .execute(&mut conn)
-    {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::Database(e.to_string()).to_response(),
-        )));
-        return;
-    }
-
     let token = match generate_jwt(
         &user_id_val.to_string(),
         role.as_str(),
@@ -237,17 +226,26 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         }
     };
 
-    if let Err(e) = create_session(
-        &mut conn,
-        &user_id_val.to_string(),
-        &token,
-        Some(req.remote_addr().to_string()),
-        req.headers()
-            .get("user-agent")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned),
-        state.config.auth.jwt_expiry_hours,
-    ) {
+    let session_ip = Some(req.remote_addr().to_string());
+    let session_user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let registration = conn.transaction::<_, AppError, _>(|conn| {
+        diesel::insert_into(u::users)
+            .values(&new_user)
+            .execute(conn)?;
+        create_session(
+            conn,
+            &user_id_val.to_string(),
+            &token,
+            session_ip,
+            session_user_agent,
+            state.config.auth.jwt_expiry_hours,
+        )
+    });
+    if let Err(e) = registration {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(e.to_response())));
         return;

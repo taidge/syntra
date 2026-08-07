@@ -108,7 +108,7 @@ pub fn Login() -> Element {
                             id: "totp-code",
                             r#type: "text",
                             inputmode: "text",
-                            maxlength: "8",
+                            maxlength: "32",
                             autocomplete: "one-time-code",
                             class: "form-input",
                             placeholder: crate::i18n::t("auth.totp_placeholder"),
@@ -117,7 +117,7 @@ pub fn Login() -> Element {
                                 let filtered: String = e.value()
                                     .chars()
                                     .filter(|c| c.is_ascii_hexdigit())
-                                    .take(8)
+                                    .take(32)
                                     .collect();
                                 totp_code.set(filtered);
                             },

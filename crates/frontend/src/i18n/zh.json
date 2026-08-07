@@ -48,7 +48,7 @@
   "auth.email_placeholder": "you@example.com",
   "auth.password_placeholder": "输入密码",
   "auth.totp_code": "身份验证器动态码或备用码",
-  "auth.totp_placeholder": "6 位动态码或 8 位备用码",
+  "auth.totp_placeholder": "6 位动态码或备用码",
   "auth.totp_hint": "仅在已启用双重验证时需要填写；每个备用码只能使用一次。",
   "auth.username_placeholder": "设置用户名",
   "auth.new_password_placeholder": "至少 8 个字符",

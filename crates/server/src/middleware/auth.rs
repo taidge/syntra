@@ -49,9 +49,18 @@ pub async fn jwt_auth_middleware(
         .and_then(|header| header.strip_prefix("Bearer "))
         .map(|t| t.to_string());
 
-    // WebSocket connections cannot set an Authorization header from the
-    // browser, so fall back to a `?token=` query parameter for those routes.
-    let token = match header_token.or_else(|| req.query::<String>("token")) {
+    // Browser WebSocket handshakes cannot set an Authorization header. Permit
+    // `?token=` only on an actual WebSocket upgrade route; accepting it on
+    // ordinary HTTP APIs would leak bearer tokens into URLs and proxy logs.
+    let websocket_query_token = (req.uri().path().starts_with("/api/v1/ws/")
+        && req
+            .headers()
+            .get("upgrade")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("websocket")))
+    .then(|| req.query::<String>("token"))
+    .flatten();
+    let token = match header_token.or(websocket_query_token) {
         Some(t) if !t.is_empty() => t,
         _ => {
             res.status_code(StatusCode::UNAUTHORIZED);

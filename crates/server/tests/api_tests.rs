@@ -3391,10 +3391,21 @@ async fn test_totp_setup() {
         .register("user1", "user1@test.com", "password123")
         .await;
 
+    let rejected = server
+        .client
+        .post(server.url("/api/v1/totp/setup"))
+        .headers(server.auth_header(&token))
+        .json(&serde_json::json!({ "current_password": "wrong-password" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 401);
+
     let resp = server
         .client
         .post(server.url("/api/v1/totp/setup"))
         .headers(server.auth_header(&token))
+        .json(&serde_json::json!({ "current_password": "password123" }))
         .send()
         .await
         .unwrap();
@@ -3424,6 +3435,7 @@ async fn test_totp_enabled_login_requires_valid_second_factor() {
         .client
         .post(server.url("/api/v1/totp/setup"))
         .headers(server.auth_header(&token))
+        .json(&serde_json::json!({ "current_password": "password123" }))
         .send()
         .await
         .unwrap();
@@ -3434,6 +3446,21 @@ async fn test_totp_enabled_login_requires_valid_second_factor() {
         .as_str()
         .unwrap()
         .to_string();
+    {
+        use contrix_core::schema::totp_secrets::dsl as ts;
+        use diesel::prelude::*;
+
+        let mut conn = server.db.get().unwrap();
+        let stored: String = ts::totp_secrets
+            .select(ts::backup_codes)
+            .first::<Option<String>>(&mut conn)
+            .unwrap()
+            .unwrap();
+        let hashes: Vec<String> = serde_json::from_str(&stored).unwrap();
+        assert_eq!(hashes.len(), 8);
+        assert!(hashes.iter().all(|hash| hash.starts_with("$argon2")));
+        assert!(hashes.iter().all(|hash| hash != &backup_code));
+    }
     let code = current_totp_code(secret).unwrap();
 
     let verify = server
@@ -3484,7 +3511,7 @@ async fn test_totp_enabled_login_requires_valid_second_factor() {
         .unwrap();
     assert_eq!(valid.status(), 200);
     let valid_body: serde_json::Value = valid.json().await.unwrap();
-    assert!(valid_body["data"]["token"].as_str().is_some());
+    let valid_token = valid_body["data"]["token"].as_str().unwrap();
 
     let backup = server
         .client
@@ -3511,6 +3538,30 @@ async fn test_totp_enabled_login_requires_valid_second_factor() {
         .await
         .unwrap();
     assert_eq!(reused.status(), 401);
+
+    let disable = server
+        .client
+        .post(server.url("/api/v1/totp/disable"))
+        .headers(server.auth_header(valid_token))
+        .json(&serde_json::json!({
+            "code": current_totp_code(secret).unwrap()
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disable.status(), 200);
+
+    let login_after_disable = server
+        .client
+        .post(server.url("/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "totp@test.com",
+            "password": "password123"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login_after_disable.status(), 200);
 }
 
 #[tokio::test]
@@ -3548,6 +3599,22 @@ async fn test_revoked_session_invalidates_jwt_immediately() {
         .await
         .unwrap();
     assert_eq!(me.status(), 401);
+}
+
+#[tokio::test]
+async fn test_http_api_rejects_query_string_bearer_token() {
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("query-token-user", "query-token@test.com", "password123")
+        .await;
+
+    let response = server
+        .client
+        .get(server.url(&format!("/api/v1/auth/me?token={token}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401);
 }
 
 // ===========================================================================

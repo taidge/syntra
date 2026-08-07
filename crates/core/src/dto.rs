@@ -418,6 +418,11 @@ pub struct SessionResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TotpSetupRequest {
+    pub current_password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TotpSetupResponse {
     pub secret: String,
     pub qr_url: String,

@@ -395,7 +395,8 @@ fn read_title(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Option<String> {
             }
             Ok(Event::Text(t)) => {
                 if in_title {
-                    title.push_str(&t.unescape().ok()?);
+                    let decoded = t.decode().ok()?;
+                    title.push_str(&quick_xml::escape::unescape(&decoded).ok()?);
                 }
             }
             Ok(Event::Eof) => break,
@@ -453,7 +454,8 @@ fn parse_slide_texts(xml: &str) -> Result<Vec<String>, String> {
             },
             Ok(Event::Text(t)) => {
                 if in_t {
-                    let s = t.unescape().map_err(|e| e.to_string())?;
+                    let decoded = t.decode().map_err(|e| e.to_string())?;
+                    let s = quick_xml::escape::unescape(&decoded).map_err(|e| e.to_string())?;
                     current.push_str(&s);
                 }
             }

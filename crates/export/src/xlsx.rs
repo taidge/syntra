@@ -296,18 +296,13 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
     let cursor = Cursor::new(bytes.to_vec());
     let mut xlsx: Xlsx<_> = Xlsx::new(cursor).map_err(|e| e.to_string())?;
     let sheet_names = xlsx.sheet_names().to_vec();
-    xlsx.load_merged_regions().map_err(|e| e.to_string())?;
-    let merged_by_sheet: HashMap<String, Vec<calamine::Dimensions>> = sheet_names
-        .iter()
-        .map(|name| {
-            let regions = xlsx
-                .merged_regions_by_sheet(name)
-                .into_iter()
-                .map(|(_, _, dimensions)| *dimensions)
-                .collect();
-            (name.clone(), regions)
-        })
-        .collect();
+    let mut merged_by_sheet: HashMap<String, Vec<calamine::Dimensions>> = HashMap::new();
+    for name in &sheet_names {
+        let regions = xlsx
+            .merge_cells_by_sheet_name(name)
+            .map_err(|e| e.to_string())?;
+        merged_by_sheet.insert(name.clone(), regions);
+    }
 
     let title = sheet_names
         .first()
