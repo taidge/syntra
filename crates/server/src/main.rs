@@ -23,20 +23,6 @@ use state::AppState;
 
 const DEFAULT_JWT_SECRET: &str = "change-me-in-production-use-a-long-random-string";
 
-/// Convert a `sqlite://path/to/db?mode=rwc` URL to a plain file path
-/// that Diesel's SQLite backend expects.
-fn sqlite_url_to_path(url: &str) -> anyhow::Result<String> {
-    if let Some(path) = url.strip_prefix("sqlite://") {
-        return Ok(path.split('?').next().unwrap_or(path).to_string());
-    }
-
-    if url.contains("://") {
-        bail!("Unsupported database URL scheme. This build only supports SQLite connection URLs");
-    }
-
-    Ok(url.split('?').next().unwrap_or(url).to_string())
-}
-
 /// Run a single migration SQL file, splitting by semicolons.
 fn run_migration_file(
     conn: &mut SqliteConnection,
@@ -107,7 +93,7 @@ fn load_config() -> anyhow::Result<(AppConfig, String)> {
 }
 
 fn validate_config(config: &AppConfig, environment: &str) -> anyhow::Result<()> {
-    sqlite_url_to_path(&config.database.url)?;
+    services::database_backup::sqlite_url_to_path(&config.database.url)?;
 
     let storage_backend = config
         .storage
@@ -174,17 +160,25 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // 3. Ensure data directories exist before connecting
     // -----------------------------------------------------------------------
-    let db_path = sqlite_url_to_path(&config.database.url)?;
-    if let Some(parent) = std::path::Path::new(&db_path).parent()
+    let db_path = services::database_backup::sqlite_url_to_path(&config.database.url)?;
+    if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {
         tokio::fs::create_dir_all(parent).await?;
+    }
+    if services::database_backup::is_file_backed(&db_path)
+        && services::database_backup::apply_pending_restore(&db_path).await?
+    {
+        tracing::warn!(
+            database = %db_path.display(),
+            "Applied staged database restore before opening the connection pool"
+        );
     }
 
     // -----------------------------------------------------------------------
     // 4. Create Diesel r2d2 connection pool
     // -----------------------------------------------------------------------
-    let manager = ConnectionManager::<SqliteConnection>::new(&db_path);
+    let manager = ConnectionManager::<SqliteConnection>::new(db_path.to_string_lossy());
     let db = Pool::builder()
         .max_size(config.database.max_connections)
         .build(manager)?;
@@ -244,8 +238,10 @@ async fn main() -> anyhow::Result<()> {
     let search_path = &config.search.index_path;
     tokio::fs::create_dir_all(search_path).await?;
 
-    // Ensure backup directory exists
-    tokio::fs::create_dir_all("data/backups").await?;
+    // Ensure the database-specific backup directory exists.
+    if services::database_backup::is_file_backed(&db_path) {
+        tokio::fs::create_dir_all(services::database_backup::backup_directory(&db_path)).await?;
+    }
 
     // Ensure chunks directory exists for chunked uploads
     tokio::fs::create_dir_all(format!("{}/chunks", storage_path)).await?;

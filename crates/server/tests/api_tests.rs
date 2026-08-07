@@ -1348,6 +1348,71 @@ async fn test_admin_activity_log() {
     );
 }
 
+#[tokio::test]
+async fn test_admin_backup_is_consistent_and_restore_is_staged() {
+    use contrix_core::schema::users::dsl as users;
+    use diesel::prelude::*;
+
+    let server = TestServer::new().await;
+    let (_, reg_body) = server
+        .register("backup-admin", "backup-admin@test.com", "password123")
+        .await;
+    let user_id = reg_body["data"]["user"]["id"].as_str().unwrap();
+    server.make_admin(user_id).await;
+    let (admin_token, _) = server.login("backup-admin@test.com", "password123").await;
+
+    let create = server
+        .client
+        .post(server.url("/api/v1/admin/backup"))
+        .headers(server.auth_header(&admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 201);
+    let body: serde_json::Value = create.json().await.unwrap();
+    let filename = body["data"]["file_name"].as_str().unwrap();
+    assert!(filename.starts_with("backup_"));
+    assert!(filename.ends_with(".db"));
+
+    let backup_path = server._temp_dir.path().join("backups").join(filename);
+    assert!(backup_path.exists());
+    let mut backup_conn = SqliteConnection::establish(&backup_path.to_string_lossy()).unwrap();
+    let user_count = users::users
+        .count()
+        .get_result::<i64>(&mut backup_conn)
+        .unwrap();
+    assert_eq!(user_count, 1, "snapshot must include committed user data");
+
+    let restore = server
+        .client
+        .post(server.url("/api/v1/admin/backup/restore"))
+        .headers(server.auth_header(&admin_token))
+        .json(&serde_json::json!({ "filename": filename }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restore.status(), 202);
+    let restore_body: serde_json::Value = restore.json().await.unwrap();
+    assert_eq!(restore_body["data"]["restart_required"], true);
+    assert!(
+        server
+            ._temp_dir
+            .path()
+            .join("test.db.restore-pending")
+            .exists()
+    );
+
+    // Staging must not overwrite the database beneath the live pool.
+    let me = server
+        .client
+        .get(server.url("/api/v1/auth/me"))
+        .headers(server.auth_header(&admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 200);
+}
+
 // ===========================================================================
 // File upload / download tests
 // ===========================================================================

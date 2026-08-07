@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use salvo::prelude::*;
+use uuid::Uuid;
 
 use contrix_core::dto::{ApiResponse, BackupResponse};
 use contrix_core::error::AppError;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
+use crate::services::database_backup;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -27,17 +29,36 @@ fn require_admin(depot: &Depot, res: &mut Response) -> bool {
     }
 }
 
-/// Derive the absolute path of the SQLite database file from the connection URL.
-///
-/// The URL is expected to be in the form `sqlite://path/to/db.sqlite` or simply
-/// a file path.
-fn db_path_from_url(url: &str) -> String {
-    url.strip_prefix("sqlite://").unwrap_or(url).to_string()
+/// Keep SQLite's non-Send serialized buffer inside a synchronous scope so the
+/// Salvo handler never carries it across an await point.
+fn serialize_database(state: &AppState) -> Result<Vec<u8>, AppError> {
+    let mut conn = state
+        .db
+        .get()
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let snapshot = conn.serialize_database_to_buffer();
+    Ok(snapshot.as_slice().to_vec())
 }
 
-/// Return the backup directory path (sibling `data/backups/` relative to the DB).
-fn backup_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from("data/backups")
+fn file_backed_database_path(state: &AppState, res: &mut Response) -> Option<std::path::PathBuf> {
+    match database_backup::sqlite_url_to_path(&state.config.database.url) {
+        Ok(path) if database_backup::is_file_backed(&path) => Some(path),
+        Ok(_) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation("Database backup requires file-backed SQLite".into())
+                    .to_response(),
+            )));
+            None
+        }
+        Err(error) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(error.to_string()).to_response(),
+            )));
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -62,14 +83,15 @@ pub async fn create_backup(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    let db_file = db_path_from_url(&state.config.database.url);
+    let Some(db_file) = file_backed_database_path(&state, res) else {
+        return;
+    };
     let now = Utc::now();
-    let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
-    let backup_filename = format!("backup_{}.db", timestamp);
-    let backup_path = backup_dir().join(&backup_filename);
+    let backup_filename = database_backup::new_backup_filename(now);
+    let backup_path = database_backup::backup_directory(&db_file).join(&backup_filename);
 
     // Ensure backup directory exists.
-    if let Err(e) = tokio::fs::create_dir_all(backup_dir()).await {
+    if let Err(e) = tokio::fs::create_dir_all(database_backup::backup_directory(&db_file)).await {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Storage(format!("Failed to create backup directory: {}", e)).to_response(),
@@ -77,11 +99,29 @@ pub async fn create_backup(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    // Copy the database file.
-    if let Err(e) = tokio::fs::copy(&db_file, &backup_path).await {
+    // Serialize through a live SQLite connection so committed WAL data is part
+    // of one consistent snapshot.
+    let snapshot_bytes = match serialize_database(&state) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
+            return;
+        }
+    };
+    let temporary = backup_path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
+    if let Err(e) = tokio::fs::write(&temporary, snapshot_bytes).await {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
-            AppError::Storage(format!("Failed to copy database: {}", e)).to_response(),
+            AppError::Storage(format!("Failed to write database snapshot: {e}")).to_response(),
+        )));
+        return;
+    }
+    if let Err(e) = tokio::fs::rename(&temporary, &backup_path).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Storage(format!("Failed to finalize database snapshot: {e}")).to_response(),
         )));
         return;
     }
@@ -93,7 +133,11 @@ pub async fn create_backup(depot: &mut Depot, res: &mut Response) {
     };
 
     let resp = BackupResponse {
-        id: timestamp,
+        id: backup_filename
+            .strip_prefix("backup_")
+            .and_then(|name| name.strip_suffix(".db"))
+            .unwrap_or(&backup_filename)
+            .to_string(),
         file_name: backup_filename,
         size,
         created_at: now,
@@ -113,7 +157,7 @@ pub async fn list_backups(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let _state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -126,7 +170,10 @@ pub async fn list_backups(depot: &mut Depot, res: &mut Response) {
     };
 
     // Ensure backup directory exists before listing.
-    let dir = backup_dir();
+    let Some(db_file) = file_backed_database_path(&state, res) else {
+        return;
+    };
+    let dir = database_backup::backup_directory(&db_file);
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -151,7 +198,7 @@ pub async fn list_backups(depot: &mut Depot, res: &mut Response) {
         match entries.next_entry().await {
             Ok(Some(entry)) => {
                 let file_name = entry.file_name().to_string_lossy().to_string();
-                if !file_name.ends_with(".db") {
+                if !database_backup::is_valid_backup_filename(&file_name) {
                     continue;
                 }
                 let meta = entry.metadata().await;
@@ -205,7 +252,7 @@ pub async fn download_backup(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
-    let _state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -220,7 +267,7 @@ pub async fn download_backup(req: &mut Request, depot: &mut Depot, res: &mut Res
     let filename: String = req.param("filename").unwrap_or_default();
 
     // Sanitize filename to prevent path traversal.
-    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+    if !database_backup::is_valid_backup_filename(&filename) {
         res.status_code(StatusCode::BAD_REQUEST);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Validation("Invalid filename".into()).to_response(),
@@ -228,7 +275,10 @@ pub async fn download_backup(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
-    let file_path = backup_dir().join(&filename);
+    let Some(db_file) = file_backed_database_path(&state, res) else {
+        return;
+    };
+    let file_path = database_backup::backup_directory(&db_file).join(&filename);
 
     let data = match tokio::fs::read(&file_path).await {
         Ok(d) => d,
@@ -292,7 +342,7 @@ pub async fn restore_backup(req: &mut Request, depot: &mut Depot, res: &mut Resp
     };
 
     // Sanitize filename to prevent path traversal.
-    if body.filename.contains("..") || body.filename.contains('/') || body.filename.contains('\\') {
+    if !database_backup::is_valid_backup_filename(&body.filename) {
         res.status_code(StatusCode::BAD_REQUEST);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Validation("Invalid filename".into()).to_response(),
@@ -300,8 +350,10 @@ pub async fn restore_backup(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     }
 
-    let backup_file = backup_dir().join(&body.filename);
-    let db_file = db_path_from_url(&state.config.database.url);
+    let Some(db_file) = file_backed_database_path(&state, res) else {
+        return;
+    };
+    let backup_file = database_backup::backup_directory(&db_file).join(&body.filename);
 
     // Verify the backup file exists.
     if !backup_file.exists() {
@@ -312,18 +364,20 @@ pub async fn restore_backup(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     }
 
-    // Copy the backup file over the current database.
-    if let Err(e) = tokio::fs::copy(&backup_file, &db_file).await {
+    // Never overwrite a database that is still open by the connection pool.
+    // Validate and stage it for an atomic pre-pool switch at the next restart.
+    if let Err(e) = database_backup::stage_restore(&backup_file, &db_file).await {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
-            AppError::Storage(format!("Failed to restore database: {}", e)).to_response(),
+            AppError::Storage(format!("Failed to stage database restore: {e}")).to_response(),
         )));
         return;
     }
 
-    res.status_code(StatusCode::OK);
+    res.status_code(StatusCode::ACCEPTED);
     res.render(Json(ApiResponse::ok(serde_json::json!({
-        "message": "Database restored from backup",
+        "message": "Database restore staged; restart the server to apply it",
         "filename": body.filename,
+        "restart_required": true,
     }))));
 }

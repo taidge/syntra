@@ -128,11 +128,14 @@
 - [x] 唯一没有上游修复版本的 `rsa` Marvin timing advisory 来自并未使用的 Salvo JWT 扩展和 `jsonwebtoken` 默认 PEM/RustCrypto 特性。项目实际只签发/校验 HS256；现移除 Salvo `jwt-auth` 特性，并为 `jsonwebtoken` 关闭默认特性、显式选择已修补的 AWS-LC provider，从依赖图中彻底移除 RustCrypto `rsa` crate，同时避免未选择 provider 时的运行时 panic。
 - [x] `quick-xml 0.41` 移除了 `BytesText::unescape`，`calamine 0.36` 废弃了旧合并区域 API。DOCX/PPTX 导入现显式执行“按 XML 编码解码 + 实体反转义”，XLSX 导入改用 `merge_cells_by_sheet_name`，Office 往返测试继续覆盖这些路径。
 
+## 第九轮复审（SQLite 备份 / 恢复）
+
+- [x] 管理员备份原来直接复制运行中的 SQLite 主文件，会漏掉 WAL 中已提交数据；在线恢复又会覆盖连接池仍在使用的数据库文件，可能造成数据丢失或连接状态分裂。现从活连接序列化一致快照并原子落盘，备份目录按数据库隔离；restore 先复制到临时文件、校验 SQLite header 与 `PRAGMA quick_check`，再生成 pending，返回 202 和 `restart_required`。下次启动在连接池创建前原子切换，并保留旧主库及 WAL/SHM 为唯一 recovery 文件；任何移动/激活失败都会回滚，损坏 pending 会中止启动且不触碰当前数据库。新增文件名/路径、损坏 pending、启动切换、WAL/SHM 保留和管理员 API 在线可用性测试。
+
 ## 仍待处理（本轮不冒充已完成）
 
 - [ ] AI assistant 前端虽已调用 `/api/v1/ai/assist`，后端仍固定返回 501；完整实现需要文档访问控制、模型提供方配置、额度/超时、审计和输出安全策略。
 - [ ] OAuth redirect 会生成但不持久化 `state`，callback 固定返回 501；应在界面隐藏未配置入口，或完整实现 state/PKCE 校验、code exchange、账号绑定与 session 签发。
-- [ ] 管理员备份通过文件复制运行中的 SQLite，在线恢复还会覆盖连接池正在使用的数据库文件；应改用 SQLite Online Backup，并采用“校验后暂存、重启时原子切换”的恢复流程。
 - [ ] `/api/v1/ws/notifications` 后端 WebSocket 没有前端消费者；当前通知仍只能依赖 HTTP 获取，应接入并补断线重连/去重测试，或删除未使用端点。
 - [ ] TOTP setup/verify/disable 后端已完整，但前端账户设置没有管理入口；需补当前密码确认、二维码/secret 展示、备用码一次性展示下载与关闭二因子确认流程。
 - [ ] `cargo audit` 仍报告 1 个 informational/allowed warning：Tantivy 0.25 传递依赖的 `lru 0.12.5` 存在 `IterMut` soundness 问题，修复版本要求 `lru >=0.16.3`，超出 Tantivy 当前 semver 约束。项目代码未直接调用该迭代器；仍应跟踪 Tantivy 上游升级，不能把它误报为完全无 advisory。
@@ -146,7 +149,7 @@
 
 - [x] `cargo fmt --all -- --check` 通过。
 - [x] `cargo check --workspace --all-targets` 通过且无编译 warning。
-- [x] `cargo test --workspace --all-targets` 全部通过，共执行 326 项（collab 12、doc-engine 82、export 43、frontend 16、server lib/main 各 20、server API 集成测试 133）。
+- [x] `cargo test --workspace --all-targets` 全部通过，共执行 333 项（collab 12、doc-engine 82、export 43、frontend 16、server lib/main 各 23、server API 集成测试 134）。
 - [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
 - [x] 前端中英文 i18n JSON 解析通过，Playwright `--list` 成功发现 87 项测试，说明测试源码可加载。
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 已清零；逐项修复嵌套条件、可派生 Default、无效 clone、冗余闭包/排序以及易与 `FromStr` 混淆的 helper 命名，未使用全局 `allow` 压制。

@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod database_backup;
 pub mod email;
 pub mod notification;
 pub mod notification_bus;
