@@ -49,7 +49,7 @@ base64 = "0.22"
 sha2 = "0.10"
 
 # Search
-tantivy = "0.25"
+tantivy = "0.26.1"
 
 # Email
 lettre = "0.11.23"

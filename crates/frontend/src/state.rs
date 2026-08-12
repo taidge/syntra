@@ -273,6 +273,28 @@ pub async fn api_delete(path: &str, token: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Trigger a browser download for short, generated text such as one-time
+/// recovery codes. A data URL avoids sending sensitive contents elsewhere.
+pub fn download_text_file(file_name: &str, contents: &str) -> Result<(), String> {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(contents);
+    let href = format!("data:text/plain;charset=utf-8;base64,{encoded}");
+    let window = web_sys::window().ok_or_else(|| "no global window object".to_string())?;
+    let document = window
+        .document()
+        .ok_or_else(|| "no document object".to_string())?;
+    let anchor: web_sys::HtmlAnchorElement = document
+        .create_element("a")
+        .map_err(|error| format!("{error:?}"))?
+        .dyn_into()
+        .map_err(|_| "failed to create anchor element".to_string())?;
+    anchor.set_href(&href);
+    anchor.set_download(file_name);
+    anchor.click();
+    Ok(())
+}
+
 /// Export a document via the authenticated POST endpoint and trigger a
 /// browser download of the returned bytes.
 pub async fn export_document(doc_id: &str, format: &str, token: &str) -> Result<(), String> {

@@ -69,3 +69,37 @@ pub fn t(key: &str) -> String {
     }
     key.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{EN_JSON, ZH_JSON};
+
+    #[test]
+    fn locale_files_are_valid_and_have_identical_keys() {
+        let en: HashMap<String, String> = serde_json::from_str(EN_JSON).unwrap();
+        let zh: HashMap<String, String> = serde_json::from_str(ZH_JSON).unwrap();
+        let mut en_keys: Vec<&str> = en.keys().map(String::as_str).collect();
+        let mut zh_keys: Vec<&str> = zh.keys().map(String::as_str).collect();
+        en_keys.sort_unstable();
+        zh_keys.sort_unstable();
+        assert_eq!(en_keys, zh_keys);
+    }
+
+    #[test]
+    fn totp_interface_is_fully_localized() {
+        let en: HashMap<String, String> = serde_json::from_str(EN_JSON).unwrap();
+        let zh: HashMap<String, String> = serde_json::from_str(ZH_JSON).unwrap();
+        for key in [
+            "profile.two_factor",
+            "profile.totp_begin_setup",
+            "profile.totp_backup_codes",
+            "profile.totp_verify_enable",
+            "profile.totp_confirm_disable",
+        ] {
+            assert!(en.contains_key(key), "English locale is missing {key}");
+            assert!(zh.contains_key(key), "Chinese locale is missing {key}");
+        }
+    }
+}

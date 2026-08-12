@@ -132,13 +132,18 @@
 
 - [x] 管理员备份原来直接复制运行中的 SQLite 主文件，会漏掉 WAL 中已提交数据；在线恢复又会覆盖连接池仍在使用的数据库文件，可能造成数据丢失或连接状态分裂。现从活连接序列化一致快照并原子落盘，备份目录按数据库隔离；restore 先复制到临时文件、校验 SQLite header 与 `PRAGMA quick_check`，再生成 pending，返回 202 和 `restart_required`。下次启动在连接池创建前原子切换，并保留旧主库及 WAL/SHM 为唯一 recovery 文件；任何移动/激活失败都会回滚，损坏 pending 会中止启动且不触碰当前数据库。新增文件名/路径、损坏 pending、启动切换、WAL/SHM 保留和管理员 API 在线可用性测试。
 
+## 第十轮复审（TOTP 账户安全接线）
+
+- [x] 个人资料页原来没有 TOTP 管理入口，后端能力只能通过手工 API 调用。现接入状态查询、当前密码确认、纯本地二维码生成、手动 secret 展示、备用码一次性展示与本地下载、六位动态码验证启用，以及使用动态码/备用码确认关闭的完整流程；启用成功后立即清除页面内存中的 secret 和备用码。中英文文案保持键集合一致，输入按服务端格式过滤，新增二维码不外传密钥、备用码文件及本地化完整性测试。
+- [x] TOTP `otpauth://` 标签原来直接拼接邮箱，`+`、`@` 和非 ASCII 字符可能被身份验证器误解析；现按 RFC 3986 对邮箱组件进行 UTF-8 百分号编码，并以单元/API 测试覆盖特殊邮箱。setup 中原来被静默吞掉的 pending 删除与 enabled 查询数据库错误也改为失败关闭并返回明确错误。
+- [x] 复扫发现 Tantivy 0.25 仍锁定同时命中两条 soundness advisory 的 `lru 0.12.5`。现升级 Tantivy 至 0.26.1、适配 `TopDocs` 显式按分数排序 API，并将 `lru` 提升到 0.16.4，已消除 `IterMut` 的 RUSTSEC-2026-0002；搜索接口回归测试覆盖升级后的索引、查询和类型过滤。
+
 ## 仍待处理（本轮不冒充已完成）
 
 - [ ] AI assistant 前端虽已调用 `/api/v1/ai/assist`，后端仍固定返回 501；完整实现需要文档访问控制、模型提供方配置、额度/超时、审计和输出安全策略。
 - [ ] OAuth redirect 会生成但不持久化 `state`，callback 固定返回 501；应在界面隐藏未配置入口，或完整实现 state/PKCE 校验、code exchange、账号绑定与 session 签发。
 - [ ] `/api/v1/ws/notifications` 后端 WebSocket 没有前端消费者；当前通知仍只能依赖 HTTP 获取，应接入并补断线重连/去重测试，或删除未使用端点。
-- [ ] TOTP setup/verify/disable 后端已完整，但前端账户设置没有管理入口；需补当前密码确认、二维码/secret 展示、备用码一次性展示下载与关闭二因子确认流程。
-- [ ] `cargo audit` 仍报告 1 个 informational/allowed warning：Tantivy 0.25 传递依赖的 `lru 0.12.5` 存在 `IterMut` soundness 问题，修复版本要求 `lru >=0.16.3`，超出 Tantivy 当前 semver 约束。项目代码未直接调用该迭代器；仍应跟踪 Tantivy 上游升级，不能把它误报为完全无 advisory。
+- [ ] `cargo audit` 仍报告 1 个 informational/allowed warning：Tantivy 0.26.1 传递依赖的 `lru 0.16.4` 存在 `LruCache::pop()` panic safety 问题（RUSTSEC-2026-0253），修复版本要求 `lru >=0.18.2`，超出 Tantivy 当前 `^0.16.3` 约束。Tantivy 当前只调用 `get`/`put`/`len`，且触发还要求 key 的 `Drop` panic 与 `catch_unwind`；仍应跟踪其上游升级，不能把它误报为完全无 advisory。
 
 ## 版本基线说明
 
@@ -149,7 +154,7 @@
 
 - [x] `cargo fmt --all -- --check` 通过。
 - [x] `cargo check --workspace --all-targets` 通过且无编译 warning。
-- [x] `cargo test --workspace --all-targets` 全部通过，共执行 333 项（collab 12、doc-engine 82、export 43、frontend 16、server lib/main 各 23、server API 集成测试 134）。
+- [x] `cargo test --workspace --all-targets` 全部通过，共执行 340 项（collab 12、doc-engine 82、export 43、frontend 21、server lib/main 各 24、server API 集成测试 134）。
 - [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
 - [x] 前端中英文 i18n JSON 解析通过，Playwright `--list` 成功发现 87 项测试，说明测试源码可加载。
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 已清零；逐项修复嵌套条件、可派生 Default、无效 clone、冗余闭包/排序以及易与 `FromStr` 混淆的 helper 命名，未使用全局 `allow` 压制。

@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::components::navbar::Navbar;
+use crate::components::totp_security::TotpSecurity;
 use crate::state::{AuthState, api_get, api_put};
 
 #[derive(Clone, Deserialize, PartialEq)]
@@ -216,6 +217,7 @@ pub fn Profile() -> Element {
                                 span { class: "profile-status", "{pw_status}" }
                             }
                         }
+                        TotpSecurity { token: token.clone() }
                     }
                 }
             }

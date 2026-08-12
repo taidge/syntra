@@ -3453,7 +3453,7 @@ async fn test_totp_status_disabled_by_default() {
 async fn test_totp_setup() {
     let server = TestServer::new().await;
     let (token, _) = server
-        .register("user1", "user1@test.com", "password123")
+        .register("user1", "user1+totp@test.com", "password123")
         .await;
 
     let rejected = server
@@ -3479,14 +3479,16 @@ async fn test_totp_setup() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
     assert!(body["data"]["secret"].is_string());
-    assert!(
-        body["data"]["qr_url"]
-            .as_str()
-            .unwrap()
-            .contains("otpauth://totp/")
-    );
+    let qr_url = body["data"]["qr_url"].as_str().unwrap();
+    assert!(qr_url.starts_with("otpauth://totp/ContrixOffice:"));
+    assert!(qr_url.contains("user1%2Btotp%40test.com"));
     let backup_codes = body["data"]["backup_codes"].as_array().unwrap();
     assert_eq!(backup_codes.len(), 8);
+    assert!(backup_codes.iter().all(|code| {
+        code.as_str().is_some_and(|code| {
+            code.len() == 32 && code.bytes().all(|character| character.is_ascii_hexdigit())
+        })
+    }));
 }
 
 #[tokio::test]

@@ -133,7 +133,7 @@ impl SearchService {
             .parse_query(query)
             .map_err(|e| AppError::Validation(e.to_string()))?;
         let top_docs = searcher
-            .search(&parsed, &TopDocs::with_limit(limit))
+            .search(&parsed, &TopDocs::with_limit(limit).order_by_score())
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
         let mut results = Vec::new();

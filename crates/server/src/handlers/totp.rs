@@ -87,8 +87,24 @@ fn hash_backup_codes(codes: &[String]) -> Result<Vec<String>, AppError> {
 fn build_otpauth_url(email: &str, secret: &str) -> String {
     format!(
         "otpauth://totp/ContrixOffice:{}?secret={}&issuer=ContrixOffice",
-        email, secret,
+        encode_uri_component(email),
+        secret,
     )
+}
+
+/// Percent-encode arbitrary UTF-8 for one URI component. Authenticator labels
+/// use `:` as a separator, so only RFC 3986 unreserved bytes remain literal.
+fn encode_uri_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 /// Decode an RFC 4648 base32 string (case-insensitive, padding/whitespace
@@ -343,6 +359,15 @@ mod totp_tests {
         assert!(!verify_totp_code(&secret, "12345"));
         assert!(!verify_totp_code(&secret, "12345a"));
     }
+
+    #[test]
+    fn otpauth_label_percent_encodes_email_component() {
+        let uri = build_otpauth_url("user+测试@example.com", "ABC234");
+        assert_eq!(
+            uri,
+            "otpauth://totp/ContrixOffice:user%2B%E6%B5%8B%E8%AF%95%40example.com?secret=ABC234&issuer=ContrixOffice"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,20 +447,37 @@ pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response
 
     // Delete any existing (not yet enabled) TOTP secret for this user so
     // we can start fresh.
-    let _ = diesel::delete(
+    if let Err(error) = diesel::delete(
         ts::totp_secrets
             .filter(ts::user_id.eq(&uid))
             .filter(ts::is_enabled.eq(false)),
     )
-    .execute(&mut conn);
+    .execute(&mut conn)
+    {
+        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Database(format!("Failed to replace pending TOTP setup: {error}"))
+                .to_response(),
+        )));
+        return;
+    }
 
     // Check if TOTP is already enabled.
-    let existing: Option<TotpSecret> = ts::totp_secrets
+    let existing: Option<TotpSecret> = match ts::totp_secrets
         .filter(ts::user_id.eq(&uid))
         .filter(ts::is_enabled.eq(true))
         .first::<TotpSecret>(&mut conn)
         .optional()
-        .unwrap_or(None);
+    {
+        Ok(existing) => existing,
+        Err(error) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(error.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
 
     if existing.is_some() {
         res.status_code(StatusCode::CONFLICT);

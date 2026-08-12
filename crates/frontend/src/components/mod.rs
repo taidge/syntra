@@ -10,6 +10,7 @@ pub mod navbar;
 pub mod post_message;
 pub mod sidebar;
 pub mod toast;
+pub mod totp_security;
 pub mod version_history;
 
 pub use toast::{Toast, ToastKind, ToastRack, push_toast};
