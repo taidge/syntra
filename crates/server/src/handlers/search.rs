@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel::sql_types::{Bool, Text};
 use salvo::prelude::*;
 
 use contrix_core::dto::{ApiResponse, SearchResponse, SearchResult};
@@ -32,9 +33,10 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     };
 
     let q: String = req.query("q").unwrap_or_default();
+    let q = q.trim();
     let doc_type_filter: Option<String> = req.query("document_type");
     let page: u32 = req.query("page").unwrap_or(1);
-    let per_page: u32 = req.query("per_page").unwrap_or(20);
+    let per_page: u32 = req.query::<u32>("per_page").unwrap_or(20).clamp(1, 100);
 
     if q.is_empty() {
         res.status_code(StatusCode::BAD_REQUEST);
@@ -43,60 +45,16 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         )));
         return;
     }
-
-    // -------------------------------------------------------------------
-    // Try Tantivy first, fall back to SQL LIKE
-    // -------------------------------------------------------------------
-    if let Some(ref search_svc) = state.search {
-        match search_svc.search(&q, Some(&uid), 1000) {
-            Ok(tantivy_results) => {
-                let filtered: Vec<_> = tantivy_results
-                    .into_iter()
-                    .filter(|(_id, _name, dt, _score)| {
-                        if let Some(ref filter) = doc_type_filter {
-                            dt == filter
-                        } else {
-                            true
-                        }
-                    })
-                    .collect();
-                let total = filtered.len() as u64;
-                let offset = ((page.saturating_sub(1)) * per_page) as usize;
-
-                let results: Vec<SearchResult> = filtered
-                    .into_iter()
-                    .skip(offset)
-                    .take(per_page as usize)
-                    .map(|(id_val, name_val, doc_type_str, score)| SearchResult {
-                        id: id_val.parse().unwrap_or_default(),
-                        name: name_val.clone(),
-                        document_type: DocumentType::parse_lossy(&doc_type_str),
-                        snippet: name_val,
-                        score,
-                        updated_at: Utc::now(),
-                    })
-                    .collect();
-
-                let resp = SearchResponse {
-                    results,
-                    total,
-                    page,
-                    per_page,
-                };
-                res.status_code(StatusCode::OK);
-                res.render(Json(ApiResponse::ok(resp)));
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("Tantivy search failed, falling back to SQL: {e}");
-            }
-        }
+    if q.chars().count() > 500 {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("Search query must not exceed 500 characters".into())
+                .to_response(),
+        )));
+        return;
     }
 
-    // -------------------------------------------------------------------
-    // SQL LIKE fallback
-    // -------------------------------------------------------------------
-    let like_pattern = format!("%{q}%");
+    let like_pattern = literal_like_pattern(q);
     let offset_val = ((page.saturating_sub(1)) * per_page) as i64;
     let limit_val = per_page as i64;
 
@@ -112,49 +70,69 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     };
 
     let (rows, total) = if let Some(ref dt) = doc_type_filter {
+        let count_matches = diesel::dsl::sql::<Bool>("(files.name LIKE ")
+            .bind::<Text, _>(&like_pattern)
+            .sql(" ESCAPE '\\' OR COALESCE(documents.content, '') LIKE ")
+            .bind::<Text, _>(&like_pattern)
+            .sql(" ESCAPE '\\')");
         let count_val: i64 = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
             .filter(f::owner_id.eq(&uid))
             .filter(f::is_trashed.eq(false))
             .filter(d::doc_type.eq(dt))
-            .filter(f::name.like(&like_pattern))
+            .filter(count_matches)
             .count()
             .get_result(&mut conn)
             .unwrap_or(0);
 
+        let row_matches = diesel::dsl::sql::<Bool>("(files.name LIKE ")
+            .bind::<Text, _>(&like_pattern)
+            .sql(" ESCAPE '\\' OR COALESCE(documents.content, '') LIKE ")
+            .bind::<Text, _>(&like_pattern)
+            .sql(" ESCAPE '\\')");
         let results = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
             .filter(f::owner_id.eq(&uid))
             .filter(f::is_trashed.eq(false))
             .filter(d::doc_type.eq(dt))
-            .filter(f::name.like(&like_pattern))
+            .filter(row_matches)
             .order(d::updated_at.desc())
             .limit(limit_val)
             .offset(offset_val)
-            .select((d::id, f::name, d::doc_type, d::updated_at))
-            .load::<(String, String, String, String)>(&mut conn);
+            .select((d::id, f::name, d::doc_type, d::content, d::updated_at))
+            .load::<(String, String, String, Option<String>, String)>(&mut conn);
 
         (results, count_val as u64)
     } else {
+        let count_matches = diesel::dsl::sql::<Bool>("(files.name LIKE ")
+            .bind::<Text, _>(&like_pattern)
+            .sql(" ESCAPE '\\' OR COALESCE(documents.content, '') LIKE ")
+            .bind::<Text, _>(&like_pattern)
+            .sql(" ESCAPE '\\')");
         let count_val: i64 = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
             .filter(f::owner_id.eq(&uid))
             .filter(f::is_trashed.eq(false))
-            .filter(f::name.like(&like_pattern))
+            .filter(count_matches)
             .count()
             .get_result(&mut conn)
             .unwrap_or(0);
 
+        let row_matches = diesel::dsl::sql::<Bool>("(files.name LIKE ")
+            .bind::<Text, _>(&like_pattern)
+            .sql(" ESCAPE '\\' OR COALESCE(documents.content, '') LIKE ")
+            .bind::<Text, _>(&like_pattern)
+            .sql(" ESCAPE '\\')");
         let results = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
             .filter(f::owner_id.eq(&uid))
             .filter(f::is_trashed.eq(false))
-            .filter(f::name.like(&like_pattern))
+            .filter(row_matches)
             .order(d::updated_at.desc())
             .limit(limit_val)
             .offset(offset_val)
-            .select((d::id, f::name, d::doc_type, d::updated_at))
-            .load::<(String, String, String, String)>(&mut conn);
+            .select((d::id, f::name, d::doc_type, d::content, d::updated_at))
+            .load::<(String, String, String, Option<String>, String)>(&mut conn);
 
         (results, count_val as u64)
     };
@@ -164,11 +142,11 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             let results: Vec<SearchResult> = rows
                 .into_iter()
                 .map(
-                    |(id_val, name_val, doc_type_str, updated_val)| SearchResult {
+                    |(id_val, name_val, doc_type_str, content, updated_val)| SearchResult {
                         id: id_val.parse().unwrap_or_default(),
                         name: name_val.clone(),
                         document_type: DocumentType::parse_lossy(&doc_type_str),
-                        snippet: name_val,
+                        snippet: search_snippet(&name_val, content.as_deref(), q),
                         score: 1.0,
                         updated_at: updated_val.parse().unwrap_or_else(|_| Utc::now()),
                     },
@@ -190,5 +168,78 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                 AppError::Database(e.to_string()).to_response(),
             )));
         }
+    }
+}
+
+fn search_snippet(name: &str, content: Option<&str>, query: &str) -> String {
+    if name.to_lowercase().contains(&query.to_lowercase()) {
+        return name.to_string();
+    }
+    let Some(content) = content else {
+        return name.to_string();
+    };
+    let byte_index = content.find(query).or_else(|| {
+        query
+            .is_ascii()
+            .then(|| {
+                content
+                    .to_ascii_lowercase()
+                    .find(&query.to_ascii_lowercase())
+            })
+            .flatten()
+    });
+    let Some(byte_index) = byte_index else {
+        return name.to_string();
+    };
+    let start = content[..byte_index]
+        .char_indices()
+        .rev()
+        .nth(40)
+        .map_or(0, |(index, _)| index);
+    let end = content[byte_index..]
+        .char_indices()
+        .nth(120)
+        .map_or(content.len(), |(index, _)| byte_index + index);
+    let excerpt = &content[start..end];
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        excerpt,
+        if end < content.len() { "…" } else { "" }
+    )
+}
+
+fn literal_like_pattern(query: &str) -> String {
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for character in query.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{literal_like_pattern, search_snippet};
+
+    #[test]
+    fn snippets_use_content_matches_without_breaking_utf8() {
+        let content = format!("{}关键字{}", "前".repeat(80), "后".repeat(160));
+        let snippet = search_snippet("Untitled", Some(&content), "关键字");
+        assert!(snippet.contains("关键字"));
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+    }
+
+    #[test]
+    fn like_wildcards_are_escaped_as_literal_text() {
+        assert_eq!(
+            literal_like_pattern(r"50%_off\today"),
+            r"%50\%\_off\\today%"
+        );
     }
 }

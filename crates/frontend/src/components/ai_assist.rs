@@ -2,7 +2,17 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{Toast, ToastKind, push_toast};
-use crate::state::{AuthState, api_post};
+use crate::state::{AuthState, api_get, api_post};
+
+#[derive(Deserialize)]
+struct Capabilities {
+    features: CapabilityFeatures,
+}
+
+#[derive(Deserialize)]
+struct CapabilityFeatures {
+    ai: bool,
+}
 
 #[derive(Serialize)]
 struct AssistRequest {
@@ -33,6 +43,8 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
     let mut answer = use_signal(String::new);
     let mut loading = use_signal(|| false);
     let doc_id = props.doc_id.clone();
+    let capabilities =
+        use_resource(move || async { api_get::<Capabilities>("/capabilities", "").await });
 
     let ai_title = crate::i18n::t("ai.title");
     let send_label = crate::i18n::t("ai.send");
@@ -65,6 +77,13 @@ pub fn AiAssist(props: AiAssistProps) -> Element {
             loading.set(false);
         });
     };
+
+    if !matches!(
+        capabilities.read().as_ref(),
+        Some(Ok(capabilities)) if capabilities.features.ai
+    ) {
+        return rsx! {};
+    }
 
     rsx! {
         button {

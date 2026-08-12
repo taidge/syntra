@@ -31,18 +31,3 @@ CREATE TABLE IF NOT EXISTS invitations (
 
 CREATE INDEX IF NOT EXISTS idx_invitations_email ON invitations(email);
 CREATE INDEX IF NOT EXISTS idx_invitations_token ON invitations(token);
-
--- OAuth accounts
-CREATE TABLE IF NOT EXISTS oauth_accounts (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT NOT NULL REFERENCES users(id),
-    provider TEXT NOT NULL,
-    provider_user_id TEXT NOT NULL,
-    access_token TEXT,
-    refresh_token TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(provider, provider_user_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_oauth_accounts_user ON oauth_accounts(user_id);

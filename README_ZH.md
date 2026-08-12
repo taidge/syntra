@@ -90,9 +90,9 @@
 
 ### 搜索
 
-- 全文搜索所有文档
-- 按文档类型、日期范围筛选
-- 高亮搜索结果片段
+- 搜索文档名称和已保存正文
+- 按文档类型筛选
+- 基于正文上下文生成结果摘要
 - 分页结果
 
 ### 通知
@@ -117,7 +117,7 @@
 | 数据库 | [SQLx](https://github.com/launchbadge/sqlx) + SQLite/PostgreSQL | 异步数据库，编译时安全检查 |
 | 认证 | JWT + Argon2 | 无状态认证 + 安全哈希 |
 | 实时协作 | WebSocket + CRDT | 低延迟协作 |
-| 搜索 | [Tantivy](https://github.com/quickwit-oss/tantivy) | Rust 全文搜索引擎 |
+| 搜索 | SQLite | 与事务一致的名称/正文搜索 |
 | 配置 | [Figment](https://github.com/SergioBenitez/Figment) | 分层配置（TOML + 环境变量） |
 | 日志 | [tracing](https://github.com/tokio-rs/tracing) | 结构化异步日志 |
 
@@ -405,5 +405,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 - [Salvo](https://salvo.rs) — 快速灵活的 Rust Web 框架
 - [Dioxus](https://dioxuslabs.com) — Rust 跨平台 UI 框架
 - [SQLx](https://github.com/launchbadge/sqlx) — Rust 异步 SQL 工具包
-- [Tantivy](https://github.com/quickwit-oss/tantivy) — Rust 全文搜索引擎
 - 灵感来源于 [Collabora Online](https://www.collaboraoffice.com/) 和 [ONLYOFFICE](https://www.onlyoffice.com/)

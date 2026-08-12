@@ -24,20 +24,22 @@ default_quota_mb = 5120
 # s3_secret_key = ""
 # s3_endpoint = ""
 
-[search]
-index_path = "data/search_index"
-
 [rate_limit]
 max_requests = 100
 window_seconds = 60
 enabled = true
 trust_forwarded_headers = false
 
-[oauth]
-# google_client_id = ""
-# google_client_secret = ""
-# github_client_id = ""
-# github_client_secret = ""
+[ai]
+enabled = false
+endpoint = "https://api.openai.com/v1/chat/completions"
+api_key = ""
+model = ""
+timeout_seconds = 30
+max_requests_per_hour = 20
+max_prompt_chars = 4000
+max_document_chars = 40000
+max_output_chars = 12000
 
 [trash]
 auto_delete_days = 30

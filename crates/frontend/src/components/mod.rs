@@ -7,6 +7,7 @@ pub mod menubar;
 pub mod mobile_bar;
 pub mod modal;
 pub mod navbar;
+pub mod notification_center;
 pub mod post_message;
 pub mod sidebar;
 pub mod toast;

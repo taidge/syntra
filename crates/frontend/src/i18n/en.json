@@ -29,6 +29,13 @@
   "nav.logout": "Logout",
   "nav.theme_toggle": "Toggle dark mode",
   "nav.search_placeholder": "Search documents...",
+  "notifications.title": "Notifications",
+  "notifications.live": "Live",
+  "notifications.reconnecting": "Reconnecting…",
+  "notifications.offline": "Offline",
+  "notifications.mark_all_read": "Mark all read",
+  "notifications.empty": "No notifications yet.",
+  "notifications.open": "Open",
 
   "auth.login_title": "Sign In",
   "auth.register_title": "Create Account",

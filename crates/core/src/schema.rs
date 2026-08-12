@@ -337,7 +337,7 @@ diesel::table! {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4: Templates, Invitations, OAuth
+// Phase 4: Templates and invitations
 // ---------------------------------------------------------------------------
 
 diesel::table! {
@@ -367,19 +367,6 @@ diesel::table! {
         accepted_at -> Nullable<Text>,
         expires_at -> Text,
         created_at -> Text,
-    }
-}
-
-diesel::table! {
-    oauth_accounts (id) {
-        id -> Text,
-        user_id -> Text,
-        provider -> Text,
-        provider_user_id -> Text,
-        access_token -> Nullable<Text>,
-        refresh_token -> Nullable<Text>,
-        created_at -> Text,
-        updated_at -> Text,
     }
 }
 
@@ -640,7 +627,6 @@ diesel::joinable!(recent_files -> files (file_id));
 diesel::joinable!(sessions -> users (user_id));
 diesel::joinable!(webhook_deliveries -> webhooks (webhook_id));
 diesel::joinable!(templates -> users (created_by));
-diesel::joinable!(oauth_accounts -> users (user_id));
 diesel::joinable!(upload_sessions -> users (user_id));
 diesel::joinable!(file_locks -> files (file_id));
 diesel::joinable!(user_presence -> documents (document_id));
@@ -681,7 +667,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     smtp_settings,
     templates,
     invitations,
-    oauth_accounts,
     upload_sessions,
     file_locks,
     user_presence,

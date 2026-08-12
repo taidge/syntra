@@ -14,14 +14,12 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     /// File storage settings
     pub storage: StorageConfig,
-    /// Full-text search settings
-    pub search: SearchConfig,
     /// Rate limiting settings
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
-    /// OAuth provider settings
+    /// Optional OpenAI-compatible assistant provider.
     #[serde(default)]
-    pub oauth: OAuthConfig,
+    pub ai: AiConfig,
     /// Trash retention settings
     #[serde(default)]
     pub trash: TrashConfig,
@@ -87,13 +85,6 @@ pub struct StorageConfig {
     pub s3_endpoint: Option<String>,
 }
 
-/// Tantivy full-text search index configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SearchConfig {
-    /// Directory where the Tantivy index is stored
-    pub index_path: String,
-}
-
 /// Rate limiting configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
@@ -119,13 +110,51 @@ impl Default for RateLimitConfig {
     }
 }
 
-/// OAuth provider configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct OAuthConfig {
-    pub google_client_id: Option<String>,
-    pub google_client_secret: Option<String>,
-    pub github_client_id: Option<String>,
-    pub github_client_secret: Option<String>,
+/// Configuration for an OpenAI-compatible chat-completions endpoint.
+#[derive(Clone, Deserialize)]
+pub struct AiConfig {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub api_key: String,
+    pub model: String,
+    pub timeout_seconds: u64,
+    pub max_requests_per_hour: u32,
+    pub max_prompt_chars: usize,
+    pub max_document_chars: usize,
+    pub max_output_chars: usize,
+}
+
+impl std::fmt::Debug for AiConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiConfig")
+            .field("enabled", &self.enabled)
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("timeout_seconds", &self.timeout_seconds)
+            .field("max_requests_per_hour", &self.max_requests_per_hour)
+            .field("max_prompt_chars", &self.max_prompt_chars)
+            .field("max_document_chars", &self.max_document_chars)
+            .field("max_output_chars", &self.max_output_chars)
+            .finish()
+    }
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "https://api.openai.com/v1/chat/completions".into(),
+            api_key: String::new(),
+            model: String::new(),
+            timeout_seconds: 30,
+            max_requests_per_hour: 20,
+            max_prompt_chars: 4_000,
+            max_document_chars: 40_000,
+            max_output_chars: 12_000,
+        }
+    }
 }
 
 /// Trash retention configuration.

@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod audit;
 pub mod database_backup;
 pub mod email;
@@ -5,17 +6,16 @@ pub mod notification;
 pub mod notification_bus;
 pub mod password;
 pub mod s3_storage;
-pub mod search_index;
 pub mod storage;
 pub mod thumbnail;
 pub mod webhook;
 pub mod wopi_sessions;
 
+pub use ai::AiService;
 pub use audit::{AuditContext, AuditService};
 pub use email::EmailService;
 pub use notification::NotificationService;
 pub use notification_bus::NotificationBus;
-pub use search_index::SearchService;
 pub use storage::{StorageBackend, StorageService};
 pub use thumbnail::ThumbnailService;
 pub use webhook::WebhookService;

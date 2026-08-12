@@ -25,7 +25,6 @@ pub mod ip_restrictions;
 pub mod monitoring;
 pub mod notification_prefs;
 pub mod notifications;
-pub mod oauth;
 pub mod password_policy;
 pub mod presence;
 pub mod quota;

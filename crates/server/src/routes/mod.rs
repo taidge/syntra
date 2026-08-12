@@ -116,8 +116,6 @@ fn auth_routes() -> Router {
         .push(Router::with_path("login").post(handlers::auth::login))
         .push(Router::with_path("forgot-password").post(handlers::auth::forgot_password))
         .push(Router::with_path("reset-password").post(handlers::auth::reset_password))
-        .push(Router::with_path("oauth/{provider}").get(handlers::oauth::oauth_redirect))
-        .push(Router::with_path("oauth/{provider}/callback").get(handlers::oauth::oauth_callback))
 }
 
 fn auth_protected_routes() -> Router {

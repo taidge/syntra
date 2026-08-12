@@ -2,7 +2,7 @@
 
 > Last updated: 2026-03-19
 > Status: 165 API endpoints, 40 handler files, 9 migrations, 37+ tables
-> Stack: Rust (Salvo + Diesel + Dioxus), SQLite, Tantivy, WebSocket
+> Stack: Rust (Salvo + Diesel + Dioxus), SQLite, WebSocket
 
 ---
 
@@ -61,20 +61,10 @@
 - Broadcast lag (`RecvError::Lagged`) silently skips messages
 - **Action:** Add tombstone markers, tie-break by user_id for determinism, request re-sync on lag
 
-### 10. Real-time Search Indexing
-- Tantivy index never updated after initial build
-- Search returns stale results
-- **Action:** Update index on document create/update/delete in handlers
-
 ### 11. Role-Based Access Control in Rooms
 - Room members have a `role` field but it's not enforced
 - Any member can do anything
 - **Action:** Check role (admin/editor/viewer) in file/document handlers when file belongs to a room
-
-### 12. OAuth / Social Login (Google, GitHub)
-- Config fields exist, handler file missing
-- Commented out in default.toml
-- **Action:** Implement `handlers/oauth.rs` with authorization code flow
 
 ### 13. Collaborative Cursor Visualization
 - Backend sends `CursorUpdate` messages with user color

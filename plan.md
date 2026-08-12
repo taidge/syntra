@@ -7,7 +7,7 @@
 - **Frontend**: Dioxus (Web/Desktop via WASM + SSR)
 - **Real-time**: WebSocket-based collaboration via Salvo
 - **File Processing**: Pure Rust document parsers/generators
-- **Search**: Tantivy full-text search engine
+- **Search**: SQLite-backed document name/content search
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -198,11 +198,11 @@ office/
 ### Phase 5: Search & Notifications
 
 #### 5.1 Full-text Search
-- [x] Index documents on upload/save
+- [x] Query current document state without a secondary index
 - [x] Search across all document types
 - [x] Search within document content
-- [x] Search filters (type, date, owner)
-- [x] Search result highlighting
+- [x] Search filter (document type)
+- [x] Contextual search result snippets
 
 #### 5.2 Notifications
 - [x] In-app notifications
@@ -287,7 +287,7 @@ POST   /api/v1/comments/:id/resolve
 
 ### Search
 ```
-GET    /api/v1/search?q=...&type=...&from=...&to=...
+GET    /api/v1/search?q=...&document_type=...&page=...&per_page=...
 ```
 
 ### Notifications
@@ -322,7 +322,7 @@ PUT    /api/v1/admin/settings
 | Database | SQLx + SQLite/PostgreSQL | Compile-time checked SQL, async |
 | Auth | JWT + Argon2 | Industry standard token auth + secure hashing |
 | Real-time | WebSocket + CRDT | Low-latency collaboration |
-| Search | Tantivy | Fast Rust full-text search engine |
+| Search | SQLite | Transactionally consistent name/content search |
 | Serialization | serde + serde_json | Standard Rust serialization |
 | File Processing | calamine (xlsx), docx-rs, printpdf | Rust-native document handling |
 | Caching | Redis (deadpool-redis) | Fast in-memory caching |

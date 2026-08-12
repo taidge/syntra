@@ -25,26 +25,6 @@ use crate::state::AppState;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn update_search_index(
-    state: &AppState,
-    name: &str,
-    doc_id: &str,
-    content: &str,
-    doc_type: &str,
-    owner_id: &str,
-) {
-    // Best-effort search index update via Tantivy — log errors but never fail the request.
-    if let Some(ref search_svc) = state.search {
-        if let Err(e) = search_svc.index_document(doc_id, name, content, doc_type, owner_id) {
-            tracing::warn!("Failed to update search index for document {doc_id}: {e}");
-        } else {
-            tracing::debug!("Search index updated for document {doc_id}: {name}");
-        }
-    } else {
-        tracing::debug!("Search index not available — skipping update for document {doc_id}");
-    }
-}
-
 fn default_content(doc_type: &DocumentType, name: &str) -> serde_json::Value {
     match doc_type {
         DocumentType::Writer => {
@@ -273,16 +253,6 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         )));
         return;
     }
-
-    // Best-effort search index update.
-    update_search_index(
-        &state,
-        &body.name,
-        &doc_id_val.to_string(),
-        &content_str,
-        body.document_type.as_str(),
-        &uid,
-    );
 
     crate::services::WebhookService::fire_event(
         &state.db,
@@ -584,16 +554,6 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
                 .execute(&mut conn);
             delete_previous_blob_if_safe(&state.storage, &old_path).await;
 
-            // Best-effort search index update.
-            update_search_index(
-                &state,
-                &file_name,
-                &resolved_doc_id,
-                &content_str,
-                &doc_type_str,
-                &owner_id,
-            );
-
             crate::services::WebhookService::fire_event(
                 &state.db,
                 "document.updated",
@@ -706,12 +666,6 @@ pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             f::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn);
-
-    if let Some(ref search_svc) = state.search
-        && let Err(e) = search_svc.remove_document(&resolved_doc_id)
-    {
-        tracing::warn!("Failed to remove document {resolved_doc_id} from search index: {e}");
-    }
 
     crate::services::WebhookService::fire_event(
         &state.db,

@@ -14,7 +14,7 @@
 - [x] `upload.rs` 中的 `session_to_response` 没有任何调用。已删除该死代码。
 - [x] `tests/common` 构造 `AppState` 时漏掉 `notifications`，导致后端集成测试不能编译。已补齐测试夹具字段。
 
-## 待处理
+## 第二轮已完成
 
 - [x] `config/production.toml` 没有被启动逻辑加载，并且写的是 PostgreSQL URL；当前服务只初始化 SQLite 连接。已支持按 `CONTRIX_ENV`/`APP_ENV` 加载 `config/{env}.toml`，并把生产配置改回 SQLite。
 - [x] `S3Storage` 已实现并在配置中暴露 `backend = "s3"`，但上传、下载、缩略图、转换等路径仍只接入本地 `StorageService`。已引入统一 `StorageBackend`，本地/S3 均从启动配置初始化，上传、下载、缩略图、转换、WOPI 写入和清理任务统一走后端。
@@ -27,7 +27,7 @@
 - [x] `cargo check -p contrix-server --lib` 仍报告若干既有 warning，包括未使用 import、未接入的 `IpFilter`/`AuditService`/`EmailService`/`S3Storage` 等。已清理明确未使用 import、接入 `IpFilter`，并对保留但未接线的服务模块做显式 dead-code 标注。
 - [x] `cargo check -p contrix-frontend` 报告未使用组件重导出、多余 `mut`、未调用的协作发送函数、未读取字段和过期 helper。已清理可自动修复项，并删除 `send_message`、`RemoteCursor::is_active`、`display_value`、`AuthState::is_authenticated` 等死代码。
 
-## 后续建议
+## 后续建议（已完成）
 
 - [x] 如果需要真实 S3 支持，应引入 `StorageBackend` trait 并贯穿上传、下载、缩略图、转换输出和清理任务，而不是只保留单独的 `S3Storage` helper。已在 `_todos.md` 中拆解并完成。
 - [x] WOPI 更彻底的 token 方案应使用短期/一次性 token 或服务端 session exchange，当前改动只是减少浏览器侧泄漏面。已在 `_todos.md` 中拆解并完成服务端 session exchange。
@@ -70,15 +70,15 @@
 
 ### 高危
 - [x] `ws.rs` 协作 WebSocket 越权：upgrade 前已用 `access::load_accessible_document` 校验 editor 权限；接收 Operation/CursorUpdate 时强制 `op.user_id`/`cursor.user_id = 认证用户`，杜绝归属伪造。同时修复 WS 认证可用性——`jwt_auth_middleware` 现支持 `?token=` query 回退（浏览器 WebSocket 无法设 Authorization 头），否则该路由实际不可用。
-- [x] `totp.rs` 假 2FA：已用自实现的 SHA-1/HMAC-SHA1（无新依赖）落地真正的 RFC 6238 校验，`verify_totp` 按 secret 计算并带 ±1 时间窗比对；新增 RFC 6238 测试向量与 base32 往返测试。（注：login 流程强制二因子仍属后续工作。）
+- [x] `totp.rs` 假 2FA：已用自实现的 SHA-1/HMAC-SHA1（无新依赖）落地真正的 RFC 6238 校验，`verify_totp` 按 secret 计算并带 ±1 时间窗比对；新增 RFC 6238 测试向量与 base32 往返测试。登录强制二因子已在第六轮完成。
 - [x] `oauth.rs` 回调 stub：已停止回显授权 code，改为诚实返回 501 Not Implemented（与 AI stub→501 一致），并在注释中标注完整实现须持久化校验 `state` 以防 CSRF。
 - [x] `collab/session.rs` OT 收敛：`Operation` 新增 `base_version` 字段（serde 默认），`apply_operation` 改用 `operations[base_version..]` 作为转换基准，不再误用 per-client counter；新增 base_version 保持性测试。
 - [x] `collab/operation.rs` undo 逆操作丢数据：`Delete`/`SetProperty`/`RemoveElement` 新增可选 `removed_content`/`old_value`/`removed_element`，`inverse()` 在有捕获值时精确还原、无值时退化为安全的空插入/删除而非破坏文档；新增 inverse 还原测试。
 
 ### 中危
-- [x] `admin.rs` update_user 已加 role 白名单（admin/editor/viewer/disabled）与「最后一个管理员」保护；`login` 拒绝 `disabled` 账户换取新 token。（注：已签发未过期 JWT 仍有效——中间件回查 DB / session 失效属后续工作。）
+- [x] `admin.rs` update_user 已加 role 白名单（admin/editor/viewer/disabled）与「最后一个管理员」保护；`login` 拒绝 `disabled` 账户换取新 token。JWT 中间件 DB 回查与 session 即时失效已在第六轮完成。
 - [x] `ip_filter.rs` 已实现真正的 CIDR 匹配（IPv4/IPv6，含 `/0` 与非法规则处理），并补单元测试；精确 IP 仍按解析后比较。
-- [x] `auth.rs` register/reset 已接入 `PasswordService::validate_password` 强度校验；默认策略放宽为仅强制最小长度（避免破坏既有账户/夹具，管理员可经 policy API 收紧）。（注：`forgot_password` 发信与 forgot/reset 独立限流仍待办。）
+- [x] `auth.rs` register/reset 已接入 `PasswordService::validate_password` 强度校验；默认策略放宽为仅强制最小长度（避免破坏既有账户/夹具，管理员可经 policy API 收紧）。`forgot_password` 发信已在第五轮接入，公开认证接口受边缘 IP 限流保护。
 - [x] `rooms.rs` get_room/list_members、`groups.rs` get_group/list_members 已加成员/创建者校验（房间 owner 不一定在 room_members，故 member-or-owner 双查）；存在性先判定再鉴权，避免把已删除资源误报为 403。
 - [x] `client_log.rs` 公开端点已限制单请求条目数（50）、字段长度截断、level 白名单，list 分页 per_page 钳制。
 - [x] 限流退化为纯 IP：新增第二个 `user_rate_limiter` 挂在受保护子路由（JWT 之后），按认证 user_id 限流；边缘 IP 限流器保留覆盖公开路由。同一 NAT 下不同用户不再共享配额。
@@ -138,12 +138,18 @@
 - [x] TOTP `otpauth://` 标签原来直接拼接邮箱，`+`、`@` 和非 ASCII 字符可能被身份验证器误解析；现按 RFC 3986 对邮箱组件进行 UTF-8 百分号编码，并以单元/API 测试覆盖特殊邮箱。setup 中原来被静默吞掉的 pending 删除与 enabled 查询数据库错误也改为失败关闭并返回明确错误。
 - [x] 复扫发现 Tantivy 0.25 仍锁定同时命中两条 soundness advisory 的 `lru 0.12.5`。现升级 Tantivy 至 0.26.1、适配 `TopDocs` 显式按分数排序 API，并将 `lru` 提升到 0.16.4，已消除 `IterMut` 的 RUSTSEC-2026-0002；搜索接口回归测试覆盖升级后的索引、查询和类型过滤。
 
-## 仍待处理（本轮不冒充已完成）
+## 第十一轮推进（原“仍待处理”已清零）
 
-- [ ] AI assistant 前端虽已调用 `/api/v1/ai/assist`，后端仍固定返回 501；完整实现需要文档访问控制、模型提供方配置、额度/超时、审计和输出安全策略。
-- [ ] OAuth redirect 会生成但不持久化 `state`，callback 固定返回 501；应在界面隐藏未配置入口，或完整实现 state/PKCE 校验、code exchange、账号绑定与 session 签发。
-- [ ] `/api/v1/ws/notifications` 后端 WebSocket 没有前端消费者；当前通知仍只能依赖 HTTP 获取，应接入并补断线重连/去重测试，或删除未使用端点。
-- [ ] `cargo audit` 仍报告 1 个 informational/allowed warning：Tantivy 0.26.1 传递依赖的 `lru 0.16.4` 存在 `LruCache::pop()` panic safety 问题（RUSTSEC-2026-0253），修复版本要求 `lru >=0.18.2`，超出 Tantivy 当前 `^0.16.3` 约束。Tantivy 当前只调用 `get`/`put`/`len`，且触发还要求 key 的 `Drop` panic 与 `catch_unwind`；仍应跟踪其上游升级，不能把它误报为完全无 advisory。
+- [x] AI assistant：后端已实现可选 OpenAI-compatible chat-completions 服务；启动时校验 endpoint/key/model/限额，生产环境强制 HTTPS。接口在确认 viewer 文档权限后加载正文，限制 prompt/文档/响应长度，按用户做小时额度与请求超时，抵御正文 prompt injection、过滤控制字符、拒绝空响应，并只把模式、模型和字符计数写入审计，不记录 prompt/正文。前端通过 capabilities 自动隐藏未启用入口；集成测试覆盖越权折叠为 404、禁用态 503、真实 mock provider 调用、敏感内容不进入审计。
+- [x] OAuth：项目没有前端入口，原 redirect/callback 也没有 state/PKCE/code exchange/session 的闭环。按本轮“不顾兼容性、不要残留”要求，已彻底删除 OAuth 配置、模型、schema、handler、路由和旧建表 SQL，并新增破坏性迁移 023 删除可能存有明文 access/refresh token 的 `oauth_accounts` 表。
+- [x] 实时通知：前端 Navbar 已接入 `/api/v1/ws/notifications`，支持首次 REST 对账、实时 toast/未读数、单条及全部已读、去重、断线指数退避和服务端 lag 后 resync；浏览器回调由连接句柄持有并在销毁时释放，不再依赖 `Closure::forget` 泄漏。集成测试验证数据库落库与 WebSocket 推送同一事件。
+- [x] `cargo audit` 的 lru advisory：删除未提供必要一致性且引入 advisory 的 Tantivy 二级索引及其完整依赖链，搜索改为直接查询 SQLite 当前文件名/文档正文，避免索引陈旧；同步删除配置、状态、更新钩子和过时文档。`cargo audit` 现为 0 vulnerability、0 warning。
+- [x] 搜索改造复核发现 SQL 裸表达式的 `AND/OR` 优先级会让正文命中绕过 owner、回收站和 document_type 条件，存在跨用户正文泄露风险。现对名称/正文匹配整体加括号，并新增跨属主隔离、类型筛选、正文查询和 LIKE 通配符字面转义测试。
+- [x] AI 上游响应同时按 Content-Length 和流式 chunk 累计值限流，避免恶意或异常 provider 让服务端无界缓冲 JSON；输出先清理控制字符和首尾空白再按 Unicode 字符安全截断。
+
+## 清零结论
+
+- [x] 本报告不存在未勾选条目；本轮指定的 AI、OAuth、通知 WebSocket、Tantivy/lru 四条均已实现或彻底删除，不保留 501 stub、未接线路由、死配置或有 advisory 的搜索依赖。
 
 ## 版本基线说明
 
@@ -154,8 +160,8 @@
 
 - [x] `cargo fmt --all -- --check` 通过。
 - [x] `cargo check --workspace --all-targets` 通过且无编译 warning。
-- [x] `cargo test --workspace --all-targets` 全部通过，共执行 340 项（collab 12、doc-engine 82、export 43、frontend 21、server lib/main 各 24、server API 集成测试 134）。
+- [x] `cargo test --workspace --all-targets` 全部通过，共执行 357 项（collab 12、doc-engine 82、export 43、frontend 23、server lib/main 各 29、server API 集成测试 139）。
 - [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
 - [x] 前端中英文 i18n JSON 解析通过，Playwright `--list` 成功发现 87 项测试，说明测试源码可加载。
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 已清零；逐项修复嵌套条件、可派生 Default、无效 clone、冗余闭包/排序以及易与 `FromStr` 混淆的 helper 命名，未使用全局 `allow` 压制。
-- [x] `cargo audit` 复扫为 0 个 vulnerability，另有 1 个已在“仍待处理”记录的 transitive informational warning（未配置 ignore）。
+- [x] `cargo audit` 扫描 559 个依赖，结果为 0 个 vulnerability、0 个 warning，未配置 ignore。

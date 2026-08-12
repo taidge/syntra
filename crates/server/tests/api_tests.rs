@@ -1,7 +1,46 @@
 mod common;
 
 use common::TestServer;
+use contrix_core::config::AiConfig;
 use contrix_server::handlers::totp::current_totp_code;
+use salvo::conn::Acceptor;
+use salvo::prelude::*;
+
+#[handler]
+async fn mock_ai_provider(req: &mut Request, res: &mut Response) {
+    assert_eq!(
+        req.headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer test-ai-key")
+    );
+    let body: serde_json::Value = req.parse_json().await.unwrap();
+    assert_eq!(body["model"], "test-model");
+    assert!(
+        body["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("confidential-marker")
+    );
+    res.render(Json(serde_json::json!({
+        "choices": [{ "message": { "content": "  safe\u{0} answer  " } }]
+    })));
+}
+
+async fn start_mock_ai_provider() -> String {
+    let acceptor = TcpListener::new("127.0.0.1:0").bind().await;
+    let address = acceptor.holdings()[0]
+        .local_addr
+        .clone()
+        .into_std()
+        .unwrap();
+    tokio::spawn(async move {
+        Server::new(acceptor)
+            .serve(Router::with_path("chat/completions").post(mock_ai_provider))
+            .await;
+    });
+    format!("http://{address}/chat/completions")
+}
 
 // ===========================================================================
 // Auth tests
@@ -1084,6 +1123,189 @@ async fn test_search_with_type_filter() {
     assert_eq!(results[0]["document_type"], "calc");
 }
 
+#[tokio::test]
+async fn test_search_matches_document_content_without_external_index() {
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("content-search", "content-search@test.com", "password123")
+        .await;
+    let (document_id, _, _) = server
+        .create_document(&token, "Unrelated title", "writer", None)
+        .await;
+    let updated = server
+        .client
+        .put(server.url(&format!("/api/v1/documents/{document_id}")))
+        .headers(server.auth_header(&token))
+        .json(&serde_json::json!({
+            "content": { "text": "The internal phrase is sapphire-orbit" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), 200);
+
+    let response = server
+        .client
+        .get(server.url("/api/v1/search?q=sapphire-orbit"))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["data"]["total"], 1);
+    assert!(
+        body["data"]["results"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("sapphire-orbit")
+    );
+}
+
+#[tokio::test]
+async fn test_content_search_never_crosses_document_ownership() {
+    let server = TestServer::new().await;
+    let (owner_token, _) = server
+        .register("search-owner", "search-owner@test.com", "password123")
+        .await;
+    let (other_token, _) = server
+        .register("search-other", "search-other@test.com", "password123")
+        .await;
+    let (document_id, _, _) = server
+        .create_document(&owner_token, "Private notes", "writer", None)
+        .await;
+    let updated = server
+        .client
+        .put(server.url(&format!("/api/v1/documents/{document_id}")))
+        .headers(server.auth_header(&owner_token))
+        .json(&serde_json::json!({
+            "content": { "text": "owner-only-needle" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), 200);
+
+    let response = server
+        .client
+        .get(server.url("/api/v1/search?q=owner-only-needle"))
+        .headers(server.auth_header(&other_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["data"]["total"], 0);
+    assert!(body["data"]["results"].as_array().unwrap().is_empty());
+}
+
+// ===========================================================================
+// AI assistant tests
+// ===========================================================================
+
+#[tokio::test]
+async fn test_ai_assistant_enforces_access_and_reports_disabled_state() {
+    let server = TestServer::new().await;
+    let (owner_token, _) = server
+        .register("ai-owner", "ai-owner@test.com", "password123")
+        .await;
+    let (other_token, _) = server
+        .register("ai-other", "ai-other@test.com", "password123")
+        .await;
+    let (document_id, _, _) = server
+        .create_document(&owner_token, "AI document", "writer", None)
+        .await;
+
+    let denied = server
+        .client
+        .post(server.url("/api/v1/ai/assist"))
+        .headers(server.auth_header(&other_token))
+        .json(&serde_json::json!({
+            "document_id": document_id,
+            "prompt": "summarize",
+            "mode": "summarize"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 404);
+
+    let disabled = server
+        .client
+        .post(server.url("/api/v1/ai/assist"))
+        .headers(server.auth_header(&owner_token))
+        .json(&serde_json::json!({
+            "document_id": document_id,
+            "prompt": "summarize",
+            "mode": "summarize"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), 503);
+}
+
+#[tokio::test]
+async fn test_ai_assistant_calls_provider_sanitizes_output_and_audits() {
+    let endpoint = start_mock_ai_provider().await;
+    let server = TestServer::new_with_ai(AiConfig {
+        enabled: true,
+        endpoint,
+        api_key: "test-ai-key".into(),
+        model: "test-model".into(),
+        max_requests_per_hour: 2,
+        ..AiConfig::default()
+    })
+    .await;
+    let (token, registration) = server
+        .register("ai-user", "ai-user@test.com", "password123")
+        .await;
+    let user_id = registration["data"]["user"]["id"].as_str().unwrap();
+    let (document_id, _, _) = server
+        .create_document(&token, "AI provider document", "writer", None)
+        .await;
+    let updated = server
+        .client
+        .put(server.url(&format!("/api/v1/documents/{document_id}")))
+        .headers(server.auth_header(&token))
+        .json(&serde_json::json!({
+            "content": { "text": "confidential-marker" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), 200);
+
+    let response = server
+        .client
+        .post(server.url("/api/v1/ai/assist"))
+        .headers(server.auth_header(&token))
+        .json(&serde_json::json!({
+            "document_id": document_id,
+            "prompt": "Explain this",
+            "mode": "explain"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["data"]["answer"], "safe answer");
+
+    use contrix_core::schema::activity_logs::dsl as logs;
+    use diesel::prelude::*;
+    let mut connection = server.db.get().unwrap();
+    let details: String = logs::activity_logs
+        .filter(logs::user_id.eq(user_id))
+        .filter(logs::action.eq("ai.assist"))
+        .select(logs::details)
+        .first::<Option<String>>(&mut connection)
+        .unwrap()
+        .unwrap();
+    assert!(!details.contains("Explain this"));
+    assert!(!details.contains("confidential-marker"));
+}
+
 // ===========================================================================
 // Notification tests
 // ===========================================================================
@@ -1107,6 +1329,50 @@ async fn test_list_notifications_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let notifications = body["data"].as_array().unwrap();
     assert!(notifications.is_empty());
+}
+
+#[tokio::test]
+async fn test_notification_websocket_delivers_persisted_event() {
+    use futures_util::StreamExt;
+
+    let server = TestServer::new().await;
+    let (token, registration) = server
+        .register("ws-notify", "ws-notify@test.com", "password123")
+        .await;
+    let user_id = registration["data"]["user"]["id"].as_str().unwrap();
+    let ws_url = server
+        .url(&format!("/api/v1/ws/notifications?token={token}"))
+        .replacen("http://", "ws://", 1);
+    let (mut socket, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+
+    contrix_server::services::NotificationService::create(
+        &server.db,
+        &server.notifications,
+        user_id,
+        "comment",
+        "New comment",
+        "Review requested",
+        Some("/documents/example"),
+    )
+    .await;
+    let message = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+    assert_eq!(payload["notification_type"], "comment");
+    assert_eq!(payload["is_read"], false);
+
+    let persisted = server
+        .client
+        .get(server.url("/api/v1/notifications"))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = persisted.json().await.unwrap();
+    assert_eq!(body["data"][0]["id"], payload["id"]);
 }
 
 #[tokio::test]
@@ -3420,6 +3686,7 @@ async fn test_capabilities() {
     assert_eq!(body["data"]["features"]["collaboration"], true);
     assert_eq!(body["data"]["features"]["comments"], true);
     assert_eq!(body["data"]["features"]["file_locking"], true);
+    assert_eq!(body["data"]["features"]["ai"], false);
     assert!(body["data"]["version"].is_string());
     assert!(body["data"]["limits"].is_object());
 }

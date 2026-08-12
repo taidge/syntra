@@ -90,9 +90,9 @@ A full-featured, open-source office suite built entirely in Rust. Contrix Office
 
 ### Search
 
-- Full-text search across all documents
-- Filter by document type, date range
-- Highlighted search result snippets
+- Search document names and stored content
+- Filter by document type
+- Content-aware search result snippets
 - Paginated results
 
 ### Notifications
@@ -117,7 +117,7 @@ A full-featured, open-source office suite built entirely in Rust. Contrix Office
 | Database | [SQLx](https://github.com/launchbadge/sqlx) + SQLite/PostgreSQL | Async database with compile-time safety |
 | Auth | JWT + Argon2 | Stateless authentication + secure hashing |
 | Real-time | WebSocket + CRDT | Low-latency collaboration |
-| Search | [Tantivy](https://github.com/quickwit-oss/tantivy) | Rust full-text search engine |
+| Search | SQLite | Transactionally consistent name/content search |
 | Config | [Figment](https://github.com/SergioBenitez/Figment) | Layered configuration (TOML + env) |
 | Logging | [tracing](https://github.com/tokio-rs/tracing) | Structured, async-aware logging |
 
@@ -405,5 +405,4 @@ You may choose either license at your option.
 - [Salvo](https://salvo.rs) — Fast and flexible Rust web framework
 - [Dioxus](https://dioxuslabs.com) — Cross-platform UI framework for Rust
 - [SQLx](https://github.com/launchbadge/sqlx) — Async SQL toolkit for Rust
-- [Tantivy](https://github.com/quickwit-oss/tantivy) — Full-text search engine in Rust
 - Inspired by [Collabora Online](https://www.collaboraoffice.com/) and [ONLYOFFICE](https://www.onlyoffice.com/)

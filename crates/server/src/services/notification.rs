@@ -54,10 +54,11 @@ impl NotificationService {
 
         let payload = serde_json::json!({
             "id": id,
-            "type": notification_type,
+            "notification_type": notification_type,
             "title": title,
             "message": message,
             "link": link_owned,
+            "is_read": false,
             "created_at": created_at,
         });
 

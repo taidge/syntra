@@ -18,11 +18,19 @@ base_path = "/data/files"
 max_upload_size_mb = 500
 default_quota_mb = 10240
 
-[search]
-index_path = "/data/search_index"
-
 [rate_limit]
 max_requests = 100
 window_seconds = 60
 enabled = true
 trust_forwarded_headers = false
+
+[ai]
+enabled = false
+endpoint = "https://api.openai.com/v1/chat/completions"
+api_key = ""
+model = ""
+timeout_seconds = 30
+max_requests_per_hour = 20
+max_prompt_chars = 4000
+max_document_chars = 40000
+max_output_chars = 12000

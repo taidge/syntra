@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use salvo::prelude::*;
 
+use crate::state::AppState;
 use contrix_core::dto::ApiResponse;
 
 // ---------------------------------------------------------------------------
@@ -7,7 +10,8 @@ use contrix_core::dto::ApiResponse;
 // ---------------------------------------------------------------------------
 
 #[handler]
-pub async fn get_capabilities(res: &mut Response) {
+pub async fn get_capabilities(depot: &mut Depot, res: &mut Response) {
+    let state = depot.obtain::<Arc<AppState>>().unwrap();
     let capabilities = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "features": {
@@ -30,6 +34,7 @@ pub async fn get_capabilities(res: &mut Response) {
             "2fa": true,
             "invitations": true,
             "watermark": true,
+            "ai": state.ai.is_some(),
         },
         "limits": {
             "max_upload_size_mb": 100,

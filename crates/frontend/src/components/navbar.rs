@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::Route;
+use crate::components::notification_center::NotificationCenter;
 use crate::state::{self, AuthState};
 
 fn current_theme() -> String {
@@ -79,6 +80,7 @@ pub fn Navbar() -> Element {
                         },
                     }
                 }
+                NotificationCenter {}
                 div { class: "navbar-user",
                     button {
                         class: "lang-toggle",

@@ -938,36 +938,6 @@ pub struct NewInvitation {
 }
 
 // ---------------------------------------------------------------------------
-// OAuthAccount
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable)]
-#[diesel(table_name = crate::schema::oauth_accounts)]
-pub struct OAuthAccount {
-    pub id: String,
-    pub user_id: String,
-    pub provider: String,
-    pub provider_user_id: String,
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Insertable)]
-#[diesel(table_name = crate::schema::oauth_accounts)]
-pub struct NewOAuthAccount {
-    pub id: String,
-    pub user_id: String,
-    pub provider: String,
-    pub provider_user_id: String,
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-// ---------------------------------------------------------------------------
 // UploadSession
 // ---------------------------------------------------------------------------
 

@@ -2597,6 +2597,71 @@ input:-webkit-autofill:active {
 }
 .user-avatar:hover { text-decoration: none; opacity: 0.9; }
 
+.notification-center { position: relative; }
+.notification-button {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: var(--radius-full);
+    background: transparent;
+    cursor: pointer;
+}
+.notification-button:hover { background: rgba(148, 163, 184, 0.16); }
+.notification-badge {
+    position: absolute;
+    top: -3px;
+    right: -5px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: var(--radius-full);
+    background: var(--danger);
+    color: white;
+    font-size: 0.6875rem;
+    line-height: 18px;
+    text-align: center;
+}
+.notification-panel {
+    position: absolute;
+    z-index: 1200;
+    top: calc(100% + 10px);
+    right: 0;
+    width: min(380px, calc(100vw - 24px));
+    max-height: min(520px, calc(100vh - 80px));
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-white);
+    box-shadow: var(--shadow-lg);
+}
+.notification-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    padding: var(--space-md);
+    border-bottom: 1px solid var(--border);
+}
+.notification-header > div { display: flex; flex-direction: column; }
+.notification-connection { color: var(--text-light); font-size: 0.75rem; }
+.notification-list { max-height: 440px; overflow-y: auto; }
+.notification-item {
+    padding: var(--space-md);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+}
+.notification-item.unread { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.notification-item:hover { background: var(--bg); }
+.notification-item-header { display: flex; justify-content: space-between; gap: var(--space-md); }
+.notification-item-header span { color: var(--text-light); font-size: 0.6875rem; white-space: nowrap; }
+.notification-item p { margin: var(--space-xs) 0; color: var(--text-light); font-size: 0.875rem; }
+.notification-empty { padding: var(--space-xl); text-align: center; color: var(--text-light); }
+.btn-link { border: none; background: none; color: var(--primary); cursor: pointer; }
+
 .profile-container {
     max-width: 720px;
     margin: var(--space-xl) auto;

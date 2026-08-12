@@ -138,6 +138,28 @@ fn validate_config(config: &AppConfig, environment: &str) -> anyhow::Result<()> 
         );
     }
 
+    if config.ai.enabled {
+        let endpoint = reqwest::Url::parse(&config.ai.endpoint)
+            .context("ai.endpoint must be an absolute HTTP(S) URL")?;
+        if !matches!(endpoint.scheme(), "http" | "https") {
+            bail!("ai.endpoint must use http or https");
+        }
+        if environment == "production" && endpoint.scheme() != "https" {
+            bail!("Production ai.endpoint must use https");
+        }
+        if config.ai.api_key.trim().is_empty() || config.ai.model.trim().is_empty() {
+            bail!("Enabled AI requires ai.api_key and ai.model");
+        }
+        if config.ai.timeout_seconds == 0
+            || config.ai.max_requests_per_hour == 0
+            || config.ai.max_prompt_chars == 0
+            || config.ai.max_document_chars == 0
+            || config.ai.max_output_chars == 0
+        {
+            bail!("Enabled AI limits and timeout must be greater than zero");
+        }
+    }
+
     Ok(())
 }
 
@@ -211,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
         "migrations/020_room_enhancements.sql",
         "migrations/021_document_signatures.sql",
         "migrations/022_tenants.sql",
+        "migrations/023_remove_oauth.sql",
     ];
 
     let mut conn = db.get()?;
@@ -235,9 +258,6 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to initialize storage backend")?,
     );
 
-    let search_path = &config.search.index_path;
-    tokio::fs::create_dir_all(search_path).await?;
-
     // Ensure the database-specific backup directory exists.
     if services::database_backup::is_file_backed(&db_path) {
         tokio::fs::create_dir_all(services::database_backup::backup_directory(&db_path)).await?;
@@ -251,19 +271,11 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     let collab = CollabManager::new();
 
-    // -----------------------------------------------------------------------
-    // 7b. Initialize Tantivy search index
-    // -----------------------------------------------------------------------
-    let search_service = match services::SearchService::new(search_path) {
-        Ok(svc) => {
-            tracing::info!("Tantivy search index initialized at {search_path}");
-            Some(svc)
-        }
-        Err(e) => {
-            tracing::warn!("Failed to initialize search index: {e}. Falling back to SQL search.");
-            None
-        }
-    };
+    let ai_service = config
+        .ai
+        .enabled
+        .then(|| services::AiService::new(config.ai.clone()))
+        .transpose()?;
 
     // -----------------------------------------------------------------------
     // 7c. Initialize thumbnail service
@@ -280,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
         storage: storage_backend,
         collab,
         started_at: chrono::Utc::now(),
-        search: search_service,
+        ai: ai_service,
         thumbnail: thumbnail_service,
         notifications: Arc::new(services::NotificationBus::new()),
         wopi_sessions: Arc::new(services::WopiSessionStore::new()),

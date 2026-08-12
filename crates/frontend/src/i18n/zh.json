@@ -29,6 +29,13 @@
   "nav.logout": "退出登录",
   "nav.theme_toggle": "切换暗色模式",
   "nav.search_placeholder": "搜索文档...",
+  "notifications.title": "通知",
+  "notifications.live": "实时连接",
+  "notifications.reconnecting": "正在重连…",
+  "notifications.offline": "离线",
+  "notifications.mark_all_read": "全部标为已读",
+  "notifications.empty": "暂无通知。",
+  "notifications.open": "打开",
 
   "auth.login_title": "登录",
   "auth.register_title": "创建账户",

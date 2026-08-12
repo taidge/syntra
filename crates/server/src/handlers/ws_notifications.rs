@@ -53,7 +53,11 @@ async fn handle_ws(
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if ws.send(Message::text(r#"{"event":"resync"}"#)).await.is_err() {
+                            break;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }

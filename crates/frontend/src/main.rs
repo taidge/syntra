@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 mod collab_client;
 mod components;
 pub mod i18n;
+mod notification_client;
 mod pages;
 mod state;
 

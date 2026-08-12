@@ -6,11 +6,11 @@ use diesel::r2d2::{ConnectionManager, Pool};
 
 use contrix_collab::CollabManager;
 use contrix_core::config::{
-    AppConfig, AuthConfig, DatabaseConfig, OAuthConfig, RateLimitConfig, SearchConfig,
-    ServerConfig, StorageConfig, TrashConfig,
+    AiConfig, AppConfig, AuthConfig, DatabaseConfig, RateLimitConfig, ServerConfig, StorageConfig,
+    TrashConfig,
 };
 use contrix_server::routes::create_router;
-use contrix_server::services::{NotificationBus, StorageBackend, WopiSessionStore};
+use contrix_server::services::{AiService, NotificationBus, StorageBackend, WopiSessionStore};
 use contrix_server::state::AppState;
 use salvo::conn::Acceptor;
 use salvo::prelude::*;
@@ -23,6 +23,7 @@ pub struct TestServer {
     pub base_url: String,
     pub client: reqwest::Client,
     pub db: Pool<ConnectionManager<SqliteConnection>>,
+    pub notifications: Arc<NotificationBus>,
     // Hold the tempdir so it is not deleted until the TestServer is dropped.
     pub _temp_dir: tempfile::TempDir,
 }
@@ -30,13 +31,15 @@ pub struct TestServer {
 impl TestServer {
     /// Spin up a fresh test server on a random available port.
     pub async fn new() -> Self {
+        Self::new_with_ai(AiConfig::default()).await
+    }
+
+    pub async fn new_with_ai(ai_config: AiConfig) -> Self {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let storage_path = temp_dir.path().join("files");
-        let search_path = temp_dir.path().join("search");
 
         std::fs::create_dir_all(&storage_path).unwrap();
-        std::fs::create_dir_all(&search_path).unwrap();
 
         let db_url = db_path.to_string_lossy().to_string();
         let manager = ConnectionManager::<SqliteConnection>::new(&db_url);
@@ -95,11 +98,8 @@ impl TestServer {
                 s3_secret_key: None,
                 s3_endpoint: None,
             },
-            search: SearchConfig {
-                index_path: search_path.to_string_lossy().into_owned(),
-            },
             rate_limit: RateLimitConfig::default(),
-            oauth: OAuthConfig::default(),
+            ai: ai_config,
             trash: TrashConfig::default(),
         };
 
@@ -130,6 +130,7 @@ impl TestServer {
                 "020_room_enhancements.sql",
                 "021_document_signatures.sql",
                 "022_tenants.sql",
+                "023_remove_oauth.sql",
             ];
             for migration_file in &additional_migrations {
                 if let Ok(sql) = std::fs::read_to_string(migration_dir.join(migration_file)) {
@@ -151,15 +152,20 @@ impl TestServer {
 
         let db_clone = db.clone();
         let storage = Arc::new(StorageBackend::from_config(&config.storage).unwrap());
+        let ai = config
+            .ai
+            .enabled
+            .then(|| AiService::new(config.ai.clone()).unwrap());
+        let notifications = Arc::new(NotificationBus::new());
         let state = Arc::new(AppState {
             db: db_clone,
             config,
             storage,
             collab: CollabManager::new(),
             started_at: chrono::Utc::now(),
-            search: None,
+            ai,
             thumbnail: None,
-            notifications: Arc::new(NotificationBus::new()),
+            notifications: notifications.clone(),
             wopi_sessions: Arc::new(WopiSessionStore::new()),
         });
 
@@ -190,6 +196,7 @@ impl TestServer {
             base_url,
             client,
             db,
+            notifications,
             _temp_dir: temp_dir,
         }
     }
