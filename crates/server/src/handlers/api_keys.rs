@@ -12,8 +12,33 @@ use contrix_core::error::AppError;
 use contrix_core::models::NewApiKey;
 use contrix_core::schema::api_keys::dsl as ak;
 
-use crate::middleware::auth::get_user_id;
+use crate::middleware::auth::{get_user_id, normalize_api_key_permissions};
 use crate::state::AppState;
+
+const MAX_API_KEY_NAME_CHARS: usize = 100;
+
+fn validate_api_key_name(value: &str) -> Result<String, &'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("API key name cannot be empty");
+    }
+    if value.chars().count() > MAX_API_KEY_NAME_CHARS {
+        return Err("API key name cannot exceed 100 characters");
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_expiration(value: Option<&str>) -> Result<Option<String>, &'static str> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let expiration = chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|_| "expires_at must be an RFC 3339 timestamp")?;
+    if expiration <= Utc::now() {
+        return Err("expires_at must be in the future");
+    }
+    Ok(Some(expiration.to_rfc3339()))
+}
 
 // ---------------------------------------------------------------------------
 // POST /api-keys — create a new API key
@@ -52,6 +77,38 @@ pub async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
         }
     };
 
+    let name = match validate_api_key_name(&body.name) {
+        Ok(value) => value,
+        Err(message) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(message.into()).to_response(),
+            )));
+            return;
+        }
+    };
+    let permissions =
+        match normalize_api_key_permissions(body.permissions.as_deref().unwrap_or("*")) {
+            Ok(value) => value,
+            Err(message) => {
+                res.status_code(StatusCode::BAD_REQUEST);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::Validation(message.into()).to_response(),
+                )));
+                return;
+            }
+        };
+    let expires_at = match normalize_expiration(body.expires_at.as_deref()) {
+        Ok(value) => value,
+        Err(message) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(message.into()).to_response(),
+            )));
+            return;
+        }
+    };
+
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
@@ -66,10 +123,11 @@ pub async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
     // Generate a random 32-byte key and encode as hex
     let mut raw_key = [0u8; 32];
     rand::rng().fill_bytes(&mut raw_key);
-    let full_key: String = raw_key.iter().map(|b| format!("{:02x}", b)).collect();
+    let random_part: String = raw_key.iter().map(|b| format!("{:02x}", b)).collect();
+    let full_key = format!("ctx_{random_part}");
 
-    // Store first 8 chars as prefix
-    let key_prefix = full_key[..8].to_string();
+    // Store a recognizable non-secret prefix for the management UI.
+    let key_prefix = full_key[..12].to_string();
 
     // Hash the full key with SHA-256
     let mut hasher = Sha256::new();
@@ -80,12 +138,12 @@ pub async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
     let new_key = NewApiKey {
         id: Uuid::new_v4().to_string(),
         user_id: uid,
-        name: body.name.clone(),
+        name: name.clone(),
         key_hash,
         key_prefix: key_prefix.clone(),
-        permissions: body.permissions.unwrap_or_else(|| "*".to_string()),
+        permissions: permissions.clone(),
         last_used_at: None,
-        expires_at: body.expires_at.clone(),
+        expires_at: expires_at.clone(),
         is_active: true,
         created_at: now.to_rfc3339(),
     };
@@ -105,11 +163,11 @@ pub async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
     res.status_code(StatusCode::CREATED);
     res.render(Json(ApiResponse::ok(serde_json::json!({
         "id": key_id,
-        "name": body.name,
+        "name": name,
         "key": full_key,
         "key_prefix": key_prefix,
-        "permissions": new_key.permissions,
-        "expires_at": body.expires_at,
+        "permissions": permissions,
+        "expires_at": expires_at,
         "created_at": now.to_rfc3339(),
     }))));
 }
@@ -304,6 +362,32 @@ pub async fn update_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     }
 
+    let name = match body.name.as_deref().map(validate_api_key_name).transpose() {
+        Ok(value) => value,
+        Err(message) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(message.into()).to_response(),
+            )));
+            return;
+        }
+    };
+    let permissions = match body
+        .permissions
+        .as_deref()
+        .map(normalize_api_key_permissions)
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(message) => {
+            res.status_code(StatusCode::BAD_REQUEST);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(message.into()).to_response(),
+            )));
+            return;
+        }
+    };
+
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
@@ -319,21 +403,17 @@ pub async fn update_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(ak::id.eq(&key_id))
         .filter(ak::user_id.eq(&uid));
 
-    let result = if body.name.is_some() && body.permissions.is_some() {
-        diesel::update(target)
-            .set((
-                ak::name.eq(body.name.as_ref().unwrap()),
-                ak::permissions.eq(body.permissions.as_ref().unwrap()),
-            ))
-            .execute(&mut conn)
-    } else if body.name.is_some() {
-        diesel::update(target)
-            .set(ak::name.eq(body.name.as_ref().unwrap()))
-            .execute(&mut conn)
-    } else {
-        diesel::update(target)
-            .set(ak::permissions.eq(body.permissions.as_ref().unwrap()))
-            .execute(&mut conn)
+    let result = match (name.as_deref(), permissions.as_deref()) {
+        (Some(name), Some(permissions)) => diesel::update(target)
+            .set((ak::name.eq(name), ak::permissions.eq(permissions)))
+            .execute(&mut conn),
+        (Some(name), None) => diesel::update(target)
+            .set(ak::name.eq(name))
+            .execute(&mut conn),
+        (None, Some(permissions)) => diesel::update(target)
+            .set(ak::permissions.eq(permissions))
+            .execute(&mut conn),
+        (None, None) => unreachable!("empty updates are rejected above"),
     };
 
     match result {

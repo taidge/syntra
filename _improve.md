@@ -1,5 +1,65 @@
 # 改进审查报告
 
+## 第十二轮复审（2026-08-30，当前结论）
+
+本轮从本地 `main@4cf95ef` 开始，覆盖 Rust workspace、HTTP 路由与认证中间件、配置/迁移、前端四类编辑器、Office 导入导出以及现有测试。开始时工作区干净；仓库没有配置 remote，因此只能确认 `main` 是全部本地引用中的最新提交，不能证明或拉取远端最新版本。
+
+### 本轮已改进
+
+- [x] **API Key 是完整 CRUD 但完全不能用于认证。** `api_keys` 表、创建/更新/吊销接口早已存在，但受保护路由只运行 JWT 认证，生成的密钥没有任何消费端；`permissions`、`expires_at` 也只是写库。现已接入 Bearer API Key 认证，实时校验摘要、启用状态、RFC 3339 过期时间、用户禁用状态和数据库中的实时角色，并更新 `last_used_at`。
+- [x] **API Key 权限原来是任意字符串且不执行。** 现只接受 `read`、`write`、`read,write` 或 `*`，规范化大小写/顺序并拒绝未知或空 scope；安全 HTTP 方法要求 `read`，变更方法要求 `write`，不足时返回 403。新密钥使用可识别的 `ctx_` 前缀和 256-bit 随机值，数据库仍只保存 SHA-256 摘要。
+- [x] **写权限 API Key 可调用密钥管理接口并给自己扩权。** 现强制 API Key 的创建、更新、吊销与列表必须使用 JWT 会话；API Key 访问该路径固定返回 403，防止 `write` key 铸造 `*` key。
+- [x] **API Key 名称和过期时间缺少输入验证。** 现拒绝空名称、超过 100 字符的名称、非法时间和已经过期的时间；吊销和权限变更在下一请求立即生效。新增单元与端到端测试覆盖认证、只读拒绝写入、权限热更新、吊销和非法输入。
+- [x] **Webhook “HMAC” 实际是 `SHA256(secret || payload)`。** 旧实现不是 HMAC，既不兼容标准验签器，也有长度扩展类风险。现改为标准 HMAC-SHA256，并用公开标准向量锁定输出格式 `sha256=<hex>`。
+- [x] **第三方集成密钥仍会在更新/创建响应中原样回吐。** 旧报告只修复了 list/get，upsert 两个响应仍返回 `api_key`。现四类响应都只返回 `has_api_key`，并增加回归测试保证响应正文不含密钥。
+- [x] **Capabilities 返回与实际配置/实现不一致。** `max_upload_size_mb` 固定写成 100（生产配置实际为 500，测试配置为 10），还宣称未实现的 50 MB 文档限制和 LanguageTool/DeepL 集成。现上传限制读取运行时配置、删除虚假的文档限制、未接入集成返回空数组，并公开 `api_key_authentication=true`。
+- [x] **最新依赖审计发现 `h2 0.4.15` DoS 漏洞及已撤回的 `chacha20 0.10.1`。** 已将锁文件分别更新到 `h2 0.4.16`、`chacha20 0.10.2`；重新扫描 559 个依赖为 0 vulnerability、0 warning。
+
+### 仍待处理：安全与可靠性
+
+- [ ] **P1 — Webhook DNS SSRF / DNS rebinding。** 当前会拒绝私网/环回 IP 字面量和明显的内部域名，也禁用重定向，但主机名没有在连接前解析并固定到已验证的公网地址。恶意 DNS 可把看似公网的域名解析到内网。建议解析全部 A/AAAA、拒绝任何保留/私网地址，并将连接固定到校验后的地址，重试时重新校验。
+- [ ] **P1 — 第三方集成 secret 明文落 SQLite。** API 已不再回吐 `api_key`，但 `integration_settings.api_key` 仍以明文保存，数据库备份也会携带该 secret。应使用外部 secret manager，或用独立于数据库的主密钥做信封加密；在没有真实消费者前也可直接删除这套未接入配置。
+- [ ] **P2 — CSP 仍允许 `unsafe-inline` 与 `unsafe-eval`。** 这会明显削弱 XSS 防护。需要确认 Dioxus 产物约束后改用 nonce/hash，逐步移除两项放行，并补浏览器端 CSP 回归测试。
+- [ ] **P2 — Webhook 响应体无显式大小上限。** 投递端会完整缓冲对方响应再写入 `webhook_deliveries`，恶意目标可制造内存/数据库放大。应限制读取字节数并截断持久化内容。
+- [ ] **P2 — API Key scope 粒度只有读/写。** 当前足以让功能从“不可用”变为可安全执行，但还不能限制到 documents/files/admin 等资源域。面向第三方自动化开放前，建议增加资源级 scope 和敏感账户操作的显式禁止规则。
+
+### 仍待处理：死代码、未完成或未接入
+
+- [ ] **P1 — `integration_settings` 仍只有管理 CRUD，没有 LanguageTool/DeepL 的调用链或前端入口。** 这是典型“配置写了但没有功能消费者”。应选择其一：完整接入并做超时、配额、SSRF、密钥保护；或删除 handler、路由、模型、schema 和迁移，避免形成虚假能力面。
+- [ ] **P1 — Writer 图片模型未接入完整 OOXML。** `Block::Image` 已存在，但 DOCX 导出仍输出 `[Image: ...]` 文本占位，图片在 Office 往返中丢失。需要 media part、relationship、尺寸/DPI、alt text 以及导入反向映射。
+- [ ] **P1 — Slides 媒体/图表/组合对象导出未完成。** PPTX 导出把 Image、Chart、Video、Group 变成带标签矩形；这避免静默丢失位置，却不是真实 Office 兼容实现。
+- [ ] **P2 — Calc 条件格式只存在于 doc-engine 数据模型。** 前端没有编辑、渲染和导入/导出闭环；同类表格产品常见的数据验证、命名区域、数据透视表也尚未看到实现。
+- [ ] **P2 — Slides/Whiteboard 没有实时协作发送链路。** Writer 和 Calc 已连接协作 WebSocket，Slides/Whiteboard 页面没有对应客户端接线；多人同时编辑时只能依赖保存覆盖，容易丢更新。
+- [ ] **P2 — 文档高级排版能力缺口。** Writer 目前没有页眉页脚、分页/分节、脚注尾注、引用目录/参考文献、邮件合并等常见 Office 能力；至少应优先做分页/分节与页眉页脚，保证打印/PDF/DOCX 的版式可控。
+- [ ] **P3 — 编译器级死代码已基本清零，但大量 handler 重复 `depot.obtain::<Arc<AppState>>().unwrap()`。** 在当前固定 Router 注入下不会触发，但扩展独立路由或单测时可能 panic。建议抽取统一的状态/用户提取器，减少重复错误处理和不可恢复 panic。
+
+### 产品能力建议（按价值排序）
+
+- [ ] **Office 保真优先：** 先完成 DOCX/PPTX 图片、图表和分组对象往返，再扩充格式种类；对办公产品而言，“能打开但内容降级”比缺少一个边缘按钮更影响可信度。
+- [ ] **协作一致性：** 为 Slides/Whiteboard 接入实时同步，并把 Calc 从整 workbook `Replace` 演进为单元格级操作，加入冲突提示与断线恢复测试。
+- [ ] **Calc 数据工具：** 条件格式、数据验证、冻结窗格、命名区域、数据透视表和更完整图表持久化，是与 Excel/Google Sheets/OnlyOffice 的主要差距。
+- [ ] **Writer 专业排版：** 页眉页脚、页码、分页/分节、脚注、目录、引用与审阅合并，是与 Word/Google Docs 的主要差距。
+- [ ] **Slides 演示闭环：** 母版/主题、对象动画、真实图表、演讲者视图、计时与备注视图，是与 PowerPoint/Google Slides 的主要差距。
+- [ ] **可运维性：** 增加 OpenAPI 文档、结构化指标（Prometheus/OpenTelemetry）、后台任务持久队列以及集成/转换失败重试管理。
+
+### 本轮验证记录
+
+- [x] 新增 API Key 认证单元测试 2 项通过。
+- [x] 新增 API Key 端到端测试 2 项通过。
+- [x] 服务端 lib 单元测试 33 项通过（含新增 Webhook HMAC/URL 测试）。
+- [x] 集成密钥不回吐回归测试通过。
+- [x] `cargo fmt --all -- --check` 与 `git diff --check` 通过。
+- [x] `cargo check --workspace --all-targets` 通过且无 warning。
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+- [x] `cargo test --workspace --all-targets` 使用更新后的锁文件通过，共 368 项（collab 12、doc-engine 82、export 43、frontend 23、server lib/main 各 33、server API 142）。
+- [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
+- [x] `cargo audit` 扫描 559 个依赖，结果为 0 vulnerability、0 warning。
+- [x] Playwright `--list` 在 `e2e/` 成功发现 87 项测试。
+
+---
+
+以下为前十一轮历史记录。
+
 本轮审查范围：Rust workspace 后端入口、路由、中间件、文件/分片上传、存储服务、配置文件、前端编译警告，以及明显未接入实现。
 
 ## 已完成

@@ -31,16 +31,19 @@ pub async fn get_capabilities(depot: &mut Depot, res: &mut Response) {
             "webhooks": true,
             "wopi": true,
             "conversion": true,
+            "api_key_authentication": true,
             "2fa": true,
             "invitations": true,
             "watermark": true,
             "ai": state.ai.is_some(),
         },
         "limits": {
-            "max_upload_size_mb": 100,
-            "max_document_size_mb": 50,
+            "max_upload_size_mb": state.config.storage.max_upload_size_mb,
         },
-        "integrations": ["languagetool", "deepl"],
+        // Integration settings exist, but LanguageTool/DeepL request paths are
+        // not implemented. Do not advertise configuration records as usable
+        // end-user capabilities.
+        "integrations": [],
     });
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(capabilities)));

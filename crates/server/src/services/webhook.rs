@@ -4,7 +4,8 @@ use chrono::Utc;
 use diesel::SqliteConnection;
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool};
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use uuid::Uuid;
 
 use contrix_core::models::{NewWebhookDelivery, Webhook};
@@ -156,12 +157,12 @@ fn is_safe_webhook_url(raw: &str) -> bool {
         || lower.ends_with(".internal"))
 }
 
-/// Compute a signature for the payload using SHA-256(secret + payload).
+/// Compute an RFC 2104 HMAC-SHA256 signature for the payload.
 fn compute_signature(secret: &str, payload: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-    hasher.update(payload.as_bytes());
-    let result = hasher.finalize();
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts keys of every length");
+    mac.update(payload.as_bytes());
+    let result = mac.finalize().into_bytes();
     let hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
     format!("sha256={hex}")
 }
@@ -290,5 +291,29 @@ fn update_delivery(
         Err(e) => {
             tracing::error!("WebhookService: failed to update delivery {delivery_id}: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_signature, is_safe_webhook_url};
+
+    #[test]
+    fn webhook_signature_matches_hmac_sha256_test_vector() {
+        assert_eq!(
+            compute_signature("key", "The quick brown fox jumps over the lazy dog"),
+            "sha256=f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+    }
+
+    #[test]
+    fn webhook_url_filter_rejects_literal_internal_targets() {
+        assert!(!is_safe_webhook_url("http://127.0.0.1/hook"));
+        assert!(!is_safe_webhook_url("http://[::1]/hook"));
+        assert!(!is_safe_webhook_url(
+            "http://169.254.169.254/latest/meta-data"
+        ));
+        assert!(!is_safe_webhook_url("file:///etc/passwd"));
+        assert!(is_safe_webhook_url("https://hooks.example.com/events"));
     }
 }

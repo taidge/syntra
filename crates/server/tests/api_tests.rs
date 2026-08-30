@@ -1615,6 +1615,53 @@ async fn test_admin_activity_log() {
 }
 
 #[tokio::test]
+async fn test_admin_integration_responses_never_echo_api_keys() {
+    let server = TestServer::new().await;
+    let (_, reg_body) = server
+        .register(
+            "integration-admin",
+            "integration-admin@test.com",
+            "password123",
+        )
+        .await;
+    let user_id = reg_body["data"]["user"]["id"].as_str().unwrap();
+    server.make_admin(user_id).await;
+    let (admin_token, _) = server
+        .login("integration-admin@test.com", "password123")
+        .await;
+
+    let update = server
+        .client
+        .put(server.url("/api/v1/admin/integrations/example"))
+        .headers(server.auth_header(&admin_token))
+        .json(&serde_json::json!({
+            "is_enabled": true,
+            "api_url": "https://example.test/api",
+            "api_key": "must-never-be-returned"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update.status(), 201);
+    let update_body: serde_json::Value = update.json().await.unwrap();
+    assert_eq!(update_body["data"]["has_api_key"], true);
+    assert!(update_body["data"].get("api_key").is_none());
+    assert!(!update_body.to_string().contains("must-never-be-returned"));
+
+    let get = server
+        .client
+        .get(server.url("/api/v1/admin/integrations/example"))
+        .headers(server.auth_header(&admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), 200);
+    let get_body: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(get_body["data"]["has_api_key"], true);
+    assert!(get_body["data"].get("api_key").is_none());
+}
+
+#[tokio::test]
 async fn test_admin_backup_is_consistent_and_restore_is_staged() {
     use contrix_core::schema::users::dsl as users;
     use diesel::prelude::*;
@@ -2012,6 +2059,147 @@ async fn test_invalid_token_rejected() {
         .unwrap();
 
     assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn test_api_key_authentication_enforces_scopes_and_revocation() {
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("api-user", "api-user@test.com", "password123")
+        .await;
+
+    let create = server
+        .client
+        .post(server.url("/api/v1/api-keys"))
+        .headers(server.auth_header(&token))
+        .json(&serde_json::json!({
+            "name": "automation",
+            "permissions": "read"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 201);
+    let create_body: serde_json::Value = create.json().await.unwrap();
+    let api_key = create_body["data"]["key"].as_str().unwrap();
+    let api_key_id = create_body["data"]["id"].as_str().unwrap();
+    assert!(api_key.starts_with("ctx_"));
+
+    // API keys are accepted as bearer credentials and resolve the current
+    // database user/role without requiring a JWT session.
+    let read = server
+        .client
+        .get(server.url("/api/v1/auth/me"))
+        .header("Authorization", format!("bearer {api_key}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), 200);
+    let read_body: serde_json::Value = read.json().await.unwrap();
+    assert_eq!(read_body["data"]["email"], "api-user@test.com");
+
+    // A read-only key must fail closed on mutations.
+    let denied = server
+        .client
+        .post(server.url("/api/v1/folders"))
+        .headers(server.auth_header(api_key))
+        .json(&serde_json::json!({ "name": "must-not-exist" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+
+    // Changing the scope takes effect immediately because permissions are
+    // read from the database on every request.
+    let update = server
+        .client
+        .put(server.url(&format!("/api/v1/api-keys/{api_key_id}")))
+        .headers(server.auth_header(&token))
+        .json(&serde_json::json!({ "permissions": "write" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update.status(), 200);
+
+    // A write-scoped key cannot mint a wildcard key and escalate its own
+    // permissions; API key management always requires a JWT session.
+    let escalation = server
+        .client
+        .post(server.url("/api/v1/api-keys"))
+        .headers(server.auth_header(api_key))
+        .json(&serde_json::json!({
+            "name": "escalated",
+            "permissions": "*"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(escalation.status(), 403);
+
+    let write = server
+        .client
+        .post(server.url("/api/v1/folders"))
+        .headers(server.auth_header(api_key))
+        .json(&serde_json::json!({ "name": "created-by-api-key" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(write.status(), 201);
+
+    let revoke = server
+        .client
+        .delete(server.url(&format!("/api/v1/api-keys/{api_key_id}")))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoke.status(), 200);
+
+    let after_revoke = server
+        .client
+        .post(server.url("/api/v1/folders"))
+        .headers(server.auth_header(api_key))
+        .json(&serde_json::json!({ "name": "must-not-exist-either" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after_revoke.status(), 401);
+}
+
+#[tokio::test]
+async fn test_api_key_creation_rejects_invalid_permissions_and_expiration() {
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("api-validation", "api-validation@test.com", "password123")
+        .await;
+
+    for payload in [
+        serde_json::json!({ "name": "bad-scope", "permissions": "admin" }),
+        serde_json::json!({
+            "name": "expired",
+            "permissions": "read",
+            "expires_at": "2020-01-01T00:00:00Z"
+        }),
+        serde_json::json!({
+            "name": "bad-date",
+            "permissions": "read",
+            "expires_at": "tomorrow"
+        }),
+    ] {
+        let response = server
+            .client
+            .post(server.url("/api/v1/api-keys"))
+            .headers(server.auth_header(&token))
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            400,
+            "payload unexpectedly accepted: {payload}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3686,9 +3874,15 @@ async fn test_capabilities() {
     assert_eq!(body["data"]["features"]["collaboration"], true);
     assert_eq!(body["data"]["features"]["comments"], true);
     assert_eq!(body["data"]["features"]["file_locking"], true);
+    assert_eq!(body["data"]["features"]["api_key_authentication"], true);
     assert_eq!(body["data"]["features"]["ai"], false);
     assert!(body["data"]["version"].is_string());
     assert!(body["data"]["limits"].is_object());
+    // The test configuration uses 10 MiB; this must not regress to the old
+    // hard-coded public value of 100 MiB.
+    assert_eq!(body["data"]["limits"]["max_upload_size_mb"], 10);
+    assert!(body["data"]["limits"].get("max_document_size_mb").is_none());
+    assert_eq!(body["data"]["integrations"], serde_json::json!([]));
 }
 
 // ===========================================================================
