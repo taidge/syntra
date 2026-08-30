@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use argon2::{
     Argon2, PasswordHash, PasswordVerifier,
     password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
@@ -17,7 +15,6 @@ use contrix_core::schema::shares::dsl as s;
 
 use crate::middleware::auth::get_user_id;
 use crate::services::StorageService;
-use crate::state::AppState;
 
 fn hash_share_password(password: &str) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut OsRng);
@@ -33,7 +30,7 @@ fn hash_share_password(password: &str) -> Result<String, AppError> {
 
 #[handler]
 pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -200,7 +197,7 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn get_share(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -294,7 +291,7 @@ pub async fn get_share(req: &mut Request, depot: &mut Depot, res: &mut Response)
 
 #[handler]
 pub async fn update_share(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -402,7 +399,7 @@ pub async fn update_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn delete_share(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -461,7 +458,7 @@ pub async fn delete_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn list_file_shares(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -557,7 +554,7 @@ pub async fn list_file_shares(req: &mut Request, depot: &mut Depot, res: &mut Re
 /// correct password must be supplied via the `password` query parameter.
 #[handler]
 pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let token: String = req.param("token").unwrap_or_default();
     let supplied_password: Option<String> = req.query("password");
 

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use rand::Rng;
@@ -13,7 +11,6 @@ use contrix_core::models::NewApiKey;
 use contrix_core::schema::api_keys::dsl as ak;
 
 use crate::middleware::auth::{get_user_id, normalize_api_key_permissions};
-use crate::state::AppState;
 
 const MAX_API_KEY_NAME_CHARS: usize = 100;
 
@@ -46,7 +43,7 @@ fn normalize_expiration(value: Option<&str>) -> Result<Option<String>, &'static 
 
 #[handler]
 pub async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -178,7 +175,7 @@ pub async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn list_api_keys(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -262,7 +259,7 @@ pub async fn list_api_keys(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn revoke_api_key(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -322,7 +319,7 @@ pub async fn revoke_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn update_api_key(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let uid = match get_user_id(depot) {
         Some(val) => val,

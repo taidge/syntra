@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -12,7 +10,6 @@ use contrix_core::schema::favorites::dsl as fav;
 use contrix_core::schema::files::dsl as f;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -46,7 +43,7 @@ fn file_model_to_response(row: File) -> FileResponse {
 
 #[handler]
 pub async fn add_favorite(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -115,7 +112,7 @@ pub async fn add_favorite(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn remove_favorite(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -174,7 +171,7 @@ pub async fn remove_favorite(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn list_favorites(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

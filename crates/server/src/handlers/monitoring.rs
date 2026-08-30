@@ -1,17 +1,16 @@
-use std::sync::Arc;
-
 use diesel::prelude::*;
 use salvo::prelude::*;
 
 use contrix_core::dto::ApiResponse;
 use contrix_core::error::AppError;
+use contrix_core::schema::conversion_jobs::dsl as cj;
 use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::user_presence::dsl as up;
 use contrix_core::schema::users::dsl as u;
+use contrix_core::schema::webhook_deliveries::dsl as wd;
 
 use crate::middleware::auth::get_user_role;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // GET /admin/monitoring  (Get current server metrics)
@@ -27,7 +26,7 @@ pub async fn get_monitoring(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -127,7 +126,7 @@ pub async fn get_document_stats(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -179,4 +178,69 @@ pub async fn get_document_stats(depot: &mut Depot, res: &mut Response) {
             )));
         }
     }
+}
+
+/// Prometheus text exposition for scraping by standard monitoring stacks.
+#[handler]
+pub async fn prometheus_metrics(depot: &mut Depot, res: &mut Response) {
+    if get_user_role(depot) != Some("admin".to_string()) {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Forbidden("Admin required".into()).to_response(),
+        )));
+        return;
+    }
+    let state = crate::require_app_state!(depot, res);
+    let mut conn = match state.db.get() {
+        Ok(conn) => conn,
+        Err(error) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(error.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+    let users = u::users.count().get_result::<i64>(&mut conn).unwrap_or(0);
+    let documents = d::documents
+        .count()
+        .get_result::<i64>(&mut conn)
+        .unwrap_or(0);
+    let active = up::user_presence
+        .filter(up::is_active.eq(true))
+        .count()
+        .get_result::<i64>(&mut conn)
+        .unwrap_or(0);
+    let pending = cj::conversion_jobs
+        .filter(cj::status.eq_any(["pending", "processing"]))
+        .count()
+        .get_result::<i64>(&mut conn)
+        .unwrap_or(0);
+    let failed = cj::conversion_jobs
+        .filter(cj::status.eq("failed"))
+        .count()
+        .get_result::<i64>(&mut conn)
+        .unwrap_or(0);
+    let webhook_failed = wd::webhook_deliveries
+        .filter(wd::success.eq(false))
+        .count()
+        .get_result::<i64>(&mut conn)
+        .unwrap_or(0);
+    let uptime = (chrono::Utc::now() - state.started_at).num_seconds().max(0);
+    let body = format!(
+        "# HELP contrix_uptime_seconds Server uptime in seconds\n# TYPE contrix_uptime_seconds gauge\ncontrix_uptime_seconds {uptime}\n\
+# HELP contrix_users_total Registered users\n# TYPE contrix_users_total gauge\ncontrix_users_total {users}\n\
+# HELP contrix_documents_total Stored documents\n# TYPE contrix_documents_total gauge\ncontrix_documents_total {documents}\n\
+# HELP contrix_active_presence Active collaborative presence records\n# TYPE contrix_active_presence gauge\ncontrix_active_presence {active}\n\
+# HELP contrix_conversion_jobs Durable conversion jobs by status\n# TYPE contrix_conversion_jobs gauge\ncontrix_conversion_jobs{{status=\"pending\"}} {pending}\ncontrix_conversion_jobs{{status=\"failed\"}} {failed}\n\
+# HELP contrix_webhook_deliveries_failed Failed webhook deliveries available for retry\n# TYPE contrix_webhook_deliveries_failed gauge\ncontrix_webhook_deliveries_failed {webhook_failed}\n"
+    );
+    res.status_code(StatusCode::OK);
+    res.headers_mut().insert(
+        "content-type",
+        "text/plain; version=0.0.4; charset=utf-8"
+            .parse()
+            .expect("static content type"),
+    );
+    res.body(body);
 }

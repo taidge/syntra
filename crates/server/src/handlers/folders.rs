@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -15,7 +13,6 @@ use crate::handlers::access::{
     authorize_file_access, check_room_access, load_accessible_folder, load_accessible_target_folder,
 };
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // POST /folders
@@ -34,7 +31,7 @@ fn document_id_for_file(conn: &mut diesel::SqliteConnection, file_id: &str) -> O
 
 #[handler]
 pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -171,7 +168,7 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn get_folder(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -242,7 +239,7 @@ pub async fn get_folder(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn list_folder_children(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -340,7 +337,7 @@ pub async fn list_folder_children(req: &mut Request, depot: &mut Depot, res: &mu
 
 #[handler]
 pub async fn update_folder(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -430,7 +427,7 @@ pub async fn update_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -531,7 +528,7 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn get_folder_path(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

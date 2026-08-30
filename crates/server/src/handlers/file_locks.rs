@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -12,7 +10,6 @@ use contrix_core::schema::file_locks::dsl as fl;
 
 use crate::handlers::access::load_accessible_file;
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 /// Authorize the caller for `required_role` on a file, rendering the proper
 /// error and returning `false` when access is denied or the file is missing.
@@ -51,7 +48,7 @@ fn ensure_file_access(
 
 #[handler]
 pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -171,7 +168,7 @@ pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn release_lock(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -231,7 +228,7 @@ pub async fn release_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn check_lock(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -306,7 +303,7 @@ pub async fn check_lock(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn refresh_lock(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

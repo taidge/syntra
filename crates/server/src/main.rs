@@ -258,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
         services::StorageBackend::from_config(&config.storage)
             .context("Failed to initialize storage backend")?,
     );
+    handlers::convert::resume_pending_conversions(&db, storage_backend.clone());
 
     // Ensure the database-specific backup directory exists.
     if services::database_backup::is_file_backed(&db_path) {

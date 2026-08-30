@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use contrix_core::dto::{ApiResponse, FileResponse};
 use contrix_core::error::AppError;
@@ -10,7 +8,6 @@ use diesel::prelude::*;
 use salvo::prelude::*;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -44,7 +41,7 @@ fn file_model_to_response(row: File) -> FileResponse {
 
 #[handler]
 pub async fn list_recent(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -126,7 +123,7 @@ pub async fn list_recent(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn clear_recent(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
@@ -19,7 +17,6 @@ use contrix_core::schema::sessions::dsl as sess;
 use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
-use crate::state::AppState;
 
 /// Extract `(ip_address, user_agent)` from a request for audit logging.
 fn request_context(req: &Request) -> (Option<String>, Option<String>) {
@@ -56,7 +53,7 @@ pub async fn get_stats(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -117,7 +114,7 @@ pub async fn list_users(req: &mut Request, depot: &mut Depot, res: &mut Response
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let page: u32 = req.query("page").unwrap_or(1);
     let per_page: u32 = req.query("per_page").unwrap_or(50);
     let offset_val = ((page.saturating_sub(1)) * per_page) as i64;
@@ -202,7 +199,7 @@ pub async fn get_activity(req: &mut Request, depot: &mut Depot, res: &mut Respon
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let page: u32 = req.query("page").unwrap_or(1);
     let per_page: u32 = req.query("per_page").unwrap_or(50);
     let offset_val = ((page.saturating_sub(1)) * per_page) as i64;
@@ -285,7 +282,7 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let user_id_param: String = req.param("id").unwrap_or_default();
     let actor = get_user_id(depot).unwrap_or_default();
     let (audit_ip, audit_ua) = request_context(req);
@@ -438,7 +435,7 @@ pub async fn force_logout_user(req: &mut Request, depot: &mut Depot, res: &mut R
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let user_id_param: String = req.param("id").unwrap_or_default();
 
     let mut conn = match state.db.get() {
@@ -479,7 +476,7 @@ pub async fn disable_user(req: &mut Request, depot: &mut Depot, res: &mut Respon
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let user_id_param: String = req.param("id").unwrap_or_default();
     let actor = get_user_id(depot).unwrap_or_default();
     let (ip, ua) = request_context(req);
@@ -548,7 +545,7 @@ pub async fn activate_user(req: &mut Request, depot: &mut Depot, res: &mut Respo
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let user_id_param: String = req.param("id").unwrap_or_default();
 
     let mut conn = match state.db.get() {
@@ -599,7 +596,7 @@ pub async fn list_disabled_users(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -679,7 +676,7 @@ pub async fn user_status_stats(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -728,7 +725,7 @@ pub async fn import_users(req: &mut Request, depot: &mut Depot, res: &mut Respon
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     #[derive(serde::Deserialize)]
     struct ImportUserEntry {

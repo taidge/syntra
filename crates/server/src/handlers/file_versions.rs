@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -12,7 +10,6 @@ use contrix_core::schema::file_versions::dsl as fv;
 use contrix_core::schema::files::dsl as f;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // GET /files/:file_id/versions
@@ -20,7 +17,7 @@ use crate::state::AppState;
 
 #[handler]
 pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -107,7 +104,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn create_version(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

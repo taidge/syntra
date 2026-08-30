@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
@@ -29,7 +27,6 @@ use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::{JwtClaims, get_user_id, hash_token};
 use crate::services::password::PasswordService;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,7 +96,7 @@ fn revoke_user_sessions(conn: &mut diesel::SqliteConnection, user_id: &str) {
 
 #[handler]
 pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let body: RegisterRequest = match req.parse_json::<RegisterRequest>().await {
         Ok(b) => b,
@@ -275,7 +272,7 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
 
 #[handler]
 pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let body: LoginRequest = match req.parse_json::<LoginRequest>().await {
         Ok(b) => b,
@@ -537,7 +534,7 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn me(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -606,7 +603,7 @@ struct UpdateMeRequest {
 
 #[handler]
 pub async fn update_me(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -702,7 +699,7 @@ struct ChangePasswordRequest {
 
 #[handler]
 pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -828,7 +825,7 @@ pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn forgot_password(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let body: ForgotPasswordRequest = match req.parse_json::<ForgotPasswordRequest>().await {
         Ok(b) => b,
@@ -913,7 +910,7 @@ pub async fn forgot_password(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn reset_password(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let body: ResetPasswordRequest = match req.parse_json::<ResetPasswordRequest>().await {
         Ok(b) => b,

@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::Route;
+use crate::collab_client::{CollabHandle, CollabMessage, ConnectionState, connect_with_reconnect};
 use crate::components::menubar::Menubar;
 use crate::components::navbar::Navbar;
 use crate::components::toast::{Toast, ToastKind, push_toast};
@@ -34,6 +35,152 @@ struct WhiteboardLite {
 struct LayerLite {
     #[serde(default)]
     elements: Vec<serde_json::Value>,
+}
+
+fn canonical_to_ui(element: &serde_json::Value) -> serde_json::Value {
+    let kind = element
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match kind {
+        "Path" => serde_json::json!({"type":"pen","id":element.get("id"),
+            "points":element.get("points").and_then(|v| v.as_array()).into_iter().flatten()
+                .map(|point| serde_json::json!([point.get("x"), point.get("y")])).collect::<Vec<_>>(),
+            "stroke":element.get("stroke_color"),"stroke_width":element.get("stroke_width")}),
+        "Rectangle" => {
+            serde_json::json!({"type":"rect","id":element.get("id"),"x":element.get("x"),"y":element.get("y"),
+            "width":element.get("width"),"height":element.get("height"),"stroke":element.get("stroke_color"),"stroke_width":element.get("stroke_width")})
+        }
+        "Ellipse" => {
+            serde_json::json!({"type":"circle","id":element.get("id"),"cx":element.get("x"),"cy":element.get("y"),
+            "rx":element.get("rx"),"ry":element.get("ry"),"stroke":element.get("stroke_color"),"stroke_width":element.get("stroke_width")})
+        }
+        "Line" => {
+            serde_json::json!({"type":"line","id":element.get("id"),"x1":element.pointer("/start/x"),"y1":element.pointer("/start/y"),
+            "x2":element.pointer("/end/x"),"y2":element.pointer("/end/y"),"stroke":element.get("stroke_color"),"stroke_width":element.get("stroke_width")})
+        }
+        "Text" => {
+            serde_json::json!({"type":"text","id":element.get("id"),"x":element.get("x"),"y":element.get("y"),
+            "content":element.get("text"),"size":element.get("font_size"),"color":element.get("color")})
+        }
+        _ => element.clone(),
+    }
+}
+
+fn ui_to_canonical(element: &serde_json::Value) -> serde_json::Value {
+    let id = element
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(uuid::Uuid::new_v4()));
+    let color = element
+        .get("stroke")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!("#000000"));
+    let width = element
+        .get("stroke_width")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(2.0));
+    match element
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+    {
+        "pen" => {
+            serde_json::json!({"type":"Path","id":id,"points":element.get("points").and_then(|v| v.as_array()).into_iter().flatten()
+            .map(|point| serde_json::json!({"x":point.get(0),"y":point.get(1),"pressure":null})).collect::<Vec<_>>(),
+            "stroke_color":color,"stroke_width":width,"fill_color":null,"closed":false})
+        }
+        "rect" => {
+            serde_json::json!({"type":"Rectangle","id":id,"x":element.get("x"),"y":element.get("y"),"width":element.get("width"),
+            "height":element.get("height"),"rotation":0.0,"fill_color":null,"stroke_color":color,"stroke_width":width,"corner_radius":0.0})
+        }
+        "circle" => {
+            serde_json::json!({"type":"Ellipse","id":id,"x":element.get("cx"),"y":element.get("cy"),"rx":element.get("rx"),
+            "ry":element.get("ry"),"rotation":0.0,"fill_color":null,"stroke_color":color,"stroke_width":width})
+        }
+        "line" => {
+            serde_json::json!({"type":"Line","id":id,"start":{"x":element.get("x1"),"y":element.get("y1"),"pressure":null},
+            "end":{"x":element.get("x2"),"y":element.get("y2"),"pressure":null},"stroke_color":color,"stroke_width":width,"arrow_start":false,"arrow_end":false})
+        }
+        "text" => {
+            serde_json::json!({"type":"Text","id":id,"x":element.get("x"),"y":element.get("y"),"text":element.get("content"),
+            "font_size":element.get("size").cloned().unwrap_or_else(|| serde_json::json!(16.0)),"font_family":"Arial",
+            "color":element.get("color").cloned().unwrap_or_else(|| serde_json::json!("#000000")),"bold":false,"italic":false})
+        }
+        _ => element.clone(),
+    }
+}
+
+fn merge_whiteboard(
+    base: &serde_json::Value,
+    elements: &[serde_json::Value],
+    background: &str,
+    title: &str,
+) -> serde_json::Value {
+    let mut result = base.clone();
+    if !result.is_object() {
+        result = serde_json::json!({});
+    }
+    let object = result.as_object_mut().expect("object initialized above");
+    object
+        .entry("id")
+        .or_insert_with(|| serde_json::json!(uuid::Uuid::new_v4()));
+    object.insert("title".into(), serde_json::json!(title));
+    object
+        .entry("canvas_width")
+        .or_insert_with(|| serde_json::json!(VIEW_W));
+    object
+        .entry("canvas_height")
+        .or_insert_with(|| serde_json::json!(VIEW_H));
+    object.insert("background_color".into(), serde_json::json!(background));
+    let mut layers = base["layers"].as_array().cloned().unwrap_or_default();
+    let mut remaining = elements.iter().map(ui_to_canonical).collect::<Vec<_>>();
+    for layer in &mut layers {
+        let mut retained = Vec::new();
+        for original in layer["elements"].as_array().into_iter().flatten() {
+            if let Some(index) = remaining
+                .iter()
+                .position(|element| element["id"] == original["id"])
+            {
+                let edited = remaining.remove(index);
+                let editable_original = ui_to_canonical(&canonical_to_ui(original));
+                let mut merged = original.clone();
+                if let (Some(target), Some(source)) = (merged.as_object_mut(), edited.as_object()) {
+                    for (key, value) in source {
+                        if editable_original.get(key) != Some(value) {
+                            target.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                retained.push(merged);
+            }
+        }
+        layer["elements"] = serde_json::Value::Array(retained);
+    }
+    if layers.is_empty() {
+        layers.push(serde_json::json!({"id":uuid::Uuid::new_v4(),"name":"Layer 1","visible":true,"locked":false,"opacity":1.0,"elements":[]}));
+    }
+    if let Some(first) = layers[0]["elements"].as_array_mut() {
+        first.extend(remaining);
+    }
+    object.insert("layers".into(), serde_json::Value::Array(layers));
+    object.remove("elements");
+    result
+}
+
+fn whiteboard_replace_from_operation(
+    payload: &serde_json::Value,
+) -> Option<(String, serde_json::Value)> {
+    let user = payload.get("user_id")?.as_str()?.to_string();
+    let operation = payload.get("op_type")?;
+    if operation.get("type")?.as_str()? != "Replace" {
+        return None;
+    }
+    let path = operation.get("path")?.as_array()?;
+    if path.len() != 1 || path[0].as_str()? != "whiteboard" {
+        return None;
+    }
+    Some((user, operation.get("new_value")?.clone()))
 }
 
 #[derive(Clone, PartialEq)]
@@ -463,6 +610,10 @@ pub fn Whiteboard(id: String) -> Element {
     let mut selected_index = use_signal(|| None::<usize>);
     let mut drag_last = use_signal(|| None::<(f64, f64)>);
     let mut drag_active = use_signal(|| false);
+    let mut document_content = use_signal(|| serde_json::json!({}));
+    let mut last_collab_content = use_signal(|| serde_json::Value::Null);
+    let mut ws_handle = use_signal(|| None::<CollabHandle>);
+    let mut conn_state = use_signal(|| ConnectionState::Connecting);
 
     let auth = use_context::<Signal<AuthState>>();
     let toast_bus = use_context::<Signal<Vec<Toast>>>();
@@ -483,7 +634,7 @@ pub fn Whiteboard(id: String) -> Element {
             if let Ok(wb) = serde_json::from_value::<WhiteboardLite>(doc.content.clone()) {
                 let mut flat: Vec<serde_json::Value> = Vec::new();
                 for layer in wb.layers {
-                    flat.extend(layer.elements);
+                    flat.extend(layer.elements.iter().map(canonical_to_ui));
                 }
                 flat.extend(wb.elements);
                 elements.set(flat);
@@ -491,17 +642,91 @@ pub fn Whiteboard(id: String) -> Element {
                     bg_color.set(bg);
                 }
             }
+            document_content.set(doc.content.clone());
+            last_collab_content.set(doc.content.clone());
             loaded.set(true);
+        }
+    });
+
+    let id_for_ws = id.clone();
+    use_effect(move || {
+        let token = auth.read().token.clone().unwrap_or_default();
+        let self_id = auth
+            .read()
+            .user
+            .as_ref()
+            .map(|user| user.id.to_string())
+            .unwrap_or_default();
+        let on_message = move |message: CollabMessage| {
+            let content = match message {
+                CollabMessage::Operation(payload) => {
+                    let Some((author, content)) = whiteboard_replace_from_operation(&payload)
+                    else {
+                        return;
+                    };
+                    if author == self_id {
+                        return;
+                    }
+                    if *saved_status.read() == crate::i18n::t("common.unsaved") {
+                        push_toast(
+                            toast_bus,
+                            ToastKind::Info,
+                            "Concurrent whiteboard edit received; the latest remote version is shown.",
+                        );
+                    }
+                    content
+                }
+                CollabMessage::DocumentState { content, .. } if content.is_object() => {
+                    if *saved_status.read() == crate::i18n::t("common.unsaved") {
+                        return;
+                    }
+                    content
+                }
+                CollabMessage::Error { message } => {
+                    push_toast(toast_bus, ToastKind::Error, message);
+                    return;
+                }
+                _ => return,
+            };
+            let mut flat = Vec::new();
+            if let Ok(board) = serde_json::from_value::<WhiteboardLite>(content.clone()) {
+                for layer in board.layers {
+                    flat.extend(layer.elements.iter().map(canonical_to_ui));
+                }
+                flat.extend(board.elements);
+                if let Some(background) = board.background_color {
+                    bg_color.set(background);
+                }
+            }
+            elements.set(flat);
+            document_content.set(content.clone());
+            last_collab_content.set(content);
+            saved_status.set(crate::i18n::t("common.saved"));
+        };
+        let on_state = move |state| conn_state.set(state);
+        ws_handle.set(Some(connect_with_reconnect(
+            id_for_ws.clone(),
+            token,
+            on_message,
+            on_state,
+        )));
+    });
+
+    use_drop(move || {
+        if let Some(handle) = ws_handle.write().take() {
+            handle.close();
         }
     });
 
     let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
 
     let serialize_whiteboard = move || -> serde_json::Value {
-        serde_json::json!({
-            "elements": elements.read().clone(),
-            "background_color": bg_color.read().clone(),
-        })
+        merge_whiteboard(
+            &document_content.read(),
+            &elements.read(),
+            &bg_color.read(),
+            &doc_title.read(),
+        )
     };
 
     let perform_save = {
@@ -522,6 +747,28 @@ pub fn Whiteboard(id: String) -> Element {
         }
     };
 
+    let mut broadcast_whiteboard = move |body: &serde_json::Value| {
+        let previous = last_collab_content.read().clone();
+        if previous == *body {
+            return;
+        }
+        let user = auth
+            .read()
+            .user
+            .as_ref()
+            .map(|user| user.id.to_string())
+            .unwrap_or_default();
+        if user.is_empty() {
+            return;
+        }
+        let operation = serde_json::json!({"type":"Replace","path":["whiteboard"],"old_value":previous,"new_value":body});
+        if let Some(handle) = ws_handle.read().as_ref()
+            && handle.send_operation(&user, operation).is_ok()
+        {
+            last_collab_content.set(body.clone());
+        }
+    };
+
     let schedule_save = {
         let save_timer = save_timer.clone();
         let perform_save = perform_save.clone();
@@ -531,11 +778,13 @@ pub fn Whiteboard(id: String) -> Element {
             }
             saved_status.set(crate::i18n::t("common.unsaved"));
             let body = serialize_whiteboard();
+            document_content.set(body.clone());
+            broadcast_whiteboard(&body);
             let token = auth.read().token.clone().unwrap_or_default();
             let status = saved_status;
             let perform_save = perform_save.clone();
             let new_timer = Timeout::new(1500, move || {
-                perform_save(body, status, token);
+                perform_save(serialize_whiteboard(), status, token);
             });
             *save_timer.borrow_mut() = Some(new_timer);
         }
@@ -550,6 +799,8 @@ pub fn Whiteboard(id: String) -> Element {
             }
             save_timer.borrow_mut().take();
             let body = serialize_whiteboard();
+            document_content.set(body.clone());
+            broadcast_whiteboard(&body);
             let token = auth.read().token.clone().unwrap_or_default();
             perform_save(body, saved_status, token);
         }
@@ -586,7 +837,7 @@ pub fn Whiteboard(id: String) -> Element {
             class: "editor-container",
             tabindex: "0",
             onkeydown: {
-                let flush_save = flush_save.clone();
+                let mut flush_save = flush_save.clone();
                 let mut schedule_save = schedule_save.clone();
                 move |evt: KeyboardEvent| {
                     if evt.modifiers().contains(Modifiers::CONTROL) {
@@ -632,7 +883,7 @@ pub fn Whiteboard(id: String) -> Element {
             }
 
             {
-                let flush_for_menu = flush_save.clone();
+                let mut flush_for_menu = flush_save.clone();
                 let mut schedule_for_menu = schedule_save.clone();
                 let id_for_menu = id.clone();
                 let bus_for_menu = toast_bus;
@@ -685,6 +936,14 @@ pub fn Whiteboard(id: String) -> Element {
                             }
                         },
                     }
+                }
+            }
+
+            {
+                match *conn_state.read() {
+                    ConnectionState::Reconnecting(attempt) => rsx! { div { class: "ws-banner ws-reconnecting", "Reconnecting collaboration ({attempt})…" } },
+                    ConnectionState::Failed => rsx! { div { class: "ws-banner ws-failed", "Collaboration connection failed" } },
+                    _ => rsx! {},
                 }
             }
 
@@ -982,7 +1241,7 @@ pub fn Whiteboard(id: String) -> Element {
                             }
                             let d_opt = draft.write().take();
                             let Some(d) = d_opt else { return; };
-                            let element = match d.tool.as_str() {
+                            let mut element = match d.tool.as_str() {
                                 "pen" => {
                                     if d.points.len() < 2 { return; }
                                     let pts: Vec<serde_json::Value> = d.points.iter().map(|(x, y)| {
@@ -1038,6 +1297,7 @@ pub fn Whiteboard(id: String) -> Element {
                                 }
                                 _ => return,
                             };
+                            element["id"] = serde_json::json!(uuid::Uuid::new_v4());
                             push_undo_snapshot();
                             elements.write().push(element);
                             schedule_save();
@@ -1312,6 +1572,7 @@ pub fn Whiteboard(id: String) -> Element {
                                                     push_undo_snapshot();
                                                     elements.write().push(serde_json::json!({
                                                         "type": "text",
+                                                        "id": uuid::Uuid::new_v4(),
                                                         "x": p.0,
                                                         "y": p.1,
                                                         "content": c,
@@ -1327,19 +1588,24 @@ pub fn Whiteboard(id: String) -> Element {
                                         }
                                     }
                                 },
-                                onblur: move |_| {
+                                onblur: {
+                                    let mut schedule_save = schedule_save.clone();
+                                    move |_| {
                                     if let Some((p, c)) = text_input.read().clone()
                                         && !c.is_empty() {
                                             elements.write().push(serde_json::json!({
                                                 "type": "text",
+                                                "id": uuid::Uuid::new_v4(),
                                                 "x": p.0,
                                                 "y": p.1,
                                                 "content": c,
                                                 "color": color.read().clone(),
                                                 "size": 16,
                                             }));
+                                            schedule_save();
                                         }
                                     text_input.set(None);
+                                    }
                                 },
                             }
                         }
@@ -1367,5 +1633,51 @@ pub fn Whiteboard(id: String) -> Element {
             }
             crate::components::ai_assist::AiAssist { doc_id: id.clone() }
         }
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn ui_shapes_are_saved_as_native_whiteboard_elements() {
+        let ui = serde_json::json!({"type":"rect","x":10.0,"y":20.0,"width":100.0,"height":40.0,"stroke":"#123456","stroke_width":2.0});
+        let content = merge_whiteboard(&serde_json::json!({}), &[ui], "#ffffff", "Board");
+        let native = content.pointer("/layers/0/elements/0").unwrap();
+        assert_eq!(
+            native.get("type").and_then(|v| v.as_str()),
+            Some("Rectangle")
+        );
+        assert_eq!(
+            canonical_to_ui(native).get("type").and_then(|v| v.as_str()),
+            Some("rect")
+        );
+        serde_json::from_value::<contrix_doc_engine::Whiteboard>(content).unwrap();
+    }
+
+    #[test]
+    fn collaboration_replacement_is_scoped_to_whiteboards() {
+        let payload = serde_json::json!({"user_id":"peer","op_type":{"type":"Replace","path":["whiteboard"],"new_value":{"layers":[]}}});
+        assert_eq!(
+            whiteboard_replace_from_operation(&payload).map(|v| v.0),
+            Some("peer".into())
+        );
+    }
+
+    #[test]
+    fn saving_preserves_native_layers_and_unedited_shape_properties() {
+        let ui = serde_json::json!({"type":"rect","id":uuid::Uuid::new_v4(),"x":10.0,"y":20.0,"width":100.0,"height":40.0,"stroke":"#123456","stroke_width":2.0});
+        let mut base = merge_whiteboard(&serde_json::json!({}), &[ui], "#ffffff", "Board");
+        base["layers"][0]["name"] = serde_json::json!("Diagram");
+        base["layers"][0]["elements"][0]["rotation"] = serde_json::json!(35.0);
+        base["layers"][0]["elements"][0]["fill_color"] = serde_json::json!("#abcdef");
+        let mut ui = canonical_to_ui(&base["layers"][0]["elements"][0]);
+        ui["x"] = serde_json::json!(25.0);
+        let saved = merge_whiteboard(&base, &[ui], "#ffffff", "Board");
+        assert_eq!(saved["layers"][0]["name"], "Diagram");
+        assert_eq!(saved["layers"][0]["elements"][0]["rotation"], 35.0);
+        assert_eq!(saved["layers"][0]["elements"][0]["fill_color"], "#abcdef");
+        assert_eq!(saved["layers"][0]["elements"][0]["x"], 25.0);
     }
 }

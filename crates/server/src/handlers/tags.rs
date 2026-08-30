@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -15,7 +13,6 @@ use contrix_core::schema::tags::dsl as t;
 
 use crate::handlers::access::load_accessible_file;
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -95,7 +92,7 @@ fn require_accessible_file(
 
 #[handler]
 pub async fn create_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -169,7 +166,7 @@ pub async fn create_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn list_tags(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -217,7 +214,7 @@ pub async fn list_tags(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn update_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -312,7 +309,7 @@ pub async fn update_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn delete_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -374,7 +371,7 @@ pub async fn delete_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn assign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -450,7 +447,7 @@ pub async fn assign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn unassign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -529,7 +526,7 @@ pub async fn unassign_tag(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn list_file_tags(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -11,7 +9,6 @@ use contrix_core::models::{NewWatermarkSettings, WatermarkSettings};
 use contrix_core::schema::watermark_settings::dsl as ws;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // GET /admin/watermark  (Get watermark settings)
@@ -27,7 +24,7 @@ pub async fn get_watermark(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -101,7 +98,7 @@ pub async fn update_watermark(req: &mut Request, depot: &mut Depot, res: &mut Re
         }
     };
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     #[derive(serde::Deserialize)]
     struct UpdateWatermarkRequest {
@@ -249,7 +246,7 @@ pub async fn disable_watermark(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let now = Utc::now();
 
     let mut conn = match state.db.get() {

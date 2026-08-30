@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -13,7 +11,6 @@ use contrix_core::schema::users::dsl as u;
 
 use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 /// Authorize the caller for `required_role` on the document, rendering the
 /// appropriate error and returning `false` when access is denied.
@@ -52,7 +49,7 @@ fn ensure_document_access(
 
 #[handler]
 pub async fn list_presence(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -149,7 +146,7 @@ pub async fn list_presence(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn join_presence(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -291,7 +288,7 @@ pub async fn join_presence(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn leave_presence(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -355,7 +352,7 @@ pub async fn leave_presence(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn heartbeat(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

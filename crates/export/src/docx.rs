@@ -78,7 +78,7 @@ fn collect_embedded_images(doc: &WriterDocument) -> Vec<EmbeddedImage> {
             total = total.saturating_add(bytes.len());
             (total <= MAX_TOTAL_IMAGE_BYTES).then(|| EmbeddedImage {
                 block_id,
-                relationship_id: format!("rId{}", index + 4),
+                relationship_id: format!("rId{}", index + 10),
                 file_name: format!("image{}.{}", index + 1, extension),
                 bytes,
                 drawing_id: (index + 1) as u32,
@@ -101,8 +101,7 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
     // [Content_Types].xml
     zip.start_file("[Content_Types].xml", options)
         .map_err(|e| e.to_string())?;
-    write!(
-        zip,
+    let mut content_types = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -114,10 +113,22 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
   <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
-  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
-</Types>"#
-    )
-    .map_err(|e| e.to_string())?;
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>"#,
+    );
+    if !doc.professional.header.is_empty() {
+        content_types.push_str("\n  <Override PartName=\"/word/header1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml\"/>");
+    }
+    if !doc.professional.footer.is_empty() || doc.professional.page_numbers {
+        content_types.push_str("\n  <Override PartName=\"/word/footer1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/>");
+    }
+    if !doc.professional.footnotes.is_empty() {
+        content_types.push_str("\n  <Override PartName=\"/word/footnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml\"/>");
+    }
+    if !doc.professional.endnotes.is_empty() {
+        content_types.push_str("\n  <Override PartName=\"/word/endnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml\"/>");
+    }
+    content_types.push_str("\n</Types>");
+    write!(zip, "{content_types}").map_err(|e| e.to_string())?;
 
     // _rels/.rels
     zip.start_file("_rels/.rels", options)
@@ -154,14 +165,55 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#,
     );
+    if !doc.professional.header.is_empty() {
+        document_relationships.push_str("<Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header\" Target=\"header1.xml\"/>");
+    }
+    if !doc.professional.footer.is_empty() || doc.professional.page_numbers {
+        document_relationships.push_str("<Relationship Id=\"rId5\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" Target=\"footer1.xml\"/>");
+    }
+    if !doc.professional.footnotes.is_empty() {
+        document_relationships.push_str("<Relationship Id=\"rId6\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes\" Target=\"footnotes.xml\"/>");
+    }
+    if !doc.professional.endnotes.is_empty() {
+        document_relationships.push_str("<Relationship Id=\"rId7\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes\" Target=\"endnotes.xml\"/>");
+    }
     for image in &embedded_images {
         document_relationships.push_str(&format!(
             r#"<Relationship Id="{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/{}"/>"#,
             image.relationship_id, image.file_name
         ));
     }
+
     document_relationships.push_str("</Relationships>");
     write!(zip, "{document_relationships}").map_err(|e| e.to_string())?;
+
+    if !doc.professional.header.is_empty() {
+        zip.start_file("word/header1.xml", options)
+            .map_err(|e| e.to_string())?;
+        write!(zip, "{}", header_xml(&doc.professional.header)).map_err(|e| e.to_string())?;
+    }
+    if !doc.professional.footer.is_empty() || doc.professional.page_numbers {
+        zip.start_file("word/footer1.xml", options)
+            .map_err(|e| e.to_string())?;
+        write!(
+            zip,
+            "{}",
+            footer_xml(&doc.professional.footer, doc.professional.page_numbers)
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !doc.professional.footnotes.is_empty() {
+        zip.start_file("word/footnotes.xml", options)
+            .map_err(|e| e.to_string())?;
+        write!(zip, "{}", notes_xml(&doc.professional.footnotes, false))
+            .map_err(|e| e.to_string())?;
+    }
+    if !doc.professional.endnotes.is_empty() {
+        zip.start_file("word/endnotes.xml", options)
+            .map_err(|e| e.to_string())?;
+        write!(zip, "{}", notes_xml(&doc.professional.endnotes, true))
+            .map_err(|e| e.to_string())?;
+    }
 
     for image in &embedded_images {
         zip.start_file(format!("word/media/{}", image.file_name), options)
@@ -204,16 +256,179 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
 <w:body>"#,
     );
 
-    // Convert each block
-    for block in &doc.body {
-        block_to_xml(block, &image_lookup, &mut xml);
+    if doc.professional.table_of_contents {
+        xml.push_str("<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC \\o &quot;1-3&quot; \\h \\z \\u </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>Update field to generate table of contents</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>");
     }
+
+    // Convert each block and place note/merge/revision markers at their
+    // declared block boundary.
+    for (block_index, block) in doc.body.iter().enumerate() {
+        block_to_xml(block, &image_lookup, &mut xml);
+        append_professional_markers(doc, block_index, &mut xml);
+    }
+
+    if !doc.professional.bibliography.is_empty() {
+        xml.push_str("<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>Bibliography</w:t></w:r></w:p>");
+        for entry in &doc.professional.bibliography {
+            let year = entry
+                .year
+                .map(|year| format!(" ({year})"))
+                .unwrap_or_default();
+            xml.push_str(&format!(
+                "<w:p><w:r><w:t>{}. {}{}</w:t></w:r></w:p>",
+                escape_xml(&entry.author),
+                escape_xml(&entry.title),
+                year
+            ));
+        }
+    }
+
+    xml.push_str(&section_properties_xml(doc));
 
     xml.push_str("</w:body></w:document>");
     write!(zip, "{}", xml).map_err(|e| e.to_string())?;
 
     zip.finish().map_err(|e| e.to_string())?;
     Ok(buf.into_inner())
+}
+
+fn header_xml(text: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p></w:hdr>"#,
+        escape_xml(text)
+    )
+}
+
+fn footer_xml(text: &str, page_numbers: bool) -> String {
+    let mut xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">{}</w:t></w:r>"#,
+        escape_xml(text)
+    );
+    if page_numbers {
+        xml.push_str("<w:r><w:tab/><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r>");
+    }
+    xml.push_str("</w:p></w:ftr>");
+    xml
+}
+
+fn notes_xml(notes: &[contrix_doc_engine::writer::DocumentNote], endnotes: bool) -> String {
+    let (root, item) = if endnotes {
+        ("endnotes", "endnote")
+    } else {
+        ("footnotes", "footnote")
+    };
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+    );
+    for note in notes {
+        xml.push_str(&format!(
+            "<w:{item} w:id=\"{}\"><w:p><w:r><w:{}Reference/><w:t xml:space=\"preserve\"> {}</w:t></w:r></w:p></w:{item}>",
+            note.id,
+            if endnotes { "endnote" } else { "footnote" },
+            escape_xml(&note.text)
+        ));
+    }
+    xml.push_str(&format!("</w:{root}>"));
+    xml
+}
+
+fn append_professional_markers(doc: &WriterDocument, block_index: usize, xml: &mut String) {
+    for note in &doc.professional.footnotes {
+        if note.reference_block == block_index {
+            xml.push_str(&format!(
+                "<w:p><w:r><w:footnoteReference w:id=\"{}\"/></w:r></w:p>",
+                note.id
+            ));
+        }
+    }
+    for note in &doc.professional.endnotes {
+        if note.reference_block == block_index {
+            xml.push_str(&format!(
+                "<w:p><w:r><w:endnoteReference w:id=\"{}\"/></w:r></w:p>",
+                note.id
+            ));
+        }
+    }
+    for field in &doc.professional.mail_merge_fields {
+        if field.block_index == block_index {
+            xml.push_str(&format!(
+                "<w:p><w:fldSimple w:instr=\" MERGEFIELD {} \"><w:r><w:t>{}</w:t></w:r></w:fldSimple></w:p>",
+                escape_xml(&field.name),
+                escape_xml(field.default_value.as_deref().unwrap_or(&field.name))
+            ));
+        }
+    }
+    for revision in &doc.professional.revisions {
+        if revision.block_index == block_index {
+            let tag = match revision.kind {
+                contrix_doc_engine::writer::RevisionKind::Insert => "ins",
+                contrix_doc_engine::writer::RevisionKind::Delete => "del",
+            };
+            let text_tag = if tag == "del" { "delText" } else { "t" };
+            xml.push_str(&format!(
+                "<w:p><w:{tag} w:id=\"{}\" w:author=\"{}\" w:date=\"{}\"><w:r><w:{text_tag}>{}</w:{text_tag}></w:r></w:{tag}></w:p>",
+                revision.id.as_u128() & u32::MAX as u128,
+                escape_xml(&revision.author),
+                revision.timestamp.to_rfc3339(),
+                escape_xml(&revision.text)
+            ));
+        }
+    }
+    for section in &doc.professional.sections {
+        if section.start_block == block_index + 1 {
+            xml.push_str("<w:p><w:pPr>");
+            xml.push_str(&section_properties_for(
+                &section.page_settings,
+                section.header.as_deref(),
+                section.footer.as_deref(),
+                doc,
+            ));
+            xml.push_str("</w:pPr></w:p>");
+        }
+    }
+}
+
+fn section_properties_xml(doc: &WriterDocument) -> String {
+    section_properties_for(&doc.page_settings, None, None, doc)
+}
+
+fn section_properties_for(
+    settings: &contrix_doc_engine::writer::PageSettings,
+    section_header: Option<&str>,
+    section_footer: Option<&str>,
+    doc: &WriterDocument,
+) -> String {
+    let twips = |millimetres: f32| (millimetres.max(0.0) * 56.692_913) as u32;
+    let mut xml = String::from("<w:sectPr>");
+    if !doc.professional.header.is_empty() || section_header.is_some_and(|value| !value.is_empty())
+    {
+        xml.push_str("<w:headerReference w:type=\"default\" r:id=\"rId4\"/>");
+    }
+    if !doc.professional.footer.is_empty()
+        || doc.professional.page_numbers
+        || section_footer.is_some_and(|value| !value.is_empty())
+    {
+        xml.push_str("<w:footerReference w:type=\"default\" r:id=\"rId5\"/>");
+    }
+    xml.push_str(&format!(
+        "<w:pgSz w:w=\"{}\" w:h=\"{}\"{} /><w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>",
+        twips(settings.width_mm),
+        twips(settings.height_mm),
+        if matches!(settings.orientation, contrix_doc_engine::writer::Orientation::Landscape) {
+            " w:orient=\"landscape\""
+        } else {
+            ""
+        },
+        twips(settings.margin_top),
+        twips(settings.margin_right),
+        twips(settings.margin_bottom),
+        twips(settings.margin_left),
+    ));
+    if doc.professional.different_first_page {
+        xml.push_str("<w:titlePg/>");
+    }
+    xml.push_str("</w:sectPr>");
+    xml
 }
 
 fn numbering_xml() -> String {
@@ -473,6 +688,11 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
         Err(_) => NumberingDefinitions::default(),
     };
     let imported_images = load_imported_images(&mut archive)?;
+    let header = read_part_text(&mut archive, "word/header1.xml").unwrap_or_default();
+    let footer_xml = read_part_xml(&mut archive, "word/footer1.xml").unwrap_or_default();
+    let footer = xml_visible_text(&footer_xml);
+    let footnotes = read_notes(&mut archive, "word/footnotes.xml", false)?;
+    let endnotes = read_notes(&mut archive, "word/endnotes.xml", true)?;
 
     let mut document_xml = String::new();
     archive
@@ -484,7 +704,162 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
     let blocks = parse_body(&document_xml, &numbering, &imported_images)?;
     let mut doc = WriterDocument::new(title);
     doc.body = blocks;
+    doc.professional.header = header;
+    doc.professional.footer = footer;
+    doc.professional.page_numbers = footer_xml.contains(">PAGE<");
+    doc.professional.table_of_contents = document_xml.contains("> TOC ");
+    doc.professional.footnotes = footnotes;
+    doc.professional.endnotes = endnotes;
+    if let Some(settings) = parse_page_settings(&document_xml) {
+        doc.page_settings = settings;
+    }
     Ok(doc)
+}
+
+fn read_part_xml<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    name: &str,
+) -> Option<String> {
+    let mut xml = String::new();
+    archive.by_name(name).ok()?.read_to_string(&mut xml).ok()?;
+    Some(xml)
+}
+
+fn read_part_text<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    name: &str,
+) -> Option<String> {
+    read_part_xml(archive, name).map(|xml| xml_visible_text(&xml))
+}
+
+fn xml_visible_text(xml: &str) -> String {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut in_text = false;
+    let mut output = String::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) if matches!(event.name().as_ref(), b"w:t" | b"w:delText") => {
+                in_text = true;
+            }
+            Ok(Event::End(event)) if matches!(event.name().as_ref(), b"w:t" | b"w:delText") => {
+                in_text = false;
+            }
+            Ok(Event::Text(text)) if in_text => {
+                if let Ok(decoded) = text.decode()
+                    && let Ok(unescaped) = quick_xml::escape::unescape(&decoded)
+                {
+                    output.push_str(&unescaped);
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    output
+}
+
+fn read_notes<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    name: &str,
+    endnotes: bool,
+) -> Result<Vec<contrix_doc_engine::writer::DocumentNote>, String> {
+    let Some(xml) = read_part_xml(archive, name) else {
+        return Ok(Vec::new());
+    };
+    let item_name: &[u8] = if endnotes {
+        b"w:endnote"
+    } else {
+        b"w:footnote"
+    };
+    let mut reader = Reader::from_str(&xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut current_id = None;
+    let mut current_text = String::new();
+    let mut in_text = false;
+    let mut notes = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) if event.name().as_ref() == item_name => {
+                current_id = attr_val(&event, b"w:id").and_then(|value| value.parse::<i32>().ok());
+                current_text.clear();
+            }
+            Ok(Event::Start(event)) if event.name().as_ref() == b"w:t" => in_text = true,
+            Ok(Event::End(event)) if event.name().as_ref() == b"w:t" => in_text = false,
+            Ok(Event::Text(text)) if in_text => {
+                let decoded = text.decode().map_err(|error| error.to_string())?;
+                current_text.push_str(
+                    &quick_xml::escape::unescape(&decoded).map_err(|error| error.to_string())?,
+                );
+            }
+            Ok(Event::End(event)) if event.name().as_ref() == item_name => {
+                if let Some(id) = current_id.take()
+                    && id > 0
+                {
+                    notes.push(contrix_doc_engine::writer::DocumentNote {
+                        id: id as u32,
+                        reference_block: 0,
+                        text: current_text.trim().to_string(),
+                    });
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(error.to_string()),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(notes)
+}
+
+fn parse_page_settings(xml: &str) -> Option<contrix_doc_engine::writer::PageSettings> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut settings = contrix_doc_engine::writer::PageSettings::default();
+    let mut found = false;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if event.name().as_ref() == b"w:pgSz" =>
+            {
+                if let Some(width) = attr_val(&event, b"w:w").and_then(|v| v.parse::<f32>().ok()) {
+                    settings.width_mm = width / 56.692_913;
+                }
+                if let Some(height) = attr_val(&event, b"w:h").and_then(|v| v.parse::<f32>().ok()) {
+                    settings.height_mm = height / 56.692_913;
+                }
+                if attr_val(&event, b"w:orient").as_deref() == Some("landscape") {
+                    settings.orientation = contrix_doc_engine::writer::Orientation::Landscape;
+                }
+                found = true;
+            }
+            Ok(Event::Empty(event)) | Ok(Event::Start(event))
+                if event.name().as_ref() == b"w:pgMar" =>
+            {
+                for (attribute, target) in [
+                    (b"w:top".as_slice(), &mut settings.margin_top),
+                    (b"w:right".as_slice(), &mut settings.margin_right),
+                    (b"w:bottom".as_slice(), &mut settings.margin_bottom),
+                    (b"w:left".as_slice(), &mut settings.margin_left),
+                ] {
+                    if let Some(value) =
+                        attr_val(&event, attribute).and_then(|v| v.parse::<f32>().ok())
+                    {
+                        *target = value / 56.692_913;
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+    found.then_some(settings)
 }
 
 fn load_imported_images<R: Read + std::io::Seek>(
@@ -1248,6 +1623,52 @@ mod tests {
         assert_eq!(image.alt_text, "A tiny pixel");
         assert_eq!(image.width, Some(32.0));
         assert_eq!(image.height, Some(16.0));
+    }
+
+    #[test]
+    fn professional_layout_parts_are_packaged_and_imported() {
+        let mut doc = WriterDocument::new("Professional".into());
+        doc.add_heading("Overview", 1).add_paragraph("Body");
+        doc.professional.header = "Confidential".into();
+        doc.professional.footer = "Quarterly report".into();
+        doc.professional.page_numbers = true;
+        doc.professional.table_of_contents = true;
+        doc.professional
+            .footnotes
+            .push(contrix_doc_engine::writer::DocumentNote {
+                id: 1,
+                reference_block: 1,
+                text: "Supporting detail".into(),
+            });
+        doc.professional
+            .mail_merge_fields
+            .push(contrix_doc_engine::writer::MailMergeField {
+                name: "CustomerName".into(),
+                block_index: 1,
+                default_value: Some("Customer".into()),
+            });
+
+        let bytes = writer_to_docx(&doc).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
+        for part in ["word/header1.xml", "word/footer1.xml", "word/footnotes.xml"] {
+            assert!(archive.by_name(part).is_ok(), "missing {part}");
+        }
+        let mut document_xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut document_xml)
+            .unwrap();
+        assert!(document_xml.contains("MERGEFIELD CustomerName"));
+        assert!(document_xml.contains("TOC"));
+        drop(archive);
+
+        let imported = docx_to_writer(&bytes).unwrap();
+        assert_eq!(imported.professional.header, "Confidential");
+        assert!(imported.professional.footer.contains("Quarterly report"));
+        assert!(imported.professional.page_numbers);
+        assert!(imported.professional.table_of_contents);
+        assert_eq!(imported.professional.footnotes[0].text, "Supporting detail");
     }
 
     #[test]

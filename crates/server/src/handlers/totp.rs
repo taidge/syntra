@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
@@ -17,7 +15,6 @@ use contrix_core::schema::totp_secrets::dsl as ts;
 use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -376,7 +373,7 @@ mod totp_tests {
 
 #[handler]
 pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -538,7 +535,7 @@ pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn verify_totp(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -642,7 +639,7 @@ pub async fn verify_totp(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn disable_totp(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -741,7 +738,7 @@ pub async fn disable_totp(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn totp_status(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

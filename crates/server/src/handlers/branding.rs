@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -11,7 +9,6 @@ use contrix_core::models::{BrandingSettings, NewBrandingSettings};
 use contrix_core::schema::branding_settings::dsl as bs;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,7 +58,7 @@ pub async fn get_branding(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -106,7 +103,7 @@ pub async fn update_branding(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -257,7 +254,7 @@ pub async fn reset_branding(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,

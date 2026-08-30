@@ -12,6 +12,8 @@ pub struct WriterDocument {
     pub title: String,
     pub body: Vec<Block>,
     pub page_settings: PageSettings,
+    #[serde(default)]
+    pub professional: ProfessionalLayout,
     pub styles: Vec<Style>,
     pub metadata: DocumentMetadata,
 }
@@ -121,6 +123,7 @@ pub struct Blockquote {
 
 /// A contiguous run of text sharing the same formatting.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TextRun {
     pub text: String,
     pub bold: bool,
@@ -223,6 +226,71 @@ pub struct Style {
     pub color: Option<String>,
 }
 
+/// Print-oriented features that are kept separate from the main body so old
+/// documents remain compatible while professional layout metadata can round
+/// trip through DOCX.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfessionalLayout {
+    pub header: String,
+    pub footer: String,
+    pub page_numbers: bool,
+    pub different_first_page: bool,
+    pub sections: Vec<DocumentSection>,
+    pub footnotes: Vec<DocumentNote>,
+    pub endnotes: Vec<DocumentNote>,
+    pub table_of_contents: bool,
+    pub bibliography: Vec<BibliographyEntry>,
+    pub mail_merge_fields: Vec<MailMergeField>,
+    pub revisions: Vec<DocumentRevision>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSection {
+    pub start_block: usize,
+    pub page_settings: PageSettings,
+    pub header: Option<String>,
+    pub footer: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentNote {
+    pub id: u32,
+    pub reference_block: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BibliographyEntry {
+    pub id: String,
+    pub author: String,
+    pub title: String,
+    pub year: Option<u32>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailMergeField {
+    pub name: String,
+    pub block_index: usize,
+    pub default_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentRevision {
+    pub id: Uuid,
+    pub author: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub block_index: usize,
+    pub kind: RevisionKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RevisionKind {
+    Insert,
+    Delete,
+}
+
 /// Document-level metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentMetadata {
@@ -260,6 +328,7 @@ impl Default for WriterDocument {
             title: String::new(),
             body: Vec::new(),
             page_settings: PageSettings::default(),
+            professional: ProfessionalLayout::default(),
             styles: Vec::new(),
             metadata: DocumentMetadata::default(),
         }
@@ -404,6 +473,7 @@ impl WriterDocument {
             title: format!("{} (part 1)", self.title),
             body: first_body,
             page_settings: self.page_settings.clone(),
+            professional: self.professional.clone(),
             styles: self.styles.clone(),
             metadata: DocumentMetadata::default(),
         };
@@ -413,6 +483,7 @@ impl WriterDocument {
             title: format!("{} (part 2)", self.title),
             body: second_body,
             page_settings: self.page_settings.clone(),
+            professional: self.professional.clone(),
             styles: self.styles.clone(),
             metadata: DocumentMetadata::default(),
         };

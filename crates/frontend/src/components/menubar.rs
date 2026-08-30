@@ -70,14 +70,22 @@ fn edit_items() -> Vec<MenuItem> {
     ]
 }
 
-fn view_items() -> Vec<MenuItem> {
-    vec![
+fn view_items(document_type: &str) -> Vec<MenuItem> {
+    let mut items = vec![
         MenuItem::new("menu.view.zoom_in", "zoom-in", "Ctrl++"),
         MenuItem::new("menu.view.zoom_out", "zoom-out", "Ctrl+-"),
         MenuItem::sep("menu.view.zoom_reset", "zoom-reset", "Ctrl+0"),
         MenuItem::new("menu.view.toggle_sidebar", "toggle-sidebar", ""),
         MenuItem::new("menu.view.toggle_theme", "toggle-theme", ""),
-    ]
+    ];
+    if document_type == "calc" {
+        items.push(MenuItem::new("menu.view.freeze_rows", "freeze-rows", ""));
+        items.push(MenuItem::new("menu.view.freeze_cols", "freeze-cols", ""));
+    }
+    if document_type == "slides" {
+        items.push(MenuItem::new("menu.view.presenter", "presenter-view", ""));
+    }
+    items
 }
 
 fn insert_items(document_type: &str) -> Vec<MenuItem> {
@@ -87,6 +95,13 @@ fn insert_items(document_type: &str) -> Vec<MenuItem> {
             MenuItem::new("menu.insert.table", "insert-table", ""),
             MenuItem::new("menu.insert.link", "insert-link", ""),
             MenuItem::new("menu.insert.page_break", "insert-page-break", ""),
+            MenuItem::new("menu.insert.section_break", "insert-section-break", ""),
+            MenuItem::new("menu.insert.header", "insert-header", ""),
+            MenuItem::new("menu.insert.footer", "insert-footer", ""),
+            MenuItem::new("menu.insert.footnote", "insert-footnote", ""),
+            MenuItem::new("menu.insert.toc", "insert-toc", ""),
+            MenuItem::new("menu.insert.citation", "insert-citation", ""),
+            MenuItem::new("menu.insert.merge_field", "insert-merge-field", ""),
         ],
         "calc" => vec![
             MenuItem::new("menu.insert.row_above", "insert-row", ""),
@@ -94,12 +109,17 @@ fn insert_items(document_type: &str) -> Vec<MenuItem> {
             MenuItem::sep("menu.insert.sheet", "insert-sheet", ""),
             MenuItem::new("menu.insert.chart", "insert-chart", ""),
             MenuItem::new("menu.insert.function", "insert-function", ""),
+            MenuItem::new("menu.insert.validation", "insert-validation", ""),
+            MenuItem::new("menu.insert.named_range", "insert-named-range", ""),
+            MenuItem::new("menu.insert.pivot", "insert-pivot", ""),
         ],
         "slides" => vec![
             MenuItem::new("menu.insert.slide", "insert-slide", ""),
             MenuItem::new("menu.insert.textbox", "insert-textbox", ""),
             MenuItem::new("menu.insert.image", "insert-image", ""),
             MenuItem::new("menu.insert.shape", "insert-shape", ""),
+            MenuItem::new("menu.insert.animation", "insert-animation", ""),
+            MenuItem::new("menu.insert.chart", "insert-chart", ""),
         ],
         _ => vec![
             MenuItem::new("menu.insert.text", "insert-text", ""),
@@ -174,7 +194,7 @@ pub fn Menubar(props: MenubarProps) -> Element {
     let menus: Vec<(&'static str, &'static str, Vec<MenuItem>)> = vec![
         ("File", "menubar.file", file_items(&document_type)),
         ("Edit", "menubar.edit", edit_items()),
-        ("View", "menubar.view", view_items()),
+        ("View", "menubar.view", view_items(&document_type)),
         ("Insert", "menubar.insert", insert_items(&document_type)),
         ("Format", "menubar.format", format_items(&document_type)),
         ("Tools", "menubar.tools", tools_items(&document_type)),

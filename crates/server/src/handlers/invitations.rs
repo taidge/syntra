@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
 use chrono::{Duration, Utc};
@@ -14,7 +12,6 @@ use contrix_core::schema::invitations::dsl as inv;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 use crate::services::password::PasswordService;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,7 +42,7 @@ fn generate_token() -> String {
 
 #[handler]
 pub async fn create_invitation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -168,7 +165,7 @@ pub async fn create_invitation(req: &mut Request, depot: &mut Depot, res: &mut R
 
 #[handler]
 pub async fn list_invitations(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -227,7 +224,7 @@ pub async fn list_invitations(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn get_invitation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -282,7 +279,7 @@ pub async fn get_invitation(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn cancel_invitation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -353,7 +350,7 @@ pub async fn accept_invitation_with_depot(
     depot: &mut Depot,
     res: &mut Response,
 ) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let token_param: String = req.param("token").unwrap_or_default();
 

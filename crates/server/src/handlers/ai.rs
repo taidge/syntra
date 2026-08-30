@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use diesel::prelude::*;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -11,7 +9,6 @@ use contrix_core::schema::documents::dsl as d;
 use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;
 use crate::services::{AuditContext, AuditService};
-use crate::state::AppState;
 
 #[derive(Deserialize)]
 struct AssistRequest {
@@ -29,7 +26,7 @@ const MODES: &[&str] = &["summarize", "translate", "explain", "draft"];
 
 #[handler]
 pub async fn assist(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let user_id = match get_user_id(depot) {
         Some(user_id) => user_id,
         None => {

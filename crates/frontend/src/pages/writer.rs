@@ -234,22 +234,167 @@ fn writer_content_to_plain(content: &serde_json::Value) -> String {
         Ok(d) => d,
         Err(_) => return String::new(),
     };
-    let mut out = String::new();
-    for block in &doc.body {
-        let runs = block
-            .get("runs")
-            .and_then(|r| r.as_array())
-            .cloned()
-            .unwrap_or_default();
-        if !runs.is_empty() {
-            out.push_str(&extract_run_text(&runs));
-            out.push('\n');
+    doc.body
+        .iter()
+        .filter_map(|block| {
+            if block["type"] == "PageBreak" {
+                Some("\u{000c}".to_string())
+            } else {
+                block
+                    .get("runs")?
+                    .as_array()
+                    .map(|runs| extract_run_text(runs))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn plain_writer_run(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "text": text, "bold": false, "italic": false, "underline": false,
+        "strikethrough": false, "font_family": null, "font_size": null,
+        "color": null, "background_color": null, "link": null,
+        "superscript": false, "subscript": false
+    })
+}
+
+/// Splice the changed character range while retaining formatting on unaffected runs.
+fn replace_writer_runs(runs: &[serde_json::Value], text: &str) -> Vec<serde_json::Value> {
+    let old = extract_run_text(runs).chars().collect::<Vec<_>>();
+    let new = text.chars().collect::<Vec<_>>();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let replacement: String = new[prefix..new.len() - suffix].iter().collect();
+    let mut result = Vec::new();
+    let mut offset = 0;
+    let mut inserted = false;
+    for run in runs {
+        let chars = run["text"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .collect::<Vec<_>>();
+        let end = offset + chars.len();
+        let mut value: String = chars[..prefix.saturating_sub(offset).min(chars.len())]
+            .iter()
+            .collect();
+        if !inserted && end >= prefix {
+            value.push_str(&replacement);
+            inserted = true;
+        }
+        value.extend(chars[(old.len() - suffix).saturating_sub(offset).min(chars.len())..].iter());
+        if !value.is_empty() {
+            let mut updated = run.clone();
+            updated["text"] = serde_json::Value::String(value);
+            result.push(updated);
+        }
+        offset = end;
+    }
+    if result.is_empty() {
+        result.push(plain_writer_run(text));
+    }
+    result
+}
+
+fn writer_content_with_text(base: &serde_json::Value, text: &str) -> serde_json::Value {
+    // A metadata-only save must never rewrite rich blocks or their stable IDs.
+    if writer_content_to_plain(base) == text {
+        return base.clone();
+    }
+    let mut content = base.clone();
+    let Some(object) = content.as_object_mut() else {
+        return serde_json::json!({ "body": [] });
+    };
+    let mut replacement = Vec::new();
+    for line in text.split('\n') {
+        for (index, part) in line.split('\u{000c}').enumerate() {
+            if index > 0 {
+                replacement.push(serde_json::json!({ "type": "PageBreak" }));
+            }
+            if part.is_empty() && line.contains('\u{000c}') {
+                continue;
+            }
+            replacement.push(serde_json::json!({
+                "type": "Paragraph",
+                "id": uuid::Uuid::new_v4(),
+                "runs": [plain_writer_run(part)],
+                "alignment": "Left",
+                "indent_level": 0,
+                "spacing": { "before": 0.0, "after": 8.0, "line_height": 1.15 }
+            }));
         }
     }
-    if out.ends_with('\n') {
-        out.pop();
+    let mut replacement = replacement.into_iter();
+    let mut blocks = Vec::new();
+    for original in base["body"].as_array().into_iter().flatten() {
+        if original.get("runs").is_none() && original["type"] != "PageBreak" {
+            // Tables, images, lists and other rich blocks are not represented by
+            // the plain-text surface. Keep them rather than silently deleting them.
+            blocks.push(original.clone());
+            continue;
+        }
+        if let Some(mut next) = replacement.next() {
+            if let (Some(runs), Some(next_runs)) =
+                (original["runs"].as_array(), next["runs"].as_array())
+            {
+                let line = extract_run_text(next_runs);
+                next = original.clone();
+                if extract_run_text(runs) != line {
+                    next["runs"] = serde_json::Value::Array(replace_writer_runs(runs, &line));
+                }
+            }
+            blocks.push(next);
+        }
     }
-    out
+    blocks.extend(replacement);
+    object.insert("body".into(), serde_json::Value::Array(blocks));
+    content
+}
+
+fn update_professional_field(
+    base: &serde_json::Value,
+    key: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    let mut content = base.clone();
+    if !content.is_object() {
+        content = serde_json::json!({});
+    }
+    let object = content.as_object_mut().expect("object assigned above");
+    let professional = object
+        .entry("professional")
+        .or_insert_with(|| serde_json::json!({}));
+    if !professional.is_object() {
+        *professional = serde_json::json!({});
+    }
+    professional
+        .as_object_mut()
+        .expect("object assigned above")
+        .insert(key.to_string(), value);
+    content
+}
+
+fn attach_pending_revisions(base: serde_json::Value, changes: &[ChangeItem]) -> serde_json::Value {
+    let revisions = changes
+        .iter()
+        .map(|change| {
+            serde_json::json!({
+                "id": change.dom_id.parse::<uuid::Uuid>().unwrap_or_else(|_| uuid::Uuid::new_v4()),
+                "author": change.author,
+                "timestamp": chrono::Utc::now(),
+                "block_index": 0,
+                "kind": if change.kind == "ins" { "Insert" } else { "Delete" },
+                "text": change.text,
+            })
+        })
+        .collect::<Vec<_>>();
+    update_professional_field(&base, "revisions", serde_json::Value::Array(revisions))
 }
 
 #[derive(Clone, PartialEq)]
@@ -373,7 +518,7 @@ fn list_pending_changes() -> Vec<ChangeItem> {
         let text = el.text_content().unwrap_or_default();
         let author = el.get_attribute("data-author").unwrap_or_default();
         let id = el.get_attribute("data-change-id").unwrap_or_else(|| {
-            let new_id = format!("ch-{}-{}", i, (js_sys::Math::random() * 1.0e9) as u64);
+            let new_id = uuid::Uuid::new_v4().to_string();
             let _ = el.set_attribute("data-change-id", &new_id);
             new_id
         });
@@ -474,6 +619,7 @@ pub fn Writer(id: String) -> Element {
     let mut show_sidebar = use_signal(|| true);
     let mut doc_body_text = use_signal(String::new);
     let mut initial_html = use_signal(String::new);
+    let mut document_content = use_signal(|| serde_json::json!({}));
     let mut loaded = use_signal(|| false);
 
     let mut find_open = use_signal(|| false);
@@ -511,6 +657,7 @@ pub fn Writer(id: String) -> Element {
             let wc = text.split_whitespace().count() as u32;
             let cc = text.chars().count() as u32;
             let html = plain_text_to_html(&text);
+            document_content.set(doc.content.clone());
             initial_html.set(html);
             doc_body_text.set(text);
             word_count.set(wc);
@@ -599,6 +746,9 @@ pub fn Writer(id: String) -> Element {
                 apply_writer_text_to_dom(&text);
                 initial_html.set(plain_text_to_html(&text));
                 doc_body_text.set(text);
+                let next =
+                    writer_content_with_text(&document_content.read(), &doc_body_text.read());
+                document_content.set(next);
                 word_count.set(wc);
                 char_count.set(cc);
                 page_count.set(estimate_page_count(cc));
@@ -665,10 +815,8 @@ pub fn Writer(id: String) -> Element {
     });
 
     use_drop(move || {
-        if let Some(handle) = ws_handle.write().take()
-            && let Some(ws) = handle.current_ws()
-        {
-            let _ = ws.close();
+        if let Some(handle) = ws_handle.write().take() {
+            handle.close();
         }
     });
 
@@ -756,9 +904,9 @@ pub fn Writer(id: String) -> Element {
                 return;
             }
             saved_status.set(crate::i18n::t("common.unsaved"));
-            let body = serde_json::json!({
-                "body": [{"runs": [{"text": doc_body_text.read().clone()}]}]
-            });
+            let body = writer_content_with_text(&document_content.read(), &doc_body_text.read());
+            let body = attach_pending_revisions(body, &list_pending_changes());
+            document_content.set(body.clone());
             let token = auth.read().token.clone().unwrap_or_default();
             let status = saved_status;
             let perform_save = perform_save.clone();
@@ -777,9 +925,9 @@ pub fn Writer(id: String) -> Element {
                 return;
             }
             save_timer.borrow_mut().take();
-            let body = serde_json::json!({
-                "body": [{"runs": [{"text": doc_body_text.read().clone()}]}]
-            });
+            let body = writer_content_with_text(&document_content.read(), &doc_body_text.read());
+            let body = attach_pending_revisions(body, &list_pending_changes());
+            document_content.set(body.clone());
             let token = auth.read().token.clone().unwrap_or_default();
             perform_save(body, saved_status, token);
         }
@@ -809,7 +957,7 @@ pub fn Writer(id: String) -> Element {
             class: "editor-container",
             tabindex: "0",
             onkeydown: {
-                let flush_save = flush_save.clone();
+                let mut flush_save = flush_save.clone();
                 let mut schedule_save = schedule_save.clone();
                 move |evt: KeyboardEvent| {
                     let modifiers = evt.modifiers();
@@ -866,7 +1014,7 @@ pub fn Writer(id: String) -> Element {
             },
             // Menubar
             {
-                let flush_for_menu = flush_save.clone();
+                let mut flush_for_menu = flush_save.clone();
                 let mut schedule_for_menu = schedule_save.clone();
                 let id_for_menu = id.clone();
                 let bus_for_menu = toast_bus;
@@ -919,6 +1067,154 @@ pub fn Writer(id: String) -> Element {
                                 "format-bold" => { exec_cmd("bold", None); schedule_for_menu(); }
                                 "format-italic" => { exec_cmd("italic", None); schedule_for_menu(); }
                                 "format-underline" => { exec_cmd("underline", None); schedule_for_menu(); }
+                                "insert-page-break" => {
+                                    exec_cmd("insertText", Some("\u{000c}"));
+                                    doc_body_text.set(editor_text());
+                                    schedule_for_menu();
+                                }
+                                "insert-header" | "insert-footer" => {
+                                    if let Some(window) = web_sys::window()
+                                        && let Ok(Some(value)) = window.prompt_with_message(
+                                            if cmd == "insert-header" { "Header text" } else { "Footer text" }
+                                        )
+                                    {
+                                        let field = if cmd == "insert-header" { "header" } else { "footer" };
+                                        let current = document_content.read().clone();
+                                        document_content.set(update_professional_field(
+                                            &current,
+                                            field,
+                                            serde_json::Value::String(value),
+                                        ));
+                                        if field == "footer" {
+                                            let current = document_content.read().clone();
+                                            document_content.set(update_professional_field(
+                                                &current,
+                                                "page_numbers",
+                                                serde_json::Value::Bool(true),
+                                            ));
+                                        }
+                                        schedule_for_menu();
+                                    }
+                                }
+                                "insert-toc" => {
+                                    let current = document_content.read().clone();
+                                    document_content.set(update_professional_field(
+                                        &current,
+                                        "table_of_contents",
+                                        serde_json::Value::Bool(true),
+                                    ));
+                                    schedule_for_menu();
+                                }
+                                "insert-section-break" => {
+                                    let mut sections = document_content
+                                        .read()
+                                        .pointer("/professional/sections")
+                                        .and_then(|value| value.as_array())
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let page_settings = document_content
+                                        .read()
+                                        .get("page_settings")
+                                        .cloned()
+                                        .unwrap_or_else(|| serde_json::json!({
+                                            "width_mm": 210.0, "height_mm": 297.0,
+                                            "margin_top": 25.4, "margin_right": 25.4,
+                                            "margin_bottom": 25.4, "margin_left": 25.4,
+                                            "orientation": "Portrait"
+                                        }));
+                                    sections.push(serde_json::json!({
+                                        "start_block": doc_body_text.read().lines().count(),
+                                        "page_settings": page_settings,
+                                        "header": null,
+                                        "footer": null
+                                    }));
+                                    let current = document_content.read().clone();
+                                    document_content.set(update_professional_field(
+                                        &current,
+                                        "sections",
+                                        serde_json::Value::Array(sections),
+                                    ));
+                                    exec_cmd("insertText", Some("\u{000c}"));
+                                    doc_body_text.set(editor_text());
+                                    schedule_for_menu();
+                                }
+                                "insert-footnote" => {
+                                    if let Some(window) = web_sys::window()
+                                        && let Ok(Some(value)) = window.prompt_with_message("Footnote text")
+                                        && !value.trim().is_empty()
+                                    {
+                                        let mut notes = document_content
+                                            .read()
+                                            .pointer("/professional/footnotes")
+                                            .and_then(|value| value.as_array())
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        notes.push(serde_json::json!({
+                                            "id": notes.len() + 1,
+                                            "reference_block": doc_body_text.read().lines().count().saturating_sub(1),
+                                            "text": value
+                                        }));
+                                        let current = document_content.read().clone();
+                                        document_content.set(update_professional_field(
+                                            &current,
+                                            "footnotes",
+                                            serde_json::Value::Array(notes),
+                                        ));
+                                        schedule_for_menu();
+                                    }
+                                }
+                                "insert-citation" => {
+                                    if let Some(window) = web_sys::window()
+                                        && let Ok(Some(title)) = window.prompt_with_message("Citation title")
+                                        && !title.trim().is_empty()
+                                    {
+                                        let mut bibliography = document_content
+                                            .read()
+                                            .pointer("/professional/bibliography")
+                                            .and_then(|value| value.as_array())
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        bibliography.push(serde_json::json!({
+                                            "id": uuid::Uuid::new_v4().to_string(),
+                                            "author": "Unknown",
+                                            "title": title,
+                                            "year": null,
+                                            "url": null
+                                        }));
+                                        let current = document_content.read().clone();
+                                        document_content.set(update_professional_field(
+                                            &current,
+                                            "bibliography",
+                                            serde_json::Value::Array(bibliography),
+                                        ));
+                                        schedule_for_menu();
+                                    }
+                                }
+                                "insert-merge-field" => {
+                                    if let Some(window) = web_sys::window()
+                                        && let Ok(Some(name)) = window.prompt_with_message("Mail merge field name")
+                                        && !name.trim().is_empty()
+                                    {
+                                        let mut fields = document_content
+                                            .read()
+                                            .pointer("/professional/mail_merge_fields")
+                                            .and_then(|value| value.as_array())
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        fields.push(serde_json::json!({
+                                            "name": name,
+                                            "block_index": doc_body_text.read().lines().count().saturating_sub(1),
+                                            "default_value": null
+                                        }));
+                                        let current = document_content.read().clone();
+                                        document_content.set(update_professional_field(
+                                            &current,
+                                            "mail_merge_fields",
+                                            serde_json::Value::Array(fields),
+                                        ));
+                                        schedule_for_menu();
+                                    }
+                                }
                                 "print" => {
                                     if let Some(w) = web_sys::window() { let _ = w.print(); }
                                 }
@@ -1489,8 +1785,47 @@ pub fn Writer(id: String) -> Element {
 
 #[cfg(test)]
 mod collaboration_tests {
-    use super::writer_replace_from_operation;
+    use super::*;
     use crate::collab_client::CollabMessage;
+
+    #[test]
+    fn text_save_preserves_rich_blocks_and_unaffected_run_formatting() {
+        let mut doc = contrix_doc_engine::WriterDocument::new("Report".into());
+        doc.add_paragraph("Hello 世界");
+        doc.body
+            .push(contrix_doc_engine::writer::Block::HorizontalRule);
+        doc.body.push(contrix_doc_engine::writer::Block::PageBreak);
+        doc.add_heading("Appendix", 2);
+        let mut base = serde_json::to_value(doc).unwrap();
+        base["body"][0]["runs"][0]["bold"] = serde_json::json!(true);
+        base["professional"]["header"] = serde_json::json!("Private");
+        assert_eq!(
+            writer_content_with_text(&base, &writer_content_to_plain(&base)),
+            base
+        );
+        let edited = writer_content_with_text(&base, "Hello 新世界\n\u{000c}\nAppendix");
+        assert_eq!(edited["body"][0]["runs"][0]["bold"], true);
+        assert_eq!(edited["body"][1], base["body"][1]);
+        assert_eq!(edited["body"][3], base["body"][3]);
+        assert_eq!(edited["professional"], base["professional"]);
+        serde_json::from_value::<contrix_doc_engine::WriterDocument>(edited).unwrap();
+    }
+
+    #[test]
+    fn newly_typed_text_is_valid_engine_content() {
+        let base =
+            serde_json::to_value(contrix_doc_engine::WriterDocument::new("New".into())).unwrap();
+        let saved = writer_content_with_text(&base, "One\nTwo");
+        let doc: contrix_doc_engine::WriterDocument = serde_json::from_value(saved).unwrap();
+        assert_eq!(doc.body.len(), 2);
+        let mut first = plain_writer_run("Hello ");
+        first["bold"] = serde_json::json!(true);
+        let mut second = plain_writer_run("世界");
+        second["italic"] = serde_json::json!(true);
+        let runs = replace_writer_runs(&[first, second], "Hello 新世界");
+        assert_eq!(extract_run_text(&runs), "Hello 新世界");
+        assert_eq!(runs.last().unwrap()["italic"], true);
+    }
 
     #[test]
     fn server_operation_message_restores_writer_text() {

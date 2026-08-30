@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -11,7 +9,6 @@ use contrix_core::models::{NewUserSetting, UserSetting};
 use contrix_core::schema::user_settings::dsl as us;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // GET /settings  (List all settings for current user)
@@ -19,7 +16,7 @@ use crate::state::AppState;
 
 #[handler]
 pub async fn list_settings(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -78,7 +75,7 @@ pub async fn list_settings(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn get_setting(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -140,7 +137,7 @@ pub async fn get_setting(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn set_setting(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -262,7 +259,7 @@ pub async fn set_setting(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn delete_setting(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -321,7 +318,7 @@ pub async fn delete_setting(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn delete_all_settings(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

@@ -3217,3 +3217,11 @@ input:-webkit-autofill:active {
     padding: 0 8px;
 }
 .lang-toggle:hover { background: rgba(255,255,255,0.08); }
+
+.presenter-console { width: min(1100px, 92vw); max-height: 92vh; overflow: auto; }
+.presenter-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; padding: 16px; }
+.presenter-preview { aspect-ratio: 16 / 9; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 28px; overflow: hidden; background: #fff; color: #111827; }
+.presenter-preview.next { padding: 16px; opacity: .82; }
+.presenter-notes { margin: 0 16px; padding: 12px 16px; border-radius: var(--radius-md); background: var(--bg); min-height: 80px; }
+.presenter-controls { display: flex; align-items: center; justify-content: center; gap: 20px; padding: 16px; }
+@media (max-width: 760px) { .presenter-grid { grid-template-columns: 1fr; } }

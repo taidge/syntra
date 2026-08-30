@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -17,7 +15,6 @@ use contrix_core::schema::rooms::dsl as r;
 use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,7 +84,7 @@ fn file_model_to_response(row: File) -> FileResponse {
 
 #[handler]
 pub async fn create_room(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -187,7 +184,7 @@ pub async fn create_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn list_rooms(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -261,7 +258,7 @@ pub async fn list_rooms(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn get_room(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -331,7 +328,7 @@ pub async fn get_room(req: &mut Request, depot: &mut Depot, res: &mut Response) 
 
 #[handler]
 pub async fn update_room(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -436,7 +433,7 @@ pub async fn update_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn delete_room(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -499,7 +496,7 @@ pub async fn delete_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn toggle_archive(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -583,7 +580,7 @@ pub async fn toggle_archive(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -695,7 +692,7 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn remove_member(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -780,7 +777,7 @@ pub async fn remove_member(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -868,7 +865,7 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn list_room_files(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -947,7 +944,7 @@ pub async fn list_room_files(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn update_room_logo(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -1028,7 +1025,7 @@ pub async fn update_room_logo(req: &mut Request, depot: &mut Depot, res: &mut Re
 
 #[handler]
 pub async fn update_room_color(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -1106,7 +1103,7 @@ pub async fn update_room_color(req: &mut Request, depot: &mut Depot, res: &mut R
 
 #[handler]
 pub async fn set_room_quota(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -1215,7 +1212,7 @@ pub async fn set_room_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn set_room_lifetime(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

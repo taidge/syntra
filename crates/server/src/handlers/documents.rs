@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -19,7 +17,6 @@ use contrix_export::ExportFormat;
 use crate::handlers::access::{check_room_access, load_accessible_target_folder};
 use crate::middleware::auth::get_user_id;
 use crate::services::{StorageBackend, StorageService};
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -105,7 +102,7 @@ fn resolve_document_id(
 
 #[handler]
 pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -289,7 +286,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -410,7 +407,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -589,7 +586,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -690,7 +687,7 @@ pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn get_document_content(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -772,7 +769,7 @@ pub async fn get_document_content(req: &mut Request, depot: &mut Depot, res: &mu
 
 #[handler]
 pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -943,7 +940,7 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -1053,7 +1050,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -1223,7 +1220,7 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use salvo::prelude::*;
 
-use crate::state::AppState;
 use contrix_core::dto::ApiResponse;
 
 // ---------------------------------------------------------------------------
@@ -11,7 +8,7 @@ use contrix_core::dto::ApiResponse;
 
 #[handler]
 pub async fn get_capabilities(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap();
+    let state = crate::require_app_state!(depot, res);
     let capabilities = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "features": {

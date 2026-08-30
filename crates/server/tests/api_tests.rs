@@ -4267,6 +4267,101 @@ async fn test_list_conversion_jobs() {
     assert!(jobs.is_empty());
 }
 
+#[tokio::test]
+async fn test_failed_conversion_can_be_requeued_by_owner() {
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("retry-user", "retry@test.com", "password123")
+        .await;
+    let (_, file_id, _) = server
+        .create_document(&token, "Retry", "writer", None)
+        .await;
+    let created: serde_json::Value = server
+        .client
+        .post(server.url("/api/v1/convert"))
+        .headers(server.auth_header(&token))
+        .json(&serde_json::json!({"file_id":file_id,"target_format":"unsupported"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["data"]["id"].as_str().unwrap();
+    let mut failed = false;
+    for _ in 0..50 {
+        let status: serde_json::Value = server
+            .client
+            .get(server.url(&format!("/api/v1/convert/{id}")))
+            .headers(server.auth_header(&token))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if status["data"]["status"] == "failed" {
+            failed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        failed,
+        "background worker should record the conversion failure"
+    );
+    let response = server
+        .client
+        .post(server.url(&format!("/api/v1/convert/{id}/retry")))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 202);
+}
+
+#[tokio::test]
+async fn test_openapi_and_prometheus_metrics() {
+    let server = TestServer::new().await;
+    let contract: serde_json::Value = server
+        .client
+        .get(server.url("/api/v1/openapi.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(contract["openapi"], "3.1.0");
+    assert!(contract["paths"]["/convert/{id}/retry"].is_object());
+    let (token, registration) = server
+        .register("metrics-admin", "metrics@test.com", "password123")
+        .await;
+    let forbidden = server
+        .client
+        .get(server.url("/api/v1/admin/monitoring/metrics"))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), 403);
+    server
+        .make_admin(registration["data"]["user"]["id"].as_str().unwrap())
+        .await;
+    let (token, _) = server.login("metrics@test.com", "password123").await;
+    let response = server
+        .client
+        .get(server.url("/api/v1/admin/monitoring/metrics"))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let metrics = response.text().await.unwrap();
+    assert!(metrics.contains("# TYPE contrix_uptime_seconds gauge"));
+    assert!(metrics.contains("contrix_conversion_jobs"));
+}
+
 // ===========================================================================
 // Admin Feature tests
 // ===========================================================================

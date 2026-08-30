@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -11,7 +9,6 @@ use contrix_core::models::{ClientLog, NewClientLog};
 use contrix_core::schema::client_logs::dsl as cl;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
-use crate::state::AppState;
 
 /// Maximum number of log entries accepted in a single request.
 const MAX_ENTRIES_PER_REQUEST: usize = 50;
@@ -37,7 +34,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[handler]
 pub async fn submit_client_logs(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     // User may or may not be authenticated for client logs.
     let uid = get_user_id(depot);
 
@@ -156,7 +153,7 @@ pub async fn list_client_logs(req: &mut Request, depot: &mut Depot, res: &mut Re
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let page: u32 = req.query("page").unwrap_or(1).max(1);
     let per_page: u32 = req.query("per_page").unwrap_or(50).clamp(1, 200);
     let offset_val = ((page.saturating_sub(1)) * per_page) as i64;
@@ -233,7 +230,7 @@ pub async fn clear_client_logs(req: &mut Request, depot: &mut Depot, res: &mut R
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     // Optional: delete logs older than N days (default: delete all).
     let older_than_days: Option<u32> = req.query("older_than_days");

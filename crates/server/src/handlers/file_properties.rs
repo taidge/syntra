@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use diesel::prelude::*;
 use salvo::prelude::*;
 use uuid::Uuid;
@@ -11,7 +9,6 @@ use contrix_core::schema::file_properties::dsl as fp;
 use contrix_core::schema::files::dsl as f;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // GET /files/:file_id/properties
@@ -19,7 +16,7 @@ use crate::state::AppState;
 
 #[handler]
 pub async fn list_properties(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -93,7 +90,7 @@ pub async fn list_properties(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn set_property(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -212,7 +209,7 @@ pub async fn set_property(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn delete_property(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

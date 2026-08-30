@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -14,7 +12,6 @@ use contrix_core::schema::documents::dsl as d;
 
 use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,7 +47,7 @@ fn compute_content_hash(content: &str) -> String {
 
 #[handler]
 pub async fn sign_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -160,7 +157,7 @@ pub async fn sign_document(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn list_signatures(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -239,7 +236,7 @@ pub async fn list_signatures(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn verify_signatures(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

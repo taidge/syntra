@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use diesel::prelude::*;
 use salvo::prelude::*;
 use uuid::Uuid;
@@ -10,7 +8,6 @@ use contrix_core::models::{NewNotificationPreference, NotificationPreference};
 use contrix_core::schema::notification_preferences::dsl as np;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Default event types
@@ -33,7 +30,7 @@ const DEFAULT_EVENT_TYPES: &[&str] = &[
 
 #[handler]
 pub async fn list_preferences(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -101,7 +98,7 @@ pub async fn list_preferences(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn set_preference(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

@@ -8,7 +8,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use uuid::Uuid;
 
-use contrix_core::models::{NewWebhookDelivery, Webhook};
+use contrix_core::models::{NewWebhookDelivery, Webhook, WebhookDelivery};
 use contrix_core::schema::webhook_deliveries::dsl as wd;
 use contrix_core::schema::webhooks::dsl as w;
 
@@ -104,6 +104,46 @@ impl WebhookService {
                 deliver_with_retry(pool_clone, delivery_id, hook, event_str, payload_body).await;
             });
         }
+    }
+
+    /// Requeue one persisted failed delivery. The original event and payload
+    /// are reused; webhook URL/secret are loaded fresh so configuration fixes
+    /// take effect immediately.
+    pub fn retry_delivery(
+        pool: &Pool<ConnectionManager<SqliteConnection>>,
+        delivery_id: &str,
+    ) -> Result<(), String> {
+        let mut conn = pool.get().map_err(|error| error.to_string())?;
+        let delivery = wd::webhook_deliveries
+            .filter(wd::id.eq(delivery_id))
+            .first::<WebhookDelivery>(&mut conn)
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Webhook delivery not found".to_string())?;
+        if delivery.success {
+            return Err("Successful deliveries cannot be retried".into());
+        }
+        let hook = w::webhooks
+            .filter(w::id.eq(&delivery.webhook_id))
+            .first::<Webhook>(&mut conn)
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Webhook not found".to_string())?;
+        diesel::update(wd::webhook_deliveries.filter(wd::id.eq(delivery_id)))
+            .set((
+                wd::response_status.eq(None::<i32>),
+                wd::response_body.eq(Some("Retry queued".to_string())),
+                wd::success.eq(false),
+                wd::delivered_at.eq(Utc::now().to_rfc3339()),
+            ))
+            .execute(&mut conn)
+            .map_err(|error| error.to_string())?;
+        let pool = pool.clone();
+        let id = delivery.id;
+        tokio::spawn(async move {
+            deliver_with_retry(pool, id, hook, delivery.event, delivery.payload).await;
+        });
+        Ok(())
     }
 }
 

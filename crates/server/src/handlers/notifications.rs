@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -10,7 +8,6 @@ use contrix_core::models::NotificationType;
 use contrix_core::schema::notifications::dsl as n;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // GET /notifications
@@ -18,7 +15,7 @@ use crate::state::AppState;
 
 #[handler]
 pub async fn list_notifications(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -97,7 +94,7 @@ pub async fn list_notifications(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn mark_read(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -157,7 +154,7 @@ pub async fn mark_read(req: &mut Request, depot: &mut Depot, res: &mut Response)
 
 #[handler]
 pub async fn mark_all_read(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -210,7 +207,7 @@ pub async fn mark_all_read(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn delete_notification(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

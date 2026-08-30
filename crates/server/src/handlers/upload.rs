@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -16,7 +14,6 @@ use contrix_core::schema::users::dsl as u_dsl;
 
 use crate::middleware::auth::get_user_id;
 use crate::services::StorageBackend;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -137,7 +134,7 @@ fn chunks_dir(base_path: &str, session_id: &str) -> std::path::PathBuf {
 
 #[handler]
 pub async fn create_upload_session(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -268,7 +265,7 @@ pub async fn create_upload_session(req: &mut Request, depot: &mut Depot, res: &m
 
 #[handler]
 pub async fn upload_chunk(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -412,7 +409,7 @@ pub async fn upload_chunk(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn complete_upload(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -633,7 +630,7 @@ pub async fn complete_upload(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn cancel_upload(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

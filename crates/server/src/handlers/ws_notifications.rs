@@ -10,13 +10,12 @@ use contrix_core::dto::ApiResponse;
 use contrix_core::error::AppError;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
 #[handler]
 pub async fn notifications_ws(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let user_id = match get_user_id(depot) {
         Some(id) => id,
         None => {

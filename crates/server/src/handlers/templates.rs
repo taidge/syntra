@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -15,7 +13,6 @@ use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::templates::dsl as tmpl;
 
 use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,7 +53,7 @@ fn mime_for_doc_type(dt: &DocumentType) -> &'static str {
 
 #[handler]
 pub async fn create_template(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -145,7 +142,7 @@ pub async fn create_template(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn list_templates(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -195,7 +192,7 @@ pub async fn list_templates(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn get_template(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -252,7 +249,7 @@ pub async fn get_template(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn update_template(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -361,7 +358,7 @@ pub async fn update_template(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn delete_template(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -425,7 +422,7 @@ pub async fn create_document_from_template(
     depot: &mut Depot,
     res: &mut Response,
 ) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

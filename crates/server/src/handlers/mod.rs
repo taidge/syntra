@@ -1,3 +1,23 @@
+/// Obtain the shared application state without allowing a missing router
+/// injection to panic the process. Handlers use this macro because Salvo
+/// handlers return `()` and therefore cannot use `?` with a typed extractor.
+#[macro_export]
+macro_rules! require_app_state {
+    ($depot:expr, $res:expr) => {{
+        match $depot.obtain::<std::sync::Arc<$crate::state::AppState>>() {
+            Ok(state) => state.clone(),
+            Err(_) => {
+                $res.status_code(salvo::http::StatusCode::INTERNAL_SERVER_ERROR);
+                $res.render(salvo::prelude::Json(serde_json::json!({
+                    "success": false,
+                    "error": { "code": 500, "message": "Application state unavailable" }
+                })));
+                return;
+            }
+        }
+    }};
+}
+
 pub mod access;
 pub mod admin;
 pub mod ai;
@@ -24,6 +44,7 @@ pub mod ip_restrictions;
 pub mod monitoring;
 pub mod notification_prefs;
 pub mod notifications;
+pub mod operability;
 pub mod password_policy;
 pub mod presence;
 pub mod quota;

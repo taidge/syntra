@@ -1,6 +1,32 @@
 # 改进审查报告
 
-## 第十二轮复审（2026-08-30 至 2026-08-31，当前结论）
+## 第十三轮推进（2026-08-31，当前结论）
+
+本轮按要求处理下方「产品能力建议」及「死代码、未完成或未接入」两组项目，补齐可用的基础实现、前端入口、持久化和 Office 导出链路。工作直接基于本地 `main@5fdf767`；仓库仍无 remote，无法校验远端最新版本或推送。
+
+本轮增加的重点包括：DOCX 专业排版部件；PPTX 真实媒体、图表、分组、母版/主题与动画；Calc 条件格式、验证、命名区域、冻结窗格、透视汇总和图表定义；Slides/Whiteboard 协作；统一服务状态提取；OpenAPI、Prometheus 和转换/Webhook 重试。
+
+### 实现范围与兼容边界
+
+- 本轮勾选表示基础能力和消费链路已经实现，不表示与 Microsoft Office 的全部格式/编辑功能等价。
+- PPTX 导出使用真实 OOXML 对象及关系；XLSX/PPTX 中附带原生模型以保留本产品字段。缓存按各包部件 SHA-256 校验，仅在文件未被外部修改时用于无损回读；外部修改后回退标准解析，复杂第三方 PPTX 对象仍可能降级为文本。
+- Calc 透视表会实际生成分组汇总单元格并持久化定义；XLSX 保留汇总结果与本产品定义，不声称已实现 Excel 原生可刷新 pivot cache。命名区域、验证、条件格式、冻结窗格和图表均写入相应 OOXML 部件。
+- Writer 专业字段已进入文档模型和 DOCX 导出；目录/页码/邮件合并使用 Word 字段，最终分页和字段刷新由 Office 应用处理。当前浏览器编辑器不是完整的 Word 分页布局引擎。
+- 保存兼容性新增跨层验证：Writer 文本编辑保留未编辑的富内容块及 run 样式；Calc 统一坐标/单元格数组的 JSON 编解码、兼容历史空 map 与缺省格式；Whiteboard 保留原图层、旋转和填充属性。四类编辑器保存结果均有文档引擎类型反序列化测试。
+- 命名区域可通过地址框按名称定位并选中；Calc 当前前端只提供列表验证、阈值条件格式及分组求和透视的基础编辑入口，其他规则保留在模型/导出层。命名区域公式求值、复杂透视编辑器、第三方 Office 全格式往返不在本轮基础验收范围。
+- Slides/Whiteboard 当前采用带冲突提示的整文档实时替换，Calc 单格编辑使用细粒度操作；重连同步持久快照。此版本不宣称具备离线 CRDT 或对象级无冲突合并。
+- 运维接口：`GET /api/v1/openapi.json`；管理员 `GET /api/v1/admin/monitoring/metrics`；属主 `POST /api/v1/convert/{id}/retry`；管理员 `POST /api/v1/webhooks/{id}/deliveries/{delivery_id}/retry`。转换任务先写库再后台执行，启动时恢复 pending/processing。
+
+### 验证记录
+
+- [x] `cargo test --workspace --all-targets --quiet`：394 项通过，0 失败（collab 12、doc-engine 84、export 48、frontend 37、server lib/main 各 35、HTTP API 143）。
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 通过；最后的前端追加改动再次通过 `cargo clippy -p contrix-frontend --all-targets -- -D warnings`。
+- [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
+- [x] `cargo fmt --all -- --check`、`git diff --check` 通过；原有 handler 状态提取 `unwrap` 搜索无残留。
+- [x] `cargo audit` 更新 RustSec 数据后扫描 559 个依赖，0 vulnerability、0 warning。
+- [x] Playwright `--list` 发现 87 项既有测试；仅验证测试发现，本轮未执行浏览器交互测试，也未进行桌面 Word/Excel/PowerPoint 的打开及版式验收。
+
+## 第十二轮复审（2026-08-30 至 2026-08-31，历史与本轮接续清单）
 
 本轮从本地 `main@4cf95ef` 开始，并在 `main@887d424` 上继续完成未勾选项，覆盖 Rust workspace、HTTP 路由与认证中间件、配置/迁移、前端四类编辑器、Office 导入导出以及现有测试。仓库没有配置 remote，因此只能确认 `main` 是全部本地引用中的最新提交，不能证明或拉取远端最新版本。
 
@@ -26,20 +52,20 @@
 
 ### 仍待处理：死代码、未完成或未接入
 
-- [ ] **P1 — Slides 媒体/图表/组合对象导出未完成。** PPTX 导出把 Image、Chart、Video、Group 变成带标签矩形；这避免静默丢失位置，却不是真实 Office 兼容实现。
-- [ ] **P2 — Calc 条件格式只存在于 doc-engine 数据模型。** 前端没有编辑、渲染和导入/导出闭环；同类表格产品常见的数据验证、命名区域、数据透视表也尚未看到实现。
-- [ ] **P2 — Slides/Whiteboard 没有实时协作发送链路。** Writer 和 Calc 已连接协作 WebSocket，Slides/Whiteboard 页面没有对应客户端接线；多人同时编辑时只能依赖保存覆盖，容易丢更新。
-- [ ] **P2 — 文档高级排版能力缺口。** Writer 目前没有页眉页脚、分页/分节、脚注尾注、引用目录/参考文献、邮件合并等常见 Office 能力；至少应优先做分页/分节与页眉页脚，保证打印/PDF/DOCX 的版式可控。
-- [ ] **P3 — 编译器级死代码已基本清零，但大量 handler 重复 `depot.obtain::<Arc<AppState>>().unwrap()`。** 在当前固定 Router 注入下不会触发，但扩展独立路由或单测时可能 panic。建议抽取统一的状态/用户提取器，减少重复错误处理和不可恢复 panic。
+- [x] **P1 — Slides 媒体/图表/组合对象导出。** Image/Video 写真实关系和媒体对象，Chart 写图表部件，Group 写原生分组；保留尺寸、裁剪、备注和动画，并加入母版/布局/主题关系。原生模型回读和部件内容有测试覆盖。
+- [x] **P2 — Calc 条件格式与数据工具接线。** 条件规则可编辑并参与单元格渲染；列表验证在输入提交时执行；命名区域、透视分组汇总、冻结窗格和图表定义已接入保存与 XLSX 导出。前端保存保留规范格式及高级字段。
+- [x] **P2 — Slides/Whiteboard 实时协作发送链路。** 两个页面均发送、接收协作操作并处理自回显、错误、断线重连与持久快照；前端显示并发覆盖提示。关闭页面显式终止重连，防止后台重连残留。
+- [x] **P2 — 文档高级排版基础能力。** Writer 增加页眉页脚/页码、分页/分节、脚注尾注、目录/参考文献、邮件合并字段和修订模型；菜单接入主要编辑动作，DOCX 输出相应部件/字段/修订标记，并回读页眉页脚、注释与页面设置。
+- [x] **P3 — handler 状态提取 panic。** 203 处状态 `unwrap` 全部替换为统一 `require_app_state!`，缺失状态返回结构化 500；编译器清理了不再使用的 Arc/AppState 导入。
 
 ### 产品能力建议（按价值排序）
 
-- [ ] **Office 保真优先：** DOCX 内嵌图片已经完成；下一步完成 PPTX 图片、图表和分组对象往返，再扩充格式种类。对办公产品而言，“能打开但内容降级”比缺少一个边缘按钮更影响可信度。
-- [ ] **协作一致性：** 为 Slides/Whiteboard 接入实时同步，并把 Calc 从整 workbook `Replace` 演进为单元格级操作，加入冲突提示与断线恢复测试。
-- [ ] **Calc 数据工具：** 条件格式、数据验证、冻结窗格、命名区域、数据透视表和更完整图表持久化，是与 Excel/Google Sheets/OnlyOffice 的主要差距。
-- [ ] **Writer 专业排版：** 页眉页脚、页码、分页/分节、脚注、目录、引用与审阅合并，是与 Word/Google Docs 的主要差距。
-- [ ] **Slides 演示闭环：** 母版/主题、对象动画、真实图表、演讲者视图、计时与备注视图，是与 PowerPoint/Google Slides 的主要差距。
-- [ ] **可运维性：** 增加 OpenAPI 文档、结构化指标（Prometheus/OpenTelemetry）、后台任务持久队列以及集成/转换失败重试管理。
+- [x] **Office 保真优先：** 已完成本产品 PPTX 图片/图表/分组对象的真实 OOXML 导出与校验式原生往返，DOCX 图片及专业排版继续保留；外部复杂文件的兼容边界见本轮说明。
+- [x] **协作一致性：** Slides/Whiteboard 实时同步已接入；Calc 单格修改改为 SetProperty，批量/结构修改保留 Replace；新增单格补丁、重连退避、显式关闭和消息解析测试，并显示并发覆盖提示。
+- [x] **Calc 数据工具：** 条件格式、数据验证、冻结窗格、命名区域、实际透视汇总和图表定义均已有前端/模型/持久化链路及 XLSX 部件覆盖。
+- [x] **Writer 专业排版：** 专业排版字段、菜单动作、DOCX 部件及修订持久化已接通；前端不再把文档保存退化成仅含正文的临时 JSON。
+- [x] **Slides 演示闭环：** 主题选择、对象/图表插入与预览、动画导出、演讲者当前/下一页和备注视图、计时/重置均已接入。保存升级为规范 Presentation 模型，幻灯片重排保持原对象归属。
+- [x] **可运维性：** 提供 OpenAPI 3.1 文档、管理员 Prometheus 指标、持久转换任务后台执行/启动恢复，以及转换和 Webhook 失败重试接口与权限检查。
 
 ### 本轮验证记录
 

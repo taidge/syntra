@@ -1,5 +1,4 @@
 use std::io::{Cursor, Write as IoWrite};
-use std::sync::Arc;
 
 use chrono::Utc;
 use diesel::prelude::*;
@@ -18,7 +17,6 @@ use contrix_core::schema::tags::dsl as t;
 use crate::handlers::access::{load_accessible_file, load_accessible_target_folder};
 use crate::middleware::auth::get_user_id;
 use crate::services::StorageBackend;
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -91,7 +89,7 @@ pub struct BatchDuplicateRequest {
 
 #[handler]
 pub async fn batch_delete(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -173,7 +171,7 @@ pub async fn batch_delete(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
 #[handler]
 pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -274,7 +272,7 @@ pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -383,7 +381,7 @@ pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response)
 
 #[handler]
 pub async fn batch_download(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -493,7 +491,7 @@ pub async fn batch_download(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn batch_mark_read(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -593,7 +591,7 @@ pub async fn batch_mark_read(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

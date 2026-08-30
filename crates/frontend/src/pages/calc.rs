@@ -153,6 +153,323 @@ fn workbook_replace_from_operation(
     Some((user_id, op_type.get("new_value")?.clone()))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CellPatch {
+    sheet: usize,
+    row: u32,
+    col: u32,
+    old_value: serde_json::Value,
+    new_value: serde_json::Value,
+}
+
+fn workbook_cells(value: &serde_json::Value) -> HashMap<(usize, u32, u32), serde_json::Value> {
+    let mut cells = HashMap::new();
+    for (sheet_index, sheet) in value
+        .get("sheets")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        for pair in sheet
+            .get("cells")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(pair) = pair.as_array().filter(|pair| pair.len() == 2) else {
+                continue;
+            };
+            let row = pair[0]
+                .get("row")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32;
+            let col = pair[0]
+                .get("col")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32;
+            cells.insert((sheet_index, row, col), pair[1].clone());
+        }
+    }
+    cells
+}
+
+fn workbook_without_cells(value: &serde_json::Value) -> serde_json::Value {
+    let mut stripped = value.clone();
+    if let Some(sheets) = stripped
+        .get_mut("sheets")
+        .and_then(|value| value.as_array_mut())
+    {
+        for sheet in sheets {
+            if let Some(object) = sheet.as_object_mut() {
+                object.insert("cells".into(), serde_json::Value::Array(Vec::new()));
+            }
+        }
+    }
+    stripped
+}
+
+fn single_cell_patch(old: &serde_json::Value, new: &serde_json::Value) -> Option<CellPatch> {
+    if workbook_without_cells(old) != workbook_without_cells(new) {
+        return None;
+    }
+    let old_cells = workbook_cells(old);
+    let new_cells = workbook_cells(new);
+    let mut keys: std::collections::HashSet<(usize, u32, u32)> =
+        old_cells.keys().chain(new_cells.keys()).copied().collect();
+    let mut changed = keys
+        .drain()
+        .filter(|key| old_cells.get(key) != new_cells.get(key));
+    let (sheet, row, col) = changed.next()?;
+    if changed.next().is_some() {
+        return None;
+    }
+    Some(CellPatch {
+        sheet,
+        row,
+        col,
+        old_value: old_cells
+            .get(&(sheet, row, col))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        new_value: new_cells
+            .get(&(sheet, row, col))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn apply_cell_patch(content: &mut serde_json::Value, patch: &CellPatch) -> bool {
+    let Some(cells) = content
+        .get_mut("sheets")
+        .and_then(|value| value.as_array_mut())
+        .and_then(|sheets| sheets.get_mut(patch.sheet))
+        .and_then(|sheet| sheet.get_mut("cells"))
+        .and_then(|cells| cells.as_array_mut())
+    else {
+        return false;
+    };
+    let existing = cells.iter().position(|pair| {
+        pair.as_array().is_some_and(|pair| {
+            pair.len() == 2
+                && pair[0].get("row").and_then(|value| value.as_u64()) == Some(patch.row as u64)
+                && pair[0].get("col").and_then(|value| value.as_u64()) == Some(patch.col as u64)
+        })
+    });
+    if patch.new_value.is_null() {
+        if let Some(index) = existing {
+            cells.remove(index);
+        }
+    } else {
+        let pair = serde_json::json!([
+            { "row": patch.row, "col": patch.col },
+            patch.new_value.clone()
+        ]);
+        if let Some(index) = existing {
+            cells[index] = pair;
+        } else {
+            cells.push(pair);
+        }
+    }
+    true
+}
+
+fn cell_patch_from_operation(payload: &serde_json::Value) -> Option<(String, CellPatch)> {
+    let user_id = payload.get("user_id")?.as_str()?.to_string();
+    let op_type = payload.get("op_type")?;
+    if op_type.get("type")?.as_str()? != "SetProperty" {
+        return None;
+    }
+    let path = op_type.get("path")?.as_array()?;
+    if path.len() != 4
+        || path[0].as_str()? != "workbook"
+        || path[1].as_str()? != "sheets"
+        || path[3].as_str()? != "cells"
+    {
+        return None;
+    }
+    let sheet = path[2].as_str()?.parse().ok()?;
+    let (row, col) = op_type.get("key")?.as_str()?.split_once(':')?;
+    Some((
+        user_id,
+        CellPatch {
+            sheet,
+            row: row.parse().ok()?,
+            col: col.parse().ok()?,
+            old_value: op_type
+                .get("old_value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            new_value: op_type.get("value")?.clone(),
+        },
+    ))
+}
+
+fn append_array_entry(object: &mut serde_json::Value, key: &str, entry: serde_json::Value) -> bool {
+    let Some(object) = object.as_object_mut() else {
+        return false;
+    };
+    let Some(array) = object
+        .entry(key)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+    else {
+        return false;
+    };
+    array.push(entry);
+    true
+}
+
+fn resolve_named_range(content: &serde_json::Value, name: &str) -> Option<(usize, MergedRange)> {
+    let range = content["named_ranges"].as_array()?.iter().find(|range| {
+        range["name"]
+            .as_str()
+            .is_some_and(|stored| stored.eq_ignore_ascii_case(name.trim()))
+    })?;
+    let sheet = content["sheets"]
+        .as_array()?
+        .iter()
+        .position(|sheet| sheet["id"] == range["sheet_id"])?;
+    let coord = |value: &serde_json::Value| {
+        let row = u32::try_from(value["row"].as_u64()?).ok()?;
+        let col = u32::try_from(value["col"].as_u64()?).ok()?;
+        (row < NUM_ROWS && col < NUM_COLS).then_some((row, col))
+    };
+    Some((
+        sheet,
+        MergedRange {
+            start: coord(&range["start"])?,
+            end: coord(&range["end"])?,
+        }
+        .normalized(),
+    ))
+}
+
+fn pivot_sum_rows(
+    cells: &HashMap<(usize, u32, u32), String>,
+    sheet: usize,
+    start: (u32, u32),
+    end: (u32, u32),
+) -> Vec<(String, f64)> {
+    let mut groups = std::collections::BTreeMap::<String, f64>::new();
+    for row in start.0..=end.0 {
+        let label = cells
+            .get(&(sheet, row, start.1))
+            .cloned()
+            .unwrap_or_default();
+        let value = cells
+            .get(&(sheet, row, (start.1 + 1).min(end.1)))
+            .and_then(|value| value.parse::<f64>().ok());
+        if let Some(value) = value {
+            *groups.entry(label).or_default() += value;
+        }
+    }
+    groups.into_iter().collect()
+}
+
+fn conditional_style_for(
+    content: &serde_json::Value,
+    sheet: usize,
+    row: u32,
+    col: u32,
+    raw_value: &str,
+) -> Option<CellStyle> {
+    let rules = content
+        .get("sheets")?
+        .as_array()?
+        .get(sheet)?
+        .get("conditional_formats")?
+        .as_array()?;
+    rules.iter().rev().find_map(|rule| {
+        let start = rule.get("range_start")?;
+        let end = rule.get("range_end")?;
+        let inside = row >= start.get("row")?.as_u64()? as u32
+            && row <= end.get("row")?.as_u64()? as u32
+            && col >= start.get("col")?.as_u64()? as u32
+            && col <= end.get("col")?.as_u64()? as u32;
+        if !inside {
+            return None;
+        }
+        let predicate = rule.get("rule")?;
+        let number = raw_value.parse::<f64>().ok();
+        let matches = if let Some(limit) = predicate.get("GreaterThan").and_then(|v| v.as_f64()) {
+            number.is_some_and(|value| value > limit)
+        } else if let Some(limit) = predicate.get("LessThan").and_then(|v| v.as_f64()) {
+            number.is_some_and(|value| value < limit)
+        } else if let Some(bounds) = predicate.get("Between").and_then(|v| v.as_array()) {
+            bounds.len() == 2
+                && number.is_some_and(|value| {
+                    value >= bounds[0].as_f64().unwrap_or(f64::INFINITY)
+                        && value <= bounds[1].as_f64().unwrap_or(f64::NEG_INFINITY)
+                })
+        } else if let Some(expected) = predicate.get("EqualTo").and_then(|v| v.as_str()) {
+            raw_value == expected
+        } else if let Some(fragment) = predicate.get("ContainsText").and_then(|v| v.as_str()) {
+            raw_value.contains(fragment)
+        } else {
+            predicate.as_str() == Some("IsEmpty") && raw_value.is_empty()
+                || predicate.as_str() == Some("IsNotEmpty") && !raw_value.is_empty()
+        };
+        matches.then(|| rule.get("format").map(style_from_json).unwrap_or_default())
+    })
+}
+
+fn validation_error_for(
+    content: &serde_json::Value,
+    sheet: usize,
+    row: u32,
+    col: u32,
+    raw_value: &str,
+) -> Option<String> {
+    let validations = content
+        .get("sheets")?
+        .as_array()?
+        .get(sheet)?
+        .get("data_validations")?
+        .as_array()?;
+    for validation in validations {
+        let start = validation.get("range_start")?;
+        let end = validation.get("range_end")?;
+        if row < start.get("row")?.as_u64()? as u32
+            || row > end.get("row")?.as_u64()? as u32
+            || col < start.get("col")?.as_u64()? as u32
+            || col > end.get("col")?.as_u64()? as u32
+        {
+            continue;
+        }
+        let rule = validation.get("rule")?;
+        let accepted = if let Some(options) = rule.get("List").and_then(|v| v.as_array()) {
+            options
+                .iter()
+                .any(|value| value.as_str() == Some(raw_value))
+        } else if let Some(bounds) = rule.get("WholeNumberBetween").and_then(|v| v.as_array()) {
+            raw_value.parse::<i64>().ok().is_some_and(|value| {
+                bounds.len() == 2
+                    && value >= bounds[0].as_i64().unwrap_or(i64::MAX)
+                    && value <= bounds[1].as_i64().unwrap_or(i64::MIN)
+            })
+        } else if let Some(bounds) = rule.get("DecimalBetween").and_then(|v| v.as_array()) {
+            raw_value.parse::<f64>().ok().is_some_and(|value| {
+                bounds.len() == 2
+                    && value >= bounds[0].as_f64().unwrap_or(f64::INFINITY)
+                    && value <= bounds[1].as_f64().unwrap_or(f64::NEG_INFINITY)
+            })
+        } else {
+            true
+        };
+        if !accepted {
+            return Some(
+                validation
+                    .get("error_message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Cell value violates data validation")
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
 fn insert_row_in_merged(merged: &mut HashMap<usize, Vec<MergedRange>>, sheet: usize, at: u32) {
     if let Some(ranges) = merged.get_mut(&sheet) {
         *ranges = ranges
@@ -437,41 +754,84 @@ fn style_to_json(style: &CellStyle) -> Option<serde_json::Value> {
         return None;
     }
     let mut obj = serde_json::Map::new();
-    if style.bold {
-        obj.insert("bold".to_string(), serde_json::Value::Bool(true));
-    }
-    if style.italic {
-        obj.insert("italic".to_string(), serde_json::Value::Bool(true));
-    }
-    if style.underline {
-        obj.insert("underline".to_string(), serde_json::Value::Bool(true));
-    }
-    if !style.number_format.is_empty() && style.number_format != "general" {
-        obj.insert(
-            "number_format".to_string(),
-            serde_json::Value::String(style.number_format.clone()),
-        );
-    }
+    obj.insert("bold".to_string(), serde_json::Value::Bool(style.bold));
+    obj.insert("italic".to_string(), serde_json::Value::Bool(style.italic));
+    obj.insert(
+        "font_family".to_string(),
+        if !style.font_family.is_empty() {
+            serde_json::Value::String(style.font_family.clone())
+        } else {
+            serde_json::Value::Null
+        },
+    );
+    obj.insert(
+        "font_size".to_string(),
+        style
+            .font_size
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    obj.insert(
+        "text_color".to_string(),
+        if !style.text_color.is_empty() {
+            serde_json::Value::String(style.text_color.clone())
+        } else {
+            serde_json::Value::Null
+        },
+    );
+    obj.insert(
+        "bg_color".to_string(),
+        if !style.fill_color.is_empty() {
+            serde_json::Value::String(style.fill_color.clone())
+        } else {
+            serde_json::Value::Null
+        },
+    );
+    obj.insert(
+        "horizontal_align".to_string(),
+        serde_json::Value::String(
+            match style.align.as_str() {
+                "center" => "Center",
+                "right" => "Right",
+                _ => "Left",
+            }
+            .to_string(),
+        ),
+    );
+    obj.insert(
+        "vertical_align".to_string(),
+        serde_json::Value::String("Bottom".into()),
+    );
+    obj.insert(
+        "number_format".to_string(),
+        if !style.number_format.is_empty() && style.number_format != "general" {
+            serde_json::Value::String(style.number_format.clone())
+        } else {
+            serde_json::Value::Null
+        },
+    );
     let b = &style.borders;
     if b.top || b.right || b.bottom || b.left {
-        let mut bo = serde_json::Map::new();
-        bo.insert("top".to_string(), serde_json::Value::Bool(b.top));
-        bo.insert("right".to_string(), serde_json::Value::Bool(b.right));
-        bo.insert("bottom".to_string(), serde_json::Value::Bool(b.bottom));
-        bo.insert("left".to_string(), serde_json::Value::Bool(b.left));
-        obj.insert("borders".to_string(), serde_json::Value::Object(bo));
+        let edge = || serde_json::json!({ "style": "Thin", "color": "#000000" });
+        obj.insert(
+            "borders".to_string(),
+            serde_json::json!({
+                "top": b.top.then(edge),
+                "right": b.right.then(edge),
+                "bottom": b.bottom.then(edge),
+                "left": b.left.then(edge),
+            }),
+        );
+    } else {
+        obj.insert(
+            "borders".to_string(),
+            serde_json::json!({ "top": null, "right": null, "bottom": null, "left": null }),
+        );
     }
-    for (key, val) in [
-        ("align", &style.align),
-        ("fill_color", &style.fill_color),
-        ("text_color", &style.text_color),
-        ("font_family", &style.font_family),
-        ("font_size", &style.font_size),
-    ] {
-        if !val.is_empty() {
-            obj.insert(key.to_string(), serde_json::Value::String(val.clone()));
-        }
-    }
+    obj.insert("wrap_text".to_string(), serde_json::Value::Bool(false));
     Some(serde_json::Value::Object(obj))
 }
 
@@ -499,10 +859,18 @@ fn style_from_json(v: &serde_json::Value) -> CellStyle {
     let borders = v
         .get("borders")
         .map(|b| CellBorders {
-            top: b.get("top").and_then(|x| x.as_bool()).unwrap_or(false),
-            right: b.get("right").and_then(|x| x.as_bool()).unwrap_or(false),
-            bottom: b.get("bottom").and_then(|x| x.as_bool()).unwrap_or(false),
-            left: b.get("left").and_then(|x| x.as_bool()).unwrap_or(false),
+            top: b
+                .get("top")
+                .is_some_and(|x| !x.is_null() && x.as_bool() != Some(false)),
+            right: b
+                .get("right")
+                .is_some_and(|x| !x.is_null() && x.as_bool() != Some(false)),
+            bottom: b
+                .get("bottom")
+                .is_some_and(|x| !x.is_null() && x.as_bool() != Some(false)),
+            left: b
+                .get("left")
+                .is_some_and(|x| !x.is_null() && x.as_bool() != Some(false)),
         })
         .unwrap_or_default();
     CellStyle {
@@ -518,11 +886,31 @@ fn style_from_json(v: &serde_json::Value) -> CellStyle {
             .unwrap_or("general")
             .to_string(),
         borders,
-        align: string_field(v, "align"),
-        fill_color: string_field(v, "fill_color"),
+        align: v
+            .get("horizontal_align")
+            .and_then(|value| value.as_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| string_field(v, "align")),
+        fill_color: v
+            .get("bg_color")
+            .and_then(|value| value.as_str())
+            .unwrap_or_else(|| {
+                v.get("fill_color")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+            })
+            .to_string(),
         text_color: string_field(v, "text_color"),
         font_family: string_field(v, "font_family"),
-        font_size: string_field(v, "font_size"),
+        font_size: v
+            .get("font_size")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .or_else(|| value.as_f64().map(|value| value.to_string()))
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -584,7 +972,7 @@ fn hydrate_workbook(content: &serde_json::Value) -> HydratedWorkbook {
                 if !display.is_empty() {
                     cells.insert((sheet_idx, row, col), display);
                 }
-                if let Some(style_json) = cell.get("style") {
+                if let Some(style_json) = cell.get("format").or_else(|| cell.get("style")) {
                     let style = style_from_json(style_json);
                     if style != CellStyle::default() {
                         styles.insert((sheet_idx, row, col), style);
@@ -616,7 +1004,7 @@ fn hydrate_workbook(content: &serde_json::Value) -> HydratedWorkbook {
                 if !display.is_empty() {
                     cells.insert((sheet_idx, row, col), display);
                 }
-                if let Some(style_json) = cell.get("style") {
+                if let Some(style_json) = cell.get("format").or_else(|| cell.get("style")) {
                     let style = style_from_json(style_json);
                     if style != CellStyle::default() {
                         styles.insert((sheet_idx, row, col), style);
@@ -1349,6 +1737,7 @@ pub fn Calc(id: String) -> Element {
     let mut filter_dropdown = use_signal(|| None::<u32>);
     let mut chart_view = use_signal(|| None::<ChartData>);
     let mut last_collab_content = use_signal(|| serde_json::Value::Null);
+    let mut document_content = use_signal(|| serde_json::json!({}));
 
     let push_snapshot = move || {
         let snap = CalcSnapshot {
@@ -1390,6 +1779,7 @@ pub fn Calc(id: String) -> Element {
             cells.set(hydrated);
             cell_styles.set(styles);
             merged_cells.set(hydrated_merges);
+            document_content.set(doc.content.clone());
             last_collab_content.set(doc.content.clone());
             active_sheet.set(0);
             loaded.set(true);
@@ -1428,9 +1818,32 @@ pub fn Calc(id: String) -> Element {
                 list.retain(|c| c.user_id != user_id);
             }
             CollabMessage::Operation(payload) => {
-                let Some((author_id, content)) = workbook_replace_from_operation(&payload) else {
-                    return;
-                };
+                let (author_id, content) =
+                    if let Some((author_id, patch)) = cell_patch_from_operation(&payload) {
+                        let mut content = document_content.read().clone();
+                        let current_value = workbook_cells(&content)
+                            .get(&(patch.sheet, patch.row, patch.col))
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        if author_id != self_id
+                            && current_value != patch.old_value
+                            && current_value != patch.new_value
+                        {
+                            push_toast(
+                                toast_bus,
+                                ToastKind::Info,
+                                "Concurrent cell edit received; the latest remote value is shown.",
+                            );
+                        }
+                        if !apply_cell_patch(&mut content, &patch) {
+                            return;
+                        }
+                        (author_id, content)
+                    } else if let Some(replacement) = workbook_replace_from_operation(&payload) {
+                        replacement
+                    } else {
+                        return;
+                    };
                 if author_id == self_id {
                     return;
                 }
@@ -1441,9 +1854,25 @@ pub fn Calc(id: String) -> Element {
                 cells.set(hydrated);
                 cell_styles.set(styles);
                 merged_cells.set(hydrated_merges);
-                last_collab_content.set(content);
+                last_collab_content.set(content.clone());
+                document_content.set(content);
                 saved_status.set(crate::i18n::t("common.saved"));
             }
+            CollabMessage::DocumentState { content, .. } if content.is_object() => {
+                if *saved_status.read() == crate::i18n::t("common.unsaved") {
+                    return;
+                }
+                let (names, hydrated, styles, hydrated_merges) = hydrate_workbook(&content);
+                if !names.is_empty() {
+                    sheets.set(names);
+                }
+                cells.set(hydrated);
+                cell_styles.set(styles);
+                merged_cells.set(hydrated_merges);
+                last_collab_content.set(content.clone());
+                document_content.set(content);
+            }
+            CollabMessage::Error { message } => push_toast(toast_bus, ToastKind::Error, message),
             _ => {}
         };
         let on_state = move |s: ConnectionState| {
@@ -1454,10 +1883,8 @@ pub fn Calc(id: String) -> Element {
     });
 
     use_drop(move || {
-        if let Some(handle) = ws_handle.write().take()
-            && let Some(ws) = handle.current_ws()
-        {
-            let _ = ws.close();
+        if let Some(handle) = ws_handle.write().take() {
+            handle.close();
         }
     });
 
@@ -1497,7 +1924,7 @@ pub fn Calc(id: String) -> Element {
                 && let Some(style_json) = style_to_json(style)
                 && let Some(obj) = cell.as_object_mut()
             {
-                obj.insert("style".to_string(), style_json);
+                obj.insert("format".to_string(), style_json);
             }
             per_sheet[*si].push(serde_json::json!([cref, cell]));
             emitted.insert((*si, *r, *c));
@@ -1516,7 +1943,7 @@ pub fn Calc(id: String) -> Element {
             let cell = serde_json::json!({
                 "formula": serde_json::Value::Null,
                 "value": { "type": "Empty" },
-                "style": style_json,
+                "format": style_json,
             });
             per_sheet[*si].push(serde_json::json!([cref, cell]));
         }
@@ -1536,14 +1963,43 @@ pub fn Calc(id: String) -> Element {
                         })
                     })
                     .collect();
-                serde_json::json!({
-                    "name": name,
-                    "cells": per_sheet[i],
-                    "merged_cells": ranges,
-                })
+                let base_sheet = document_content
+                    .read()
+                    .get("sheets")
+                    .and_then(|value| value.as_array())
+                    .and_then(|values| values.get(i))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        serde_json::json!({
+                            "id": uuid::Uuid::new_v4(),
+                            "column_widths": {},
+                            "row_heights": {},
+                            "frozen_rows": 0,
+                            "frozen_cols": 0,
+                            "conditional_formats": [],
+                            "data_validations": [],
+                            "charts": []
+                        })
+                    });
+                let mut sheet = base_sheet.as_object().cloned().unwrap_or_default();
+                sheet.insert("name".into(), serde_json::Value::String(name.clone()));
+                sheet.insert(
+                    "cells".into(),
+                    serde_json::Value::Array(per_sheet[i].clone()),
+                );
+                sheet.insert("merged_cells".into(), serde_json::Value::Array(ranges));
+                serde_json::Value::Object(sheet)
             })
             .collect();
-        serde_json::json!({ "sheets": sheets_json })
+        let mut workbook = document_content.read().clone();
+        if !workbook.is_object() {
+            workbook = serde_json::json!({});
+        }
+        workbook
+            .as_object_mut()
+            .expect("object assigned above")
+            .insert("sheets".into(), serde_json::Value::Array(sheets_json));
+        workbook
     };
 
     let perform_save = {
@@ -1578,18 +2034,24 @@ pub fn Calc(id: String) -> Element {
         if user_id.is_empty() {
             return;
         }
+        let operation = if let Some(patch) = single_cell_patch(&previous, body) {
+            serde_json::json!({
+                "type": "SetProperty",
+                "path": ["workbook", "sheets", patch.sheet.to_string(), "cells"],
+                "key": format!("{}:{}", patch.row, patch.col),
+                "value": patch.new_value,
+                "old_value": patch.old_value,
+            })
+        } else {
+            serde_json::json!({
+                "type": "Replace",
+                "path": ["workbook"],
+                "old_value": previous,
+                "new_value": body,
+            })
+        };
         if let Some(handle) = ws_handle.read().as_ref()
-            && handle
-                .send_operation(
-                    &user_id,
-                    serde_json::json!({
-                        "type": "Replace",
-                        "path": ["workbook"],
-                        "old_value": previous,
-                        "new_value": body,
-                    }),
-                )
-                .is_ok()
+            && handle.send_operation(&user_id, operation).is_ok()
         {
             last_collab_content.set(body.clone());
         }
@@ -1604,12 +2066,13 @@ pub fn Calc(id: String) -> Element {
             }
             saved_status.set(crate::i18n::t("common.unsaved"));
             let body = serialize_workbook();
+            document_content.set(body.clone());
             broadcast_workbook(&body);
             let token = auth.read().token.clone().unwrap_or_default();
             let status = saved_status;
             let perform_save = perform_save.clone();
             let new_timer = Timeout::new(1500, move || {
-                perform_save(body, status, token);
+                perform_save(serialize_workbook(), status, token);
             });
             *save_timer.borrow_mut() = Some(new_timer);
         }
@@ -1624,6 +2087,7 @@ pub fn Calc(id: String) -> Element {
             }
             save_timer.borrow_mut().take();
             let body = serialize_workbook();
+            document_content.set(body.clone());
             broadcast_workbook(&body);
             let token = auth.read().token.clone().unwrap_or_default();
             perform_save(body, saved_status, token);
@@ -1662,6 +2126,13 @@ pub fn Calc(id: String) -> Element {
             let si = *active_sheet.read();
             let prev = cells.read().get(&(si, r, c)).cloned().unwrap_or_default();
             if prev == value {
+                is_editing.set(false);
+                return;
+            }
+            if let Some(message) = validation_error_for(&document_content.read(), si, r, c, &value)
+            {
+                push_toast(toast_bus, ToastKind::Warning, message);
+                formula_bar.set(prev);
                 is_editing.set(false);
                 return;
             }
@@ -2052,6 +2523,7 @@ pub fn Calc(id: String) -> Element {
                 let bus_for_menu = toast_bus;
                 let nav_for_menu = nav;
                 let mut find_open_menu = find_open;
+                let mut schedule_for_menu = schedule_save.clone();
                 rsx! {
                     Menubar {
                         document_type: "calc".to_string(),
@@ -2068,6 +2540,237 @@ pub fn Calc(id: String) -> Element {
                                 "version-history" => {
                                     let cur = *versions_open.read();
                                     versions_open.set(!cur);
+                                }
+                                "freeze-rows" | "freeze-cols" => {
+                                    let mut content = document_content.read().clone();
+                                    let si = *active_sheet.read();
+                                    if let Some(sheet) = content
+                                        .get_mut("sheets")
+                                        .and_then(|value| value.as_array_mut())
+                                        .and_then(|sheets| sheets.get_mut(si))
+                                        .and_then(|sheet| sheet.as_object_mut())
+                                    {
+                                        let (row, col) = *active_cell.read();
+                                        let (key, value) = if cmd == "freeze-rows" {
+                                            ("frozen_rows", row + 1)
+                                        } else {
+                                            ("frozen_cols", col + 1)
+                                        };
+                                        let current = sheet.get(key).and_then(|value| value.as_u64()).unwrap_or(0);
+                                        sheet.insert(key.into(), serde_json::json!(if current == value as u64 { 0 } else { value }));
+                                        document_content.set(content);
+                                        schedule_for_menu();
+                                    }
+                                }
+                                "format-conditional" => {
+                                    if let Some(window) = web_sys::window()
+                                        && let Ok(Some(limit)) = window.prompt_with_message_and_default(
+                                            "Highlight values greater than", "0"
+                                        )
+                                        && let Ok(limit) = limit.parse::<f64>()
+                                    {
+                                        let (start, end) = match (*selection_start.read(), *selection_end.read()) {
+                                            (Some(start), Some(end)) => (
+                                                (start.0.min(end.0), start.1.min(end.1)),
+                                                (start.0.max(end.0), start.1.max(end.1)),
+                                            ),
+                                            _ => (*active_cell.read(), *active_cell.read()),
+                                        };
+                                        let mut content = document_content.read().clone();
+                                        if let Some(formats) = content
+                                            .get_mut("sheets")
+                                            .and_then(|value| value.as_array_mut())
+                                            .and_then(|sheets| sheets.get_mut(*active_sheet.read()))
+                                            .and_then(|sheet| sheet.as_object_mut())
+                                        {
+                                            let rules = formats
+                                                .entry("conditional_formats")
+                                                .or_insert_with(|| serde_json::json!([]))
+                                                .as_array_mut();
+                                            if let Some(rules) = rules {
+                                                rules.push(serde_json::json!({
+                                                    "range_start": { "row": start.0, "col": start.1 },
+                                                    "range_end": { "row": end.0, "col": end.1 },
+                                                    "rule": { "GreaterThan": limit },
+                                                    "format": {
+                                                        "font_family": null, "font_size": null,
+                                                        "bold": true, "italic": false,
+                                                        "text_color": "#991B1B", "bg_color": "#FEE2E2",
+                                                        "horizontal_align": "Left", "vertical_align": "Bottom",
+                                                        "number_format": null,
+                                                        "borders": { "top": null, "right": null, "bottom": null, "left": null },
+                                                        "wrap_text": false
+                                                    }
+                                                }));
+                                            }
+                                            document_content.set(content);
+                                            schedule_for_menu();
+                                        }
+                                    }
+                                }
+                                "insert-validation" => {
+                                    if let Some(window) = web_sys::window()
+                                        && let Ok(Some(options)) = window.prompt_with_message(
+                                            "Allowed values, separated by commas"
+                                        )
+                                    {
+                                        let values: Vec<String> = options
+                                            .split(',')
+                                            .map(str::trim)
+                                            .filter(|value| !value.is_empty())
+                                            .map(ToString::to_string)
+                                            .collect();
+                                        if !values.is_empty() {
+                                            let (start, end) = match (*selection_start.read(), *selection_end.read()) {
+                                                (Some(start), Some(end)) => (
+                                                    (start.0.min(end.0), start.1.min(end.1)),
+                                                    (start.0.max(end.0), start.1.max(end.1)),
+                                                ),
+                                                _ => (*active_cell.read(), *active_cell.read()),
+                                            };
+                                            let mut content = document_content.read().clone();
+                                            if let Some(sheet) = content
+                                                .get_mut("sheets")
+                                                .and_then(|value| value.as_array_mut())
+                                                .and_then(|sheets| sheets.get_mut(*active_sheet.read()))
+                                                .and_then(|sheet| sheet.as_object_mut())
+                                            {
+                                                sheet
+                                                    .entry("data_validations")
+                                                    .or_insert_with(|| serde_json::json!([]))
+                                                    .as_array_mut()
+                                                    .expect("validation array")
+                                                    .push(serde_json::json!({
+                                                        "range_start": { "row": start.0, "col": start.1 },
+                                                        "range_end": { "row": end.0, "col": end.1 },
+                                                        "rule": { "List": values },
+                                                        "input_message": "Choose a value from the list",
+                                                        "error_message": "Value is not in the allowed list"
+                                                    }));
+                                                document_content.set(content);
+                                                schedule_for_menu();
+                                            }
+                                        }
+                                    }
+                                }
+                                "insert-named-range" => {
+                                    if let Some(window) = web_sys::window()
+                                        && let Ok(Some(name)) = window.prompt_with_message("Named range")
+                                        && !name.trim().is_empty()
+                                    {
+                                        let mut content = document_content.read().clone();
+                                        let si = *active_sheet.read();
+                                        let sheet_id = content
+                                            .pointer(&format!("/sheets/{si}/id"))
+                                            .cloned()
+                                            .unwrap_or_else(|| serde_json::json!(uuid::Uuid::new_v4()));
+                                        let (start, end) = match (*selection_start.read(), *selection_end.read()) {
+                                            (Some(start), Some(end)) => (
+                                                (start.0.min(end.0), start.1.min(end.1)),
+                                                (start.0.max(end.0), start.1.max(end.1)),
+                                            ),
+                                            _ => (*active_cell.read(), *active_cell.read()),
+                                        };
+                                        append_array_entry(&mut content, "named_ranges", serde_json::json!({
+                                                "name": name,
+                                                "sheet_id": sheet_id,
+                                                "start": { "row": start.0, "col": start.1 },
+                                                "end": { "row": end.0, "col": end.1 }
+                                            }));
+                                        document_content.set(content);
+                                        schedule_for_menu();
+                                    }
+                                }
+                                "insert-pivot" => {
+                                    let mut content = document_content.read().clone();
+                                    let source_index = *active_sheet.read();
+                                    let source_id = content
+                                        .pointer(&format!("/sheets/{source_index}/id"))
+                                        .cloned()
+                                        .unwrap_or_else(|| serde_json::json!(uuid::Uuid::new_v4()));
+                                    let target_id = uuid::Uuid::new_v4();
+                                    let target_name = format!("Pivot{}", sheets.read().len());
+                                    if let Some(sheet_values) =
+                                        content.get_mut("sheets").and_then(|value| value.as_array_mut())
+                                    {
+                                        sheet_values.push(serde_json::json!({
+                                            "id": target_id,
+                                            "name": target_name.clone(),
+                                            "cells": [],
+                                            "column_widths": {}, "row_heights": {},
+                                            "frozen_rows": 0, "frozen_cols": 0,
+                                            "merged_cells": [], "conditional_formats": [],
+                                            "data_validations": [], "charts": []
+                                        }));
+                                    }
+                                    let (start, end) = match (*selection_start.read(), *selection_end.read()) {
+                                        (Some(start), Some(end)) => (
+                                            (start.0.min(end.0), start.1.min(end.1)),
+                                            (start.0.max(end.0), start.1.max(end.1)),
+                                        ),
+                                        _ => (*active_cell.read(), *active_cell.read()),
+                                    };
+                                    append_array_entry(&mut content, "pivot_tables", serde_json::json!({
+                                            "id": uuid::Uuid::new_v4(),
+                                            "name": target_name.clone(),
+                                            "source_sheet_id": source_id,
+                                            "source_start": { "row": start.0, "col": start.1 },
+                                            "source_end": { "row": end.0, "col": end.1 },
+                                            "target_sheet_id": target_id,
+                                            "target": { "row": 0, "col": 0 },
+                                            "row_field_col": start.1,
+                                            "value_field_col": (start.1 + 1).min(end.1),
+                                            "aggregation": "Sum"
+                                        }));
+                                    let target_index = sheets.read().len();
+                                    let summary = pivot_sum_rows(&cells.read(), source_index, start, end);
+                                    {
+                                        let mut output = cells.write();
+                                        output.insert((target_index, 0, 0), "Group".into());
+                                        output.insert((target_index, 0, 1), "Sum".into());
+                                        for (index, (label, sum)) in summary.into_iter().enumerate() {
+                                            output.insert((target_index, index as u32 + 1, 0), label);
+                                            output.insert((target_index, index as u32 + 1, 1), sum.to_string());
+                                        }
+                                    }
+                                    sheets.write().push(target_name);
+                                    active_sheet.set(target_index);
+                                    document_content.set(content);
+                                    schedule_for_menu();
+                                }
+                                "insert-chart" => {
+                                    let (start, end) = match (*selection_start.read(), *selection_end.read()) {
+                                        (Some(start), Some(end)) => (
+                                            (start.0.min(end.0), start.1.min(end.1)),
+                                            (start.0.max(end.0), start.1.max(end.1)),
+                                        ),
+                                        _ => (*active_cell.read(), *active_cell.read()),
+                                    };
+                                    let mut content = document_content.read().clone();
+                                    if let Some(sheet) = content
+                                        .get_mut("sheets")
+                                        .and_then(|value| value.as_array_mut())
+                                        .and_then(|sheets| sheets.get_mut(*active_sheet.read()))
+                                        .and_then(|sheet| sheet.as_object_mut())
+                                    {
+                                        if let Some(charts) = sheet
+                                            .entry("charts")
+                                            .or_insert_with(|| serde_json::json!([]))
+                                            .as_array_mut()
+                                        {
+                                            charts.push(serde_json::json!({
+                                                "id": uuid::Uuid::new_v4(),
+                                                "title": "Chart",
+                                                "chart_type": "Bar",
+                                                "data_start": { "row": start.0, "col": start.1 },
+                                                "data_end": { "row": end.0, "col": end.1 },
+                                                "anchor_start": { "row": start.0, "col": end.1 + 2 },
+                                                "anchor_end": { "row": start.0 + 12, "col": end.1 + 10 }
+                                            }));
+                                        }
+                                        document_content.set(content);
+                                        schedule_for_menu();
+                                    }
                                 }
                                 "toggle-theme" => {
                                     if let Some(window) = web_sys::window()
@@ -2751,6 +3454,16 @@ pub fn Calc(id: String) -> Element {
                         if evt.key() == Key::Enter {
                             evt.prevent_default();
                             let s = address_input.read().clone();
+                            let named = resolve_named_range(&document_content.read(), &s);
+                            if let Some((si, range)) = named {
+                                active_sheet.set(si);
+                                active_cell.set(range.start);
+                                selection_start.set(Some(range.start));
+                                selection_end.set(Some(range.end));
+                                formula_bar.set(cells.read().get(&(si, range.start.0, range.start.1)).cloned().unwrap_or_default());
+                                address_error.set(false);
+                                return;
+                            }
                             match parse_cell_ref(&s) {
                                 Some((r, c)) if r < NUM_ROWS && c < NUM_COLS => {
                                     active_cell.set((r, c));
@@ -2949,7 +3662,19 @@ pub fn Calc(id: String) -> Element {
 
                                         let si = sheet_idx;
                                         let cell_value = cells.read().get(&(si, row, col)).cloned().unwrap_or_default();
-                                        let style = cell_styles.read().get(&(si, row, col)).cloned().unwrap_or_default();
+                                        let mut style = cell_styles.read().get(&(si, row, col)).cloned().unwrap_or_default();
+                                        if let Some(conditional) = conditional_style_for(
+                                            &document_content.read(),
+                                            si,
+                                            row,
+                                            col,
+                                            &cell_value,
+                                        ) {
+                                            if !conditional.fill_color.is_empty() { style.fill_color = conditional.fill_color; }
+                                            if !conditional.text_color.is_empty() { style.text_color = conditional.text_color; }
+                                            style.bold |= conditional.bold;
+                                            style.italic |= conditional.italic;
+                                        }
                                         let mut style_classes = String::new();
                                         if style.bold { style_classes.push_str(" cell-bold"); }
                                         if style.italic { style_classes.push_str(" cell-italic"); }
@@ -2960,7 +3685,23 @@ pub fn Calc(id: String) -> Element {
                                         if style.borders.left { style_classes.push_str(" border-l"); }
                                         if merge.is_some() { style_classes.push_str(" cell-merged"); }
                                         let class_str = format!("{base_class}{style_classes}");
-                                        let inline_style = style.inline_css();
+                                        let mut inline_style = style.inline_css();
+                                        let frozen_rows = document_content
+                                            .read()
+                                            .pointer(&format!("/sheets/{si}/frozen_rows"))
+                                            .and_then(|value| value.as_u64())
+                                            .unwrap_or(0) as u32;
+                                        let frozen_cols = document_content
+                                            .read()
+                                            .pointer(&format!("/sheets/{si}/frozen_cols"))
+                                            .and_then(|value| value.as_u64())
+                                            .unwrap_or(0) as u32;
+                                        if row < frozen_rows {
+                                            inline_style.push_str(&format!("position:sticky;top:{}px;z-index:3;", 28 + row * 28));
+                                        }
+                                        if col < frozen_cols {
+                                            inline_style.push_str(&format!("position:sticky;left:{}px;z-index:4;", 48 + col * 100));
+                                        }
                                         let row_span = merge.map(MergedRange::row_span).unwrap_or(1);
                                         let col_span = merge.map(MergedRange::col_span).unwrap_or(1);
                                         let evaluated = evaluate_cell_display(&cell_value, si, &cells.read());
@@ -4068,9 +4809,9 @@ pub fn Calc(id: String) -> Element {
 mod eval_tests {
     use super::eval::{EvalError, evaluate};
     use super::{
-        MergedRange, delete_col_from_merged, delete_row_from_merged, hydrate_workbook,
-        insert_col_in_merged, insert_row_in_merged, merged_column_overlaps, sanitize_merged_ranges,
-        workbook_replace_from_operation,
+        MergedRange, apply_cell_patch, delete_col_from_merged, delete_row_from_merged,
+        hydrate_workbook, insert_col_in_merged, insert_row_in_merged, merged_column_overlaps,
+        pivot_sum_rows, sanitize_merged_ranges, single_cell_patch, workbook_replace_from_operation,
     };
     use std::collections::HashMap;
 
@@ -4245,6 +4986,65 @@ mod eval_tests {
         let (user_id, workbook) = workbook_replace_from_operation(&operation).unwrap();
         assert_eq!(user_id, "user-1");
         assert_eq!(workbook, serde_json::json!({"sheets": []}));
+    }
+
+    #[test]
+    fn collaboration_uses_and_applies_a_single_cell_patch() {
+        let old = serde_json::json!({"sheets":[{"name":"Sheet1","cells":[]}]});
+        let new = serde_json::json!({"sheets":[{"name":"Sheet1","cells":[[{"row":2,"col":3},{"value":{"type":"Text","value":"hello"},"formula":null}]]}]});
+        let patch = single_cell_patch(&old, &new).expect("one cell changed");
+        assert_eq!((patch.sheet, patch.row, patch.col), (0, 2, 3));
+        let mut applied = old;
+        assert!(apply_cell_patch(&mut applied, &patch));
+        assert_eq!(applied, new);
+    }
+
+    #[test]
+    fn editor_cells_are_accepted_by_the_export_engine() {
+        let mut content =
+            serde_json::to_value(contrix_doc_engine::Workbook::new("Book".into())).unwrap();
+        let style = super::CellStyle {
+            bold: true,
+            ..Default::default()
+        };
+        content["sheets"][0]["cells"] = serde_json::json!([
+            [{"row":0,"col":0},{"value":{"type":"Text","value":"Header"},"formula":null,"format":super::style_to_json(&style)}],
+            [{"row":1,"col":0},{"value":{"type":"Number","value":42.0},"formula":null}]
+        ]);
+        let workbook: contrix_doc_engine::Workbook = serde_json::from_value(content).unwrap();
+        assert!(workbook.sheets[0].get_cell(0, 0).unwrap().format.bold);
+        let roundtrip = serde_json::to_value(workbook).unwrap();
+        assert_eq!(hydrate_workbook(&roundtrip).1[&(0, 1, 0)], "42");
+    }
+
+    #[test]
+    fn name_box_resolves_named_ranges_to_their_sheet_and_selection() {
+        let content = serde_json::json!({"sheets":[{"id":"first"},{"id":"second"}],"named_ranges":[{
+            "name":"Sales","sheet_id":"second","start":{"row":1,"col":2},"end":{"row":5,"col":3}
+        }]});
+        let (sheet, range) = super::resolve_named_range(&content, " sales ").unwrap();
+        assert_eq!(sheet, 1);
+        assert_eq!(range.start, (1, 2));
+        assert_eq!(range.end, (5, 3));
+        assert!(super::resolve_named_range(&content, "unknown").is_none());
+    }
+
+    #[test]
+    fn pivot_rows_are_grouped_and_summed() {
+        let values = make(&[
+            ((0, 0, 0), "Region"),
+            ((0, 0, 1), "Sales"),
+            ((0, 1, 0), "East"),
+            ((0, 1, 1), "10"),
+            ((0, 2, 0), "East"),
+            ((0, 2, 1), "5"),
+            ((0, 3, 0), "West"),
+            ((0, 3, 1), "7"),
+        ]);
+        assert_eq!(
+            pivot_sum_rows(&values, 0, (0, 0), (3, 1)),
+            vec![("East".into(), 15.0), ("West".into(), 7.0)]
+        );
     }
 
     #[test]

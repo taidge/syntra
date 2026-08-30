@@ -86,6 +86,7 @@ struct HandleInner {
     client_id: Uuid,
     counter: u64,
     version: u64,
+    closed: bool,
 }
 
 impl CollabHandle {
@@ -93,10 +94,26 @@ impl CollabHandle {
         self.inner.borrow().ws.clone()
     }
 
+    /// Close explicitly without scheduling another connection after unmount.
+    pub fn close(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.closed = true;
+        if let Some(socket) = inner.ws.take() {
+            socket.set_onclose(None);
+            socket.set_onmessage(None);
+            socket.set_onerror(None);
+            socket.set_onopen(None);
+            let _ = socket.close();
+        }
+    }
+
     /// Send a typed collaborative operation using this client's monotonic
     /// counter and the latest server version observed on the socket.
     pub fn send_operation(&self, user_id: &str, op_type: serde_json::Value) -> Result<(), String> {
         let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            return Err("collaboration session is closed".into());
+        }
         let ws = inner.ws.clone().ok_or("collaboration socket unavailable")?;
         if ws.ready_state() != WebSocket::OPEN {
             return Err("collaboration socket is not open".into());
@@ -133,6 +150,7 @@ pub fn connect_with_reconnect(
         client_id: Uuid::new_v4(),
         counter: 0,
         version: 0,
+        closed: false,
     }));
     let on_message = Rc::new(RefCell::new(on_message));
     let on_state = Rc::new(RefCell::new(on_state));
@@ -158,6 +176,9 @@ fn open_connection(
     on_state: Rc<RefCell<dyn FnMut(ConnectionState)>>,
     attempt: Rc<RefCell<u32>>,
 ) {
+    if inner.borrow().closed {
+        return;
+    }
     let current_attempt = *attempt.borrow();
     if current_attempt == 0 {
         (on_state.borrow_mut())(ConnectionState::Connecting);
@@ -252,6 +273,9 @@ fn schedule_reconnect(
     on_state: Rc<RefCell<dyn FnMut(ConnectionState)>>,
     attempt: Rc<RefCell<u32>>,
 ) {
+    if inner.borrow().closed {
+        return;
+    }
     let next = {
         let mut a = attempt.borrow_mut();
         *a += 1;
@@ -262,8 +286,7 @@ fn schedule_reconnect(
         inner.borrow_mut().ws = None;
         return;
     }
-    let delay_idx = ((next as usize).saturating_sub(1)).min(BACKOFF_STEPS_MS.len() - 1);
-    let delay = BACKOFF_STEPS_MS[delay_idx];
+    let delay = reconnect_delay(next);
     (on_state.borrow_mut())(ConnectionState::Reconnecting(next));
     inner.borrow_mut().ws = None;
 
@@ -284,4 +307,41 @@ fn schedule_reconnect(
         );
     });
     timeout.forget();
+}
+
+fn reconnect_delay(attempt: u32) -> u32 {
+    let index = ((attempt as usize).saturating_sub(1)).min(BACKOFF_STEPS_MS.len() - 1);
+    BACKOFF_STEPS_MS[index]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_backoff_is_bounded() {
+        assert_eq!(reconnect_delay(1), 1000);
+        assert_eq!(reconnect_delay(3), 5000);
+        assert_eq!(reconnect_delay(99), 30000);
+    }
+
+    #[test]
+    fn closed_session_rejects_operations() {
+        let handle = CollabHandle {
+            inner: Rc::new(RefCell::new(HandleInner {
+                ws: None,
+                client_id: Uuid::new_v4(),
+                counter: 0,
+                version: 0,
+                closed: false,
+            })),
+        };
+        handle.close();
+        assert!(
+            handle
+                .send_operation("user", serde_json::json!({}))
+                .unwrap_err()
+                .contains("closed")
+        );
+    }
 }

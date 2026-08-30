@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use contrix_core::dto::{ApiResponse, SessionResponse};
 use contrix_core::error::AppError;
@@ -8,7 +6,6 @@ use diesel::prelude::*;
 use salvo::prelude::*;
 
 use crate::middleware::auth::{get_user_id, hash_token};
-use crate::state::AppState;
 
 /// Resolve the current session id from the Authorization header.
 fn resolve_current_session_id(
@@ -41,7 +38,7 @@ fn resolve_current_session_id(
 
 #[handler]
 pub async fn list_sessions(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -110,7 +107,7 @@ pub async fn list_sessions(depot: &mut Depot, res: &mut Response) {
 
 #[handler]
 pub async fn get_current_session(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -190,7 +187,7 @@ pub async fn get_current_session(req: &mut Request, depot: &mut Depot, res: &mut
 
 #[handler]
 pub async fn revoke_session(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -250,7 +247,7 @@ pub async fn revoke_session(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn revoke_all_sessions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

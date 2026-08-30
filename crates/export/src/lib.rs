@@ -11,6 +11,7 @@ pub mod error;
 pub mod format;
 pub mod html;
 pub mod markdown;
+mod native_package;
 pub mod pptx;
 pub mod xlsx;
 

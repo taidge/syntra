@@ -13,6 +13,10 @@ pub struct Workbook {
     pub id: Uuid,
     pub title: String,
     pub sheets: Vec<Sheet>,
+    #[serde(default)]
+    pub named_ranges: Vec<NamedRange>,
+    #[serde(default)]
+    pub pivot_tables: Vec<PivotTable>,
     pub metadata: WorkbookMetadata,
 }
 
@@ -42,6 +46,8 @@ impl Workbook {
             id: Uuid::new_v4(),
             title,
             sheets: vec![Sheet::new("Sheet1".to_owned())],
+            named_ranges: Vec::new(),
+            pivot_tables: Vec::new(),
             metadata: WorkbookMetadata::default(),
         }
     }
@@ -50,6 +56,74 @@ impl Workbook {
     pub fn add_sheet(&mut self, name: String) -> &mut Sheet {
         self.sheets.push(Sheet::new(name));
         self.sheets.last_mut().expect("just pushed")
+    }
+
+    /// Recalculate one persisted pivot table and write a two-column
+    /// key/value result into its target sheet.
+    pub fn refresh_pivot(&mut self, pivot_id: Uuid) -> Result<(), String> {
+        let pivot = self
+            .pivot_tables
+            .iter()
+            .find(|pivot| pivot.id == pivot_id)
+            .cloned()
+            .ok_or_else(|| "Pivot table not found".to_string())?;
+        let source = self
+            .sheets
+            .iter()
+            .find(|sheet| sheet.id == pivot.source_sheet_id)
+            .ok_or_else(|| "Pivot source sheet not found".to_string())?;
+        let mut groups: std::collections::BTreeMap<String, (f64, u64)> =
+            std::collections::BTreeMap::new();
+        for row in pivot.source_start.row..=pivot.source_end.row {
+            let key = source
+                .get_cell(row, pivot.row_field_col)
+                .map(|cell| cell_value_text(&cell.value))
+                .unwrap_or_default();
+            if key.is_empty() {
+                continue;
+            }
+            let value = source
+                .get_cell(row, pivot.value_field_col)
+                .and_then(|cell| match cell.value {
+                    CellValue::Number(value) => Some(value),
+                    _ => None,
+                })
+                .unwrap_or(0.0);
+            let entry = groups.entry(key).or_default();
+            entry.0 += value;
+            entry.1 += 1;
+        }
+        let target = self
+            .sheets
+            .iter_mut()
+            .find(|sheet| sheet.id == pivot.target_sheet_id)
+            .ok_or_else(|| "Pivot target sheet not found".to_string())?;
+        for (offset, (key, (sum, count))) in groups.into_iter().enumerate() {
+            let row = pivot.target.row + offset as u32;
+            target.set_cell(row, pivot.target.col, CellValue::Text(key));
+            let value = match pivot.aggregation {
+                PivotAggregation::Sum => sum,
+                PivotAggregation::Count => count as f64,
+                PivotAggregation::Average => {
+                    if count == 0 {
+                        0.0
+                    } else {
+                        sum / count as f64
+                    }
+                }
+            };
+            target.set_cell(row, pivot.target.col + 1, CellValue::Number(value));
+        }
+        Ok(())
+    }
+}
+
+fn cell_value_text(value: &CellValue) -> String {
+    match value {
+        CellValue::Empty => String::new(),
+        CellValue::Text(value) | CellValue::Date(value) | CellValue::Error(value) => value.clone(),
+        CellValue::Number(value) => value.to_string(),
+        CellValue::Boolean(value) => value.to_string(),
     }
 }
 
@@ -62,6 +136,7 @@ impl Workbook {
 pub struct Sheet {
     pub id: Uuid,
     pub name: String,
+    #[serde(default, with = "cell_map")]
     pub cells: HashMap<CellRef, Cell>,
     pub column_widths: HashMap<u32, f32>,
     pub row_heights: HashMap<u32, f32>,
@@ -69,6 +144,57 @@ pub struct Sheet {
     pub frozen_cols: u32,
     pub merged_cells: Vec<MergedRange>,
     pub conditional_formats: Vec<ConditionalFormat>,
+    #[serde(default)]
+    pub data_validations: Vec<DataValidation>,
+    #[serde(default)]
+    pub charts: Vec<SheetChart>,
+}
+
+/// JSON cannot encode struct-valued map keys. Use stable coordinate/cell pairs,
+/// matching the editor payload, while accepting legacy empty/A1-keyed maps.
+mod cell_map {
+    use super::{Cell, CellRef};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S: Serializer>(
+        cells: &HashMap<CellRef, Cell>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut pairs = cells.iter().collect::<Vec<_>>();
+        pairs.sort_by_key(|(reference, _)| (reference.row, reference.col));
+        pairs.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<CellRef, Cell>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum WireCells {
+            Pairs(Vec<(CellRef, Cell)>),
+            Legacy(HashMap<String, Cell>),
+        }
+        match WireCells::deserialize(deserializer)? {
+            WireCells::Pairs(pairs) => Ok(pairs.into_iter().collect()),
+            WireCells::Legacy(cells) => cells
+                .into_iter()
+                .map(|(key, cell)| {
+                    let reference = if let Some((row, col)) = key.split_once(':') {
+                        row.parse()
+                            .ok()
+                            .zip(col.parse().ok())
+                            .map(|(row, col)| CellRef::new(row, col))
+                    } else {
+                        CellRef::from_a1(&key)
+                    };
+                    reference
+                        .map(|reference| (reference, cell))
+                        .ok_or_else(|| serde::de::Error::custom("invalid cell reference"))
+                })
+                .collect(),
+        }
+    }
 }
 
 impl Sheet {
@@ -84,6 +210,8 @@ impl Sheet {
             frozen_cols: 0,
             merged_cells: Vec::new(),
             conditional_formats: Vec::new(),
+            data_validations: Vec::new(),
+            charts: Vec::new(),
         }
     }
 
@@ -120,6 +248,37 @@ impl Sheet {
             comment: None,
         });
         cell.formula = Some(formula);
+    }
+
+    /// Validate a prospective value against every rule covering this cell.
+    pub fn validate_value(&self, row: u32, col: u32, value: &CellValue) -> Result<(), String> {
+        for validation in &self.data_validations {
+            if row >= validation.range_start.row
+                && row <= validation.range_end.row
+                && col >= validation.range_start.col
+                && col <= validation.range_end.col
+                && !validation.rule.accepts(value)
+            {
+                return Err(validation
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "Cell value violates data validation".to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the last matching conditional format for a cell.
+    pub fn conditional_format_for(&self, row: u32, col: u32) -> Option<&CellFormat> {
+        let value = &self.get_cell(row, col)?.value;
+        self.conditional_formats.iter().rev().find_map(|rule| {
+            (row >= rule.range_start.row
+                && row <= rule.range_end.row
+                && col >= rule.range_start.col
+                && col <= rule.range_end.col
+                && rule.rule.matches(value))
+            .then_some(&rule.format)
+        })
     }
 }
 
@@ -167,9 +326,10 @@ impl CellRef {
         }
 
         // Column: A=0, B=1, ..., Z=25, AA=26, ...
-        let col: u32 = col_part.chars().fold(0u32, |acc, c| {
-            acc * 26 + (c.to_ascii_uppercase() as u32 - b'A' as u32 + 1)
-        });
+        let col: u32 = col_part.chars().try_fold(0u32, |acc, c| {
+            acc.checked_mul(26)?
+                .checked_add(c.to_ascii_uppercase() as u32 - b'A' as u32 + 1)
+        })?;
         let col = col.checked_sub(1)?; // make 0-based
 
         // Row: 1-based in A1 notation -> 0-based internally.
@@ -215,12 +375,14 @@ pub enum CellValue {
 pub struct Cell {
     pub value: CellValue,
     pub formula: Option<String>,
+    #[serde(default)]
     pub format: CellFormat,
     pub comment: Option<String>,
 }
 
 /// Visual formatting applied to a cell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CellFormat {
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -330,6 +492,140 @@ pub enum ConditionalRule {
     ContainsText(String),
     IsEmpty,
     IsNotEmpty,
+}
+
+impl ConditionalRule {
+    /// Return whether this rule matches a cell value. This is shared by the
+    /// frontend renderer and exporters so conditional formatting has one
+    /// deterministic interpretation.
+    pub fn matches(&self, value: &CellValue) -> bool {
+        let number = match value {
+            CellValue::Number(value) => Some(*value),
+            CellValue::Text(value) => value.parse().ok(),
+            _ => None,
+        };
+        let text = match value {
+            CellValue::Text(value) | CellValue::Date(value) | CellValue::Error(value) => {
+                value.as_str()
+            }
+            CellValue::Boolean(true) => "TRUE",
+            CellValue::Boolean(false) => "FALSE",
+            CellValue::Number(_) | CellValue::Empty => "",
+        };
+        match self {
+            Self::GreaterThan(limit) => number.is_some_and(|value| value > *limit),
+            Self::LessThan(limit) => number.is_some_and(|value| value < *limit),
+            Self::Between(low, high) => number.is_some_and(|value| value >= *low && value <= *high),
+            Self::EqualTo(expected) => text == expected,
+            Self::ContainsText(fragment) => text.contains(fragment),
+            Self::IsEmpty => matches!(value, CellValue::Empty) || text.is_empty(),
+            Self::IsNotEmpty => !matches!(value, CellValue::Empty) && !text.is_empty(),
+        }
+    }
+}
+
+/// Workbook-scoped name pointing to a stable rectangular range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedRange {
+    pub name: String,
+    pub sheet_id: Uuid,
+    pub start: CellRef,
+    pub end: CellRef,
+}
+
+/// Input constraint attached to a worksheet range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataValidation {
+    pub range_start: CellRef,
+    pub range_end: CellRef,
+    pub rule: ValidationRule,
+    pub input_message: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ValidationRule {
+    WholeNumberBetween(i64, i64),
+    DecimalBetween(f64, f64),
+    List(Vec<String>),
+    DateBetween(String, String),
+    TextLengthBetween(u32, u32),
+    CustomFormula(String),
+}
+
+impl ValidationRule {
+    pub fn accepts(&self, value: &CellValue) -> bool {
+        match self {
+            Self::WholeNumberBetween(low, high) => match value {
+                CellValue::Number(value) => {
+                    value.fract() == 0.0 && *value >= *low as f64 && *value <= *high as f64
+                }
+                _ => false,
+            },
+            Self::DecimalBetween(low, high) => {
+                matches!(value, CellValue::Number(value) if value >= low && value <= high)
+            }
+            Self::List(options) => {
+                matches!(value, CellValue::Text(value) if options.iter().any(|item| item == value))
+            }
+            Self::DateBetween(low, high) => {
+                matches!(value, CellValue::Date(value) if value >= low && value <= high)
+            }
+            Self::TextLengthBetween(low, high) => match value {
+                CellValue::Text(value) => {
+                    let length = value.chars().count() as u32;
+                    length >= *low && length <= *high
+                }
+                _ => false,
+            },
+            // Formula evaluation belongs to the workbook calculation engine;
+            // retaining the rule is still useful for XLSX round-tripping.
+            Self::CustomFormula(_) => true,
+        }
+    }
+}
+
+/// Persisted chart definition anchored to a worksheet range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SheetChart {
+    pub id: Uuid,
+    pub title: String,
+    pub chart_type: SheetChartType,
+    pub data_start: CellRef,
+    pub data_end: CellRef,
+    pub anchor_start: CellRef,
+    pub anchor_end: CellRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SheetChartType {
+    Bar,
+    Line,
+    Pie,
+    Area,
+}
+
+/// A compact pivot-table specification. `refresh_pivot` materialises its
+/// grouped output into the target sheet using the current source cells.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PivotTable {
+    pub id: Uuid,
+    pub name: String,
+    pub source_sheet_id: Uuid,
+    pub source_start: CellRef,
+    pub source_end: CellRef,
+    pub target_sheet_id: Uuid,
+    pub target: CellRef,
+    pub row_field_col: u32,
+    pub value_field_col: u32,
+    pub aggregation: PivotAggregation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PivotAggregation {
+    Sum,
+    Count,
+    Average,
 }
 
 // ===========================================================================
@@ -2863,5 +3159,72 @@ mod tests {
             CellValue::Empty => {}
             other => panic!("Expected Empty, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn conditional_format_and_validation_are_enforced() {
+        let mut sheet = Sheet::new("Rules".into());
+        sheet.set_cell(0, 0, CellValue::Number(12.0));
+        let highlight = CellFormat {
+            bg_color: Some("#FF0000".into()),
+            ..Default::default()
+        };
+        sheet.conditional_formats.push(ConditionalFormat {
+            range_start: CellRef::new(0, 0),
+            range_end: CellRef::new(10, 0),
+            rule: ConditionalRule::GreaterThan(10.0),
+            format: highlight,
+        });
+        sheet.data_validations.push(DataValidation {
+            range_start: CellRef::new(0, 0),
+            range_end: CellRef::new(10, 0),
+            rule: ValidationRule::WholeNumberBetween(1, 20),
+            input_message: None,
+            error_message: Some("Use 1-20".into()),
+        });
+        assert_eq!(
+            sheet
+                .conditional_format_for(0, 0)
+                .and_then(|format| format.bg_color.as_deref()),
+            Some("#FF0000")
+        );
+        assert!(sheet.validate_value(1, 0, &CellValue::Number(5.0)).is_ok());
+        assert_eq!(
+            sheet
+                .validate_value(1, 0, &CellValue::Number(30.0))
+                .unwrap_err(),
+            "Use 1-20"
+        );
+    }
+
+    #[test]
+    fn pivot_refresh_materializes_grouped_values() {
+        let mut workbook = Workbook::new("Pivot".into());
+        let source_id = workbook.sheets[0].id;
+        workbook.sheets[0].set_cell(0, 0, CellValue::Text("North".into()));
+        workbook.sheets[0].set_cell(0, 1, CellValue::Number(10.0));
+        workbook.sheets[0].set_cell(1, 0, CellValue::Text("North".into()));
+        workbook.sheets[0].set_cell(1, 1, CellValue::Number(5.0));
+        workbook.sheets[0].set_cell(2, 0, CellValue::Text("South".into()));
+        workbook.sheets[0].set_cell(2, 1, CellValue::Number(7.0));
+        let target_id = workbook.add_sheet("Summary".into()).id;
+        let pivot_id = Uuid::new_v4();
+        workbook.pivot_tables.push(PivotTable {
+            id: pivot_id,
+            name: "By region".into(),
+            source_sheet_id: source_id,
+            source_start: CellRef::new(0, 0),
+            source_end: CellRef::new(2, 1),
+            target_sheet_id: target_id,
+            target: CellRef::new(0, 0),
+            row_field_col: 0,
+            value_field_col: 1,
+            aggregation: PivotAggregation::Sum,
+        });
+        workbook.refresh_pivot(pivot_id).unwrap();
+        assert!(matches!(
+            workbook.sheets[1].get_cell(0, 1).map(|cell| &cell.value),
+            Some(CellValue::Number(value)) if (*value - 15.0).abs() < f64::EPSILON
+        ));
     }
 }

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -17,7 +15,6 @@ use crate::handlers::access::{
 };
 use crate::middleware::auth::get_user_id;
 use crate::services::{StorageBackend, StorageService};
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -98,7 +95,7 @@ fn safe_attachment_name(file_name: &str) -> String {
 
 #[handler]
 pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -193,7 +190,7 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
 
 #[handler]
 pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -474,7 +471,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn get_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -530,7 +527,7 @@ pub async fn get_file(req: &mut Request, depot: &mut Depot, res: &mut Response) 
 
 #[handler]
 pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -631,7 +628,7 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn delete_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -718,7 +715,7 @@ pub async fn delete_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
 #[handler]
 pub async fn move_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -828,7 +825,7 @@ pub async fn move_file(req: &mut Request, depot: &mut Depot, res: &mut Response)
 
 #[handler]
 pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -927,7 +924,7 @@ pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Respo
 
 #[handler]
 pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

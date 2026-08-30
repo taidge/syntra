@@ -21,6 +21,9 @@ base64 = { workspace = true }
 once_cell = "1"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
+[dev-dependencies]
+contrix-doc-engine = { path = "../doc-engine" }
+
 [dependencies.web-sys]
 version = "0.3"
 features = [

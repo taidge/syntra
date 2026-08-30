@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use salvo::prelude::*;
 use uuid::Uuid;
@@ -71,7 +69,7 @@ pub async fn create_backup(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -157,7 +155,7 @@ pub async fn list_backups(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -252,7 +250,7 @@ pub async fn download_backup(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -313,7 +311,7 @@ pub async fn restore_backup(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

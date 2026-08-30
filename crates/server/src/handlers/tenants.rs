@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -11,7 +9,6 @@ use contrix_core::models::{NewTenant, Tenant};
 use contrix_core::schema::tenants::dsl as t;
 
 use crate::middleware::auth::get_user_role;
-use crate::state::AppState;
 
 /// Verify the caller has admin (super-admin) role; returns `false` and writes
 /// a 403 if not.
@@ -38,7 +35,7 @@ pub async fn create_tenant(req: &mut Request, depot: &mut Depot, res: &mut Respo
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     #[derive(serde::Deserialize)]
     struct CreateTenantReq {
@@ -145,7 +142,7 @@ pub async fn list_tenants(req: &mut Request, depot: &mut Depot, res: &mut Respon
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let page: u32 = req.query("page").unwrap_or(1);
     let per_page: u32 = req.query("per_page").unwrap_or(50);
     let offset_val = ((page.saturating_sub(1)) * per_page) as i64;
@@ -192,7 +189,7 @@ pub async fn get_tenant(req: &mut Request, depot: &mut Depot, res: &mut Response
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let tenant_id: String = req.param("id").unwrap_or_default();
 
     let mut conn = match state.db.get() {
@@ -239,7 +236,7 @@ pub async fn update_tenant(req: &mut Request, depot: &mut Depot, res: &mut Respo
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let tenant_id: String = req.param("id").unwrap_or_default();
 
     #[derive(serde::Deserialize)]
@@ -370,7 +367,7 @@ pub async fn deactivate_tenant(req: &mut Request, depot: &mut Depot, res: &mut R
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let tenant_id: String = req.param("id").unwrap_or_default();
 
     let mut conn = match state.db.get() {
@@ -421,7 +418,7 @@ pub async fn list_tenant_users(req: &mut Request, depot: &mut Depot, res: &mut R
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let tenant_id: String = req.param("id").unwrap_or_default();
 
     let mut conn = match state.db.get() {
@@ -513,7 +510,7 @@ pub async fn tenant_stats(req: &mut Request, depot: &mut Depot, res: &mut Respon
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let tenant_id: String = req.param("id").unwrap_or_default();
 
     let mut conn = match state.db.get() {

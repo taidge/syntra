@@ -42,6 +42,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 // --- Public routes (no auth required) ---
                 .push(auth_routes())
                 .push(health_routes())
+                .push(openapi_routes())
                 .push(capabilities_routes())
                 .push(wopi_routes())
                 .push(invitation_public_routes())
@@ -130,6 +131,10 @@ fn auth_protected_routes() -> Router {
 
 fn health_routes() -> Router {
     Router::with_path("health").get(handlers::health::health_check)
+}
+
+fn openapi_routes() -> Router {
+    Router::with_path("openapi.json").get(handlers::operability::openapi)
 }
 
 fn file_routes() -> Router {
@@ -311,6 +316,7 @@ fn admin_routes() -> Router {
         .push(
             Router::with_path("monitoring")
                 .get(handlers::monitoring::get_monitoring)
+                .push(Router::with_path("metrics").get(handlers::monitoring::prometheus_metrics))
                 .push(Router::with_path("documents").get(handlers::monitoring::get_document_stats)),
         )
         .push(
@@ -451,7 +457,14 @@ fn webhook_routes() -> Router {
                 .get(handlers::webhooks::get_webhook)
                 .put(handlers::webhooks::update_webhook)
                 .delete(handlers::webhooks::delete_webhook)
-                .push(Router::with_path("deliveries").get(handlers::webhooks::list_deliveries)),
+                .push(
+                    Router::with_path("deliveries")
+                        .get(handlers::webhooks::list_deliveries)
+                        .push(
+                            Router::with_path("{delivery_id}/retry")
+                                .post(handlers::webhooks::retry_delivery),
+                        ),
+                ),
         )
 }
 
@@ -568,6 +581,7 @@ fn convert_routes() -> Router {
         .push(
             Router::with_path("{id}")
                 .get(handlers::convert::get_conversion)
+                .push(Router::with_path("retry").post(handlers::convert::retry_conversion))
                 .push(Router::with_path("download").get(handlers::convert::download_conversion)),
         )
 }

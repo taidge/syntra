@@ -18,7 +18,7 @@ use crate::state::AppState;
 
 #[handler]
 pub async fn collab_ws(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let user_id_str = match get_user_id(depot) {
         Some(id) => id,
         None => {
@@ -132,12 +132,11 @@ async fn handle_ws(
             Err(_) => return,
         };
 
-    // Establish the version baseline before the client sends its first
-    // operation. The editor has already loaded document content via HTTP, so
-    // this message carries only the collaboration session version.
+    // Establish both the version baseline and durable document snapshot.
+    // Reconnecting editors must not keep a stale pre-disconnect HTTP snapshot.
     let version = collab.session_version(document_id).await.unwrap_or(0);
     let initial = CollabMessage::DocumentState {
-        content: serde_json::Value::Null,
+        content: durable_snapshot(&state, document_id),
         version,
     };
     if let Ok(text) = serde_json::to_string(&initial)
@@ -159,7 +158,12 @@ async fn handle_ws(
                             }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // Missed some messages, continue.
+                        let snapshot = CollabMessage::DocumentState {
+                            content: durable_snapshot(&state, document_id),
+                            version: collab.session_version(document_id).await.unwrap_or(0),
+                        };
+                        if let Ok(text) = serde_json::to_string(&snapshot)
+                            && ws.send(Message::text(text)).await.is_err() { break; }
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => {
@@ -241,4 +245,23 @@ async fn handle_ws(
 
     // Clean up: leave session.
     collab.leave_session(document_id, user_id).await;
+}
+
+fn durable_snapshot(state: &AppState, document_id: Uuid) -> serde_json::Value {
+    use contrix_core::schema::documents::dsl as documents;
+    use diesel::prelude::*;
+    state
+        .db
+        .get()
+        .ok()
+        .and_then(|mut conn| {
+            documents::documents
+                .filter(documents::id.eq(document_id.to_string()))
+                .select(documents::content)
+                .first::<Option<String>>(&mut conn)
+                .ok()
+                .flatten()
+        })
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or(serde_json::Value::Null)
 }

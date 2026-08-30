@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -15,7 +13,7 @@ use contrix_core::schema::webhook_deliveries::dsl as wd;
 use contrix_core::schema::webhooks::dsl as w;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
-use crate::state::AppState;
+use crate::services::WebhookService;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -81,7 +79,7 @@ pub async fn create_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -165,7 +163,7 @@ pub async fn list_webhooks(depot: &mut Depot, res: &mut Response) {
     if !require_admin(depot, res) {
         return;
     }
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -216,7 +214,7 @@ pub async fn get_webhook(req: &mut Request, depot: &mut Depot, res: &mut Respons
     if !require_admin(depot, res) {
         return;
     }
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -274,7 +272,7 @@ pub async fn update_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
     if !require_admin(depot, res) {
         return;
     }
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -392,7 +390,7 @@ pub async fn delete_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let webhook_id_param: String = req.param("id").unwrap_or_default();
 
@@ -442,7 +440,7 @@ pub async fn list_deliveries(req: &mut Request, depot: &mut Depot, res: &mut Res
     if !require_admin(depot, res) {
         return;
     }
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let _uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -507,6 +505,48 @@ pub async fn list_deliveries(req: &mut Request, depot: &mut Depot, res: &mut Res
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::Database(e.to_string()).to_response(),
+            )));
+        }
+    }
+}
+
+/// POST /webhooks/:id/deliveries/:delivery_id/retry
+#[handler]
+pub async fn retry_delivery(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    if !require_admin(depot, res) {
+        return;
+    }
+    let state = crate::require_app_state!(depot, res);
+    let webhook_id: String = req.param("id").unwrap_or_default();
+    let delivery_id: String = req.param("delivery_id").unwrap_or_default();
+    let belongs = state.db.get().ok().and_then(|mut conn| {
+        wd::webhook_deliveries
+            .filter(wd::id.eq(&delivery_id))
+            .filter(wd::webhook_id.eq(&webhook_id))
+            .select(wd::id)
+            .first::<String>(&mut conn)
+            .optional()
+            .ok()
+            .flatten()
+    });
+    if belongs.is_none() {
+        res.status_code(StatusCode::NOT_FOUND);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::NotFound("Webhook delivery not found".into()).to_response(),
+        )));
+        return;
+    }
+    match WebhookService::retry_delivery(&state.db, &delivery_id) {
+        Ok(()) => {
+            res.status_code(StatusCode::ACCEPTED);
+            res.render(Json(ApiResponse::ok(
+                serde_json::json!({"id":delivery_id,"status":"queued"}),
+            )));
+        }
+        Err(error) => {
+            res.status_code(StatusCode::CONFLICT);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation(error).to_response(),
             )));
         }
     }

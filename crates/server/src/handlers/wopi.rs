@@ -741,7 +741,7 @@ pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn check_file_info(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let file_id_param: String = req.param("file_id").unwrap_or_default();
     let uid = match validate_wopi_token(req, &state, &file_id_param).await {
         Ok(id) => id,
@@ -833,7 +833,7 @@ pub async fn check_file_info(req: &mut Request, depot: &mut Depot, res: &mut Res
 
 #[handler]
 pub async fn get_file_contents(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let file_id_param: String = req.param("file_id").unwrap_or_default();
     let uid = match validate_wopi_token(req, &state, &file_id_param).await {
         Ok(id) => id,
@@ -892,7 +892,7 @@ pub async fn get_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
 
 #[handler]
 pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let file_id_param: String = req.param("file_id").unwrap_or_default();
     let uid = match validate_wopi_token(req, &state, &file_id_param).await {
         Ok(id) => id,
@@ -969,7 +969,7 @@ pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
 
 #[handler]
 pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let file_id_param: String = req.param("file_id").unwrap_or_default();
     let uid = match validate_wopi_token(req, &state, &file_id_param).await {
         Ok(id) => id,

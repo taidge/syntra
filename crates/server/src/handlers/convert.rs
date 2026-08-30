@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use contrix_core::dto::ApiResponse;
@@ -15,7 +14,6 @@ use contrix_export::ExportFormat;
 
 use crate::middleware::auth::get_user_id;
 use crate::services::{StorageBackend, StorageService};
-use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -181,13 +179,70 @@ async fn perform_conversion(
     }
 }
 
+/// Enqueue a persisted conversion row for background execution. The database
+/// row is the durable queue: pending jobs can be resumed after a restart.
+pub fn enqueue_conversion(
+    pool: crate::state::DbPool,
+    storage: Arc<StorageBackend>,
+    job_id: String,
+    source_file_id: String,
+    target_format: String,
+) {
+    tokio::spawn(async move {
+        let Ok(mut conn) = pool.get() else {
+            tracing::error!(
+                job_id,
+                "conversion worker could not acquire a database connection"
+            );
+            return;
+        };
+        let claimed = diesel::update(
+            cj::conversion_jobs
+                .filter(cj::id.eq(&job_id))
+                .filter(cj::status.eq("pending")),
+        )
+        .set(cj::status.eq("processing"))
+        .execute(&mut conn)
+        .unwrap_or(0);
+        if claimed == 0 {
+            return;
+        }
+        perform_conversion(
+            &mut conn,
+            &job_id,
+            &source_file_id,
+            &target_format,
+            &storage,
+        )
+        .await;
+    });
+}
+
+/// Resume durable jobs left pending/processing by an interrupted process.
+pub fn resume_pending_conversions(pool: &crate::state::DbPool, storage: Arc<StorageBackend>) {
+    let Ok(mut conn) = pool.get() else {
+        return;
+    };
+    let jobs = cj::conversion_jobs
+        .filter(cj::status.eq_any(["pending", "processing"]))
+        .select((cj::id, cj::source_file_id, cj::target_format))
+        .load::<(String, String, String)>(&mut conn)
+        .unwrap_or_default();
+    for (id, source, target) in jobs {
+        let _ = diesel::update(cj::conversion_jobs.filter(cj::id.eq(&id)))
+            .set(cj::status.eq("pending"))
+            .execute(&mut conn);
+        enqueue_conversion(pool.clone(), storage.clone(), id, source, target);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POST /convert  (Create a conversion job)
 // ---------------------------------------------------------------------------
 
 #[handler]
 pub async fn create_conversion(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -278,31 +333,14 @@ pub async fn create_conversion(req: &mut Request, depot: &mut Depot, res: &mut R
         return;
     }
 
-    // Attempt conversion immediately.
-    perform_conversion(
-        &mut conn,
-        &job_id,
-        &body.file_id,
-        &body.target_format,
-        &state.storage,
-    )
-    .await;
-
-    // Re-read the job to return the up-to-date status.
-    let job = cj::conversion_jobs
-        .filter(cj::id.eq(&job_id))
-        .first::<ConversionJob>(&mut conn)
-        .ok();
-
-    let (status, output_path, error_message, completed_at) = match &job {
-        Some(j) => (
-            j.status.as_str(),
-            j.output_path.as_deref(),
-            j.error_message.as_deref(),
-            j.completed_at.as_deref(),
-        ),
-        None => ("pending", None, None, None),
-    };
+    drop(conn);
+    enqueue_conversion(
+        state.db.clone(),
+        state.storage.clone(),
+        job_id.clone(),
+        body.file_id.clone(),
+        body.target_format.clone(),
+    );
 
     res.status_code(StatusCode::CREATED);
     res.render(Json(ApiResponse::ok(serde_json::json!({
@@ -310,12 +348,100 @@ pub async fn create_conversion(req: &mut Request, depot: &mut Depot, res: &mut R
         "user_id": uid,
         "source_file_id": body.file_id,
         "target_format": body.target_format,
-        "status": status,
-        "output_path": output_path,
-        "error_message": error_message,
+        "status": "pending",
+        "output_path": null,
+        "error_message": null,
         "created_at": now.to_rfc3339(),
-        "completed_at": completed_at,
+        "completed_at": null,
     }))));
+}
+
+// ---------------------------------------------------------------------------
+// POST /convert/:id/retry
+// ---------------------------------------------------------------------------
+
+#[handler]
+pub async fn retry_conversion(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let state = crate::require_app_state!(depot, res);
+    let Some(uid) = get_user_id(depot) else {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Auth("Not authenticated".into()).to_response(),
+        )));
+        return;
+    };
+    let job_id: String = req.param("id").unwrap_or_default();
+    let mut conn = match state.db.get() {
+        Ok(conn) => conn,
+        Err(error) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(error.to_string()).to_response(),
+            )));
+            return;
+        }
+    };
+    let job = cj::conversion_jobs
+        .filter(cj::id.eq(&job_id))
+        .filter(cj::user_id.eq(&uid))
+        .first::<ConversionJob>(&mut conn)
+        .optional();
+    let Ok(Some(job)) = job else {
+        res.status_code(StatusCode::NOT_FOUND);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::NotFound("Conversion job not found".into()).to_response(),
+        )));
+        return;
+    };
+    if !matches!(job.status.as_str(), "failed" | "cancelled") {
+        res.status_code(StatusCode::CONFLICT);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("Only failed or cancelled conversions can be retried".into())
+                .to_response(),
+        )));
+        return;
+    }
+    let claimed = diesel::update(
+        cj::conversion_jobs
+            .filter(cj::id.eq(&job.id))
+            .filter(cj::status.eq_any(["failed", "cancelled"])),
+    )
+    .set((
+        cj::status.eq("pending"),
+        cj::output_path.eq(None::<String>),
+        cj::error_message.eq(None::<String>),
+        cj::completed_at.eq(None::<String>),
+    ))
+    .execute(&mut conn);
+    match claimed {
+        Ok(1) => {}
+        Ok(_) => {
+            res.status_code(StatusCode::CONFLICT);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Validation("Conversion was already requeued".into()).to_response(),
+            )));
+            return;
+        }
+        Err(error) => {
+            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::Database(error.to_string()).to_response(),
+            )));
+            return;
+        }
+    }
+    drop(conn);
+    enqueue_conversion(
+        state.db.clone(),
+        state.storage.clone(),
+        job.id.clone(),
+        job.source_file_id,
+        job.target_format,
+    );
+    res.status_code(StatusCode::ACCEPTED);
+    res.render(Json(ApiResponse::ok(
+        serde_json::json!({"id":job.id,"status":"pending"}),
+    )));
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +450,7 @@ pub async fn create_conversion(req: &mut Request, depot: &mut Depot, res: &mut R
 
 #[handler]
 pub async fn get_conversion(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -390,7 +516,7 @@ pub async fn get_conversion(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
 #[handler]
 pub async fn download_conversion(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -488,7 +614,7 @@ pub async fn download_conversion(req: &mut Request, depot: &mut Depot, res: &mut
 
 #[handler]
 pub async fn list_conversions(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

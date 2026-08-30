@@ -12,6 +12,8 @@ pub struct Presentation {
     pub title: String,
     pub slides: Vec<Slide>,
     pub master: SlideMaster,
+    #[serde(default)]
+    pub theme: PresentationTheme,
     pub metadata: PresentationMetadata,
 }
 
@@ -50,6 +52,7 @@ impl Presentation {
             title,
             slides: vec![title_slide],
             master,
+            theme: PresentationTheme::default(),
             metadata: PresentationMetadata::default(),
         }
     }
@@ -154,6 +157,8 @@ pub struct Slide {
     pub elements: Vec<SlideElement>,
     pub background: Background,
     pub transition: Option<Transition>,
+    #[serde(default)]
+    pub animations: Vec<Animation>,
     pub notes: String,
     pub layout: SlideLayout,
 }
@@ -166,6 +171,7 @@ impl Slide {
             elements: Vec::new(),
             background: Background::Solid("#FFFFFF".to_owned()),
             transition: None,
+            animations: Vec::new(),
             notes: String::new(),
             layout,
         }
@@ -432,6 +438,34 @@ pub struct Transition {
     pub duration_ms: u32,
 }
 
+/// An entrance/emphasis/exit animation tied to one slide element.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Animation {
+    pub target_id: Uuid,
+    pub effect: AnimationEffect,
+    pub trigger: AnimationTrigger,
+    pub duration_ms: u32,
+    pub delay_ms: u32,
+    pub order: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnimationEffect {
+    Appear,
+    Fade,
+    FlyIn,
+    Zoom,
+    Pulse,
+    Disappear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnimationTrigger {
+    OnClick,
+    WithPrevious,
+    AfterPrevious,
+}
+
 /// Supported transition effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransitionType {
@@ -462,6 +496,38 @@ impl Default for SlideMaster {
             default_font_size: 18.0,
             title_style: None,
             body_style: None,
+        }
+    }
+}
+
+/// Theme colours/fonts persisted with the presentation and emitted as an
+/// OOXML theme part.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresentationTheme {
+    pub name: String,
+    pub primary_color: String,
+    pub secondary_color: String,
+    pub accent_colors: Vec<String>,
+    pub heading_font: String,
+    pub body_font: String,
+}
+
+impl Default for PresentationTheme {
+    fn default() -> Self {
+        Self {
+            name: "Contrix Light".to_string(),
+            primary_color: "#2563EB".to_string(),
+            secondary_color: "#0F172A".to_string(),
+            accent_colors: vec![
+                "#2563EB".to_string(),
+                "#7C3AED".to_string(),
+                "#059669".to_string(),
+                "#D97706".to_string(),
+                "#DC2626".to_string(),
+                "#0891B2".to_string(),
+            ],
+            heading_font: "Aptos Display".to_string(),
+            body_font: "Aptos".to_string(),
         }
     }
 }

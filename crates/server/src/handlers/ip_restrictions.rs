@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -11,7 +9,6 @@ use contrix_core::models::NewIpRestriction;
 use contrix_core::schema::ip_restrictions::dsl as ip;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
-use crate::state::AppState;
 
 /// Verify the caller has admin role; returns `false` and writes a 403 if not.
 fn require_admin(depot: &Depot, res: &mut Response) -> bool {
@@ -37,7 +34,7 @@ pub async fn create_ip_restriction(req: &mut Request, depot: &mut Depot, res: &m
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -126,7 +123,7 @@ pub async fn list_ip_restrictions(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -183,7 +180,7 @@ pub async fn get_ip_restriction(req: &mut Request, depot: &mut Depot, res: &mut 
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let restriction_id_param: String = req.param("id").unwrap_or_default();
 
     let mut conn = match state.db.get() {
@@ -245,7 +242,7 @@ pub async fn delete_ip_restriction(req: &mut Request, depot: &mut Depot, res: &m
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let restriction_id_param: String = req.param("id").unwrap_or_default();
 
     let mut conn = match state.db.get() {

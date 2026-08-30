@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use salvo::prelude::*;
@@ -12,7 +10,6 @@ use contrix_core::schema::password_policies::dsl as pp;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 use crate::services::password::PasswordService;
-use crate::state::AppState;
 
 /// Verify the caller has admin role; returns `false` and writes a 403 if not.
 fn require_admin(depot: &Depot, res: &mut Response) -> bool {
@@ -38,7 +35,7 @@ pub async fn get_policy(depot: &mut Depot, res: &mut Response) {
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -76,7 +73,7 @@ pub async fn update_policy(req: &mut Request, depot: &mut Depot, res: &mut Respo
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {

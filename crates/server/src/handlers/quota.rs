@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use diesel::prelude::*;
 use salvo::prelude::*;
 
@@ -8,7 +6,6 @@ use contrix_core::error::AppError;
 use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
-use crate::state::AppState;
 
 /// Verify the caller has admin role; returns `false` and writes a 403 if not.
 fn require_admin(depot: &Depot, res: &mut Response) -> bool {
@@ -30,7 +27,7 @@ fn require_admin(depot: &Depot, res: &mut Response) -> bool {
 
 #[handler]
 pub async fn get_my_quota(depot: &mut Depot, res: &mut Response) {
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
@@ -93,7 +90,7 @@ pub async fn get_user_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
     let target_user_id: String = req.param("user_id").unwrap_or_default();
 
     let mut conn = match state.db.get() {
@@ -153,7 +150,7 @@ pub async fn set_user_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
         return;
     }
 
-    let state = depot.obtain::<Arc<AppState>>().unwrap().clone();
+    let state = crate::require_app_state!(depot, res);
 
     let body: UpdateQuotaRequest = match req.parse_json().await {
         Ok(b) => b,
