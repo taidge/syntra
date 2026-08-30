@@ -459,19 +459,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    integration_settings (id) {
-        id -> Text,
-        service_name -> Text,
-        is_enabled -> Bool,
-        api_url -> Nullable<Text>,
-        api_key -> Nullable<Text>,
-        extra_config -> Nullable<Text>,
-        updated_by -> Text,
-        updated_at -> Text,
-    }
-}
-
-diesel::table! {
     conversion_jobs (id) {
         id -> Text,
         user_id -> Text,
@@ -673,7 +660,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_settings,
     watermark_settings,
     client_logs,
-    integration_settings,
     conversion_jobs,
     password_reset_tokens,
     notification_preferences,

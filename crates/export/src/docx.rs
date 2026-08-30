@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use contrix_doc_engine::writer::{
     Block, Blockquote, CodeBlock, Heading, ImageBlock, List, ListItem, Paragraph, Table, TableCell,
     TableRow, TextRun, WriterDocument,
@@ -17,11 +19,84 @@ use uuid::Uuid;
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
+const MAX_EMBEDDED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES: usize = 50 * 1024 * 1024;
+
+struct EmbeddedImage {
+    block_id: Uuid,
+    relationship_id: String,
+    file_name: String,
+    bytes: Vec<u8>,
+    drawing_id: u32,
+}
+
+fn image_data_from_url(url: &str) -> Option<(&'static str, Vec<u8>)> {
+    let (metadata, encoded) = url.strip_prefix("data:")?.split_once(',')?;
+    if !metadata.ends_with(";base64") {
+        return None;
+    }
+    let mime = metadata.strip_suffix(";base64")?.to_ascii_lowercase();
+    let extension = match mime.as_str() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        _ => return None,
+    };
+    let bytes = BASE64.decode(encoded).ok()?;
+    (!bytes.is_empty() && bytes.len() <= MAX_EMBEDDED_IMAGE_BYTES).then_some((extension, bytes))
+}
+
+fn collect_embedded_images(doc: &WriterDocument) -> Vec<EmbeddedImage> {
+    fn visit(blocks: &[Block], images: &mut Vec<(Uuid, &'static str, Vec<u8>)>) {
+        for block in blocks {
+            match block {
+                Block::Image(image) => {
+                    if let Some((extension, bytes)) = image_data_from_url(&image.url) {
+                        images.push((image.id, extension, bytes));
+                    }
+                }
+                Block::Table(table) => {
+                    for row in &table.rows {
+                        for cell in &row.cells {
+                            visit(&cell.blocks, images);
+                        }
+                    }
+                }
+                Block::Blockquote(quote) => visit(&quote.blocks, images),
+                _ => {}
+            }
+        }
+    }
+
+    let mut discovered = Vec::new();
+    visit(&doc.body, &mut discovered);
+    let mut total = 0usize;
+    discovered
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (block_id, extension, bytes))| {
+            total = total.saturating_add(bytes.len());
+            (total <= MAX_TOTAL_IMAGE_BYTES).then(|| EmbeddedImage {
+                block_id,
+                relationship_id: format!("rId{}", index + 4),
+                file_name: format!("image{}.{}", index + 1, extension),
+                bytes,
+                drawing_id: (index + 1) as u32,
+            })
+        })
+        .collect()
+}
+
 /// Convert a [`WriterDocument`] to a `.docx` byte vector (ZIP archive with Open XML).
 pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
     let mut buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut buf);
     let options = SimpleFileOptions::default();
+    let embedded_images = collect_embedded_images(doc);
+    let image_lookup: HashMap<Uuid, &EmbeddedImage> = embedded_images
+        .iter()
+        .map(|image| (image.block_id, image))
+        .collect();
 
     // [Content_Types].xml
     zip.start_file("[Content_Types].xml", options)
@@ -32,6 +107,10 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Default Extension="jpg" ContentType="image/jpeg"/>
+  <Default Extension="jpeg" ContentType="image/jpeg"/>
+  <Default Extension="gif" ContentType="image/gif"/>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
   <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
@@ -69,15 +148,26 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
     // word/_rels/document.xml.rels
     zip.start_file("word/_rels/document.xml.rels", options)
         .map_err(|e| e.to_string())?;
-    write!(
-        zip,
+    let mut document_relationships = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
-</Relationships>"#
-    )
-    .map_err(|e| e.to_string())?;
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#,
+    );
+    for image in &embedded_images {
+        document_relationships.push_str(&format!(
+            r#"<Relationship Id="{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/{}"/>"#,
+            image.relationship_id, image.file_name
+        ));
+    }
+    document_relationships.push_str("</Relationships>");
+    write!(zip, "{document_relationships}").map_err(|e| e.to_string())?;
+
+    for image in &embedded_images {
+        zip.start_file(format!("word/media/{}", image.file_name), options)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(&image.bytes).map_err(|e| e.to_string())?;
+    }
 
     // word/styles.xml — basic styles
     zip.start_file("word/styles.xml", options)
@@ -110,13 +200,13 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
 <w:body>"#,
     );
 
     // Convert each block
     for block in &doc.body {
-        block_to_xml(block, &mut xml);
+        block_to_xml(block, &image_lookup, &mut xml);
     }
 
     xml.push_str("</w:body></w:document>");
@@ -157,21 +247,21 @@ fn numbering_xml() -> String {
     xml
 }
 
-fn block_to_xml(block: &Block, xml: &mut String) {
+fn block_to_xml(block: &Block, images: &HashMap<Uuid, &EmbeddedImage>, xml: &mut String) {
     match block {
         Block::Paragraph(p) => paragraph_to_xml(p, xml),
         Block::Heading(h) => heading_to_xml(h, xml),
         Block::List(list) => list_to_xml(list, xml),
-        Block::Table(table) => table_to_xml(table, xml),
+        Block::Table(table) => table_to_xml(table, images, xml),
         Block::CodeBlock(cb) => code_block_to_xml(cb, xml),
-        Block::Blockquote(bq) => blockquote_to_xml(bq, xml),
+        Block::Blockquote(bq) => blockquote_to_xml(bq, images, xml),
         Block::HorizontalRule => {
             xml.push_str("<w:p><w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"6\" w:color=\"auto\"/></w:pBdr></w:pPr></w:p>");
         }
         Block::PageBreak => {
             xml.push_str("<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>");
         }
-        Block::Image(img) => image_to_xml(img, xml),
+        Block::Image(img) => image_to_xml(img, images.get(&img.id).copied(), xml),
     }
 }
 
@@ -232,7 +322,7 @@ fn list_item_paragraph(item: &ListItem, num_id: u32, ilvl: u32, xml: &mut String
     xml.push_str("</w:p>");
 }
 
-fn table_to_xml(table: &Table, xml: &mut String) {
+fn table_to_xml(table: &Table, images: &HashMap<Uuid, &EmbeddedImage>, xml: &mut String) {
     xml.push_str("<w:tbl><w:tblPr><w:tblBorders>");
     xml.push_str("<w:top w:val=\"single\" w:sz=\"4\" w:color=\"000000\"/>");
     xml.push_str("<w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"000000\"/>");
@@ -250,7 +340,7 @@ fn table_to_xml(table: &Table, xml: &mut String) {
                 xml.push_str("<w:p/>");
             } else {
                 for b in &cell.blocks {
-                    block_to_xml(b, xml);
+                    block_to_xml(b, images, xml);
                 }
             }
             xml.push_str("</w:tc>");
@@ -269,15 +359,29 @@ fn code_block_to_xml(cb: &CodeBlock, xml: &mut String) {
     xml.push_str("</w:p>");
 }
 
-fn blockquote_to_xml(bq: &Blockquote, xml: &mut String) {
+fn blockquote_to_xml(bq: &Blockquote, images: &HashMap<Uuid, &EmbeddedImage>, xml: &mut String) {
     for b in &bq.blocks {
-        block_to_xml(b, xml);
+        block_to_xml(b, images, xml);
     }
 }
 
-fn image_to_xml(img: &ImageBlock, xml: &mut String) {
-    // Images cannot be embedded inline without a full relationship + image part.
-    // For now we emit a placeholder text run.
+fn image_to_xml(img: &ImageBlock, embedded: Option<&EmbeddedImage>, xml: &mut String) {
+    if let Some(embedded) = embedded {
+        let width_emu = (img.width.unwrap_or(320.0).clamp(1.0, 4096.0) * 9525.0) as i64;
+        let height_emu = (img.height.unwrap_or(240.0).clamp(1.0, 4096.0) * 9525.0) as i64;
+        let alt = escape_xml(&img.alt_text);
+        xml.push_str(&format!(
+            r#"<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{width_emu}" cy="{height_emu}"/><wp:docPr id="{}" name="{}" descr="{alt}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="{}" descr="{alt}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width_emu}" cy="{height_emu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#,
+            embedded.drawing_id,
+            escape_xml(&embedded.file_name),
+            escape_xml(&embedded.file_name),
+            embedded.relationship_id,
+        ));
+        return;
+    }
+
+    // Remote/blob URLs have no bytes available to this synchronous exporter.
+    // Preserve a visible, escaped fallback rather than silently dropping them.
     let label = if img.alt_text.is_empty() {
         &img.url
     } else {
@@ -368,6 +472,7 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
         }
         Err(_) => NumberingDefinitions::default(),
     };
+    let imported_images = load_imported_images(&mut archive)?;
 
     let mut document_xml = String::new();
     archive
@@ -376,10 +481,89 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
         .read_to_string(&mut document_xml)
         .map_err(|e| format!("read document.xml: {e}"))?;
 
-    let blocks = parse_body(&document_xml, &numbering)?;
+    let blocks = parse_body(&document_xml, &numbering, &imported_images)?;
     let mut doc = WriterDocument::new(title);
     doc.body = blocks;
     Ok(doc)
+}
+
+fn load_imported_images<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<HashMap<String, String>, String> {
+    let mut relationships_xml = String::new();
+    let Ok(mut relationships_file) = archive.by_name("word/_rels/document.xml.rels") else {
+        return Ok(HashMap::new());
+    };
+    relationships_file
+        .read_to_string(&mut relationships_xml)
+        .map_err(|e| format!("read document relationships: {e}"))?;
+    drop(relationships_file);
+
+    let mut reader = Reader::from_str(&relationships_xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut targets = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(e)) | Ok(Event::Start(e)) if e.name().as_ref() == b"Relationship" => {
+                let relationship_type = attr_val(&e, b"Type").unwrap_or_default();
+                if relationship_type.ends_with("/image")
+                    && let (Some(id), Some(target)) = (attr_val(&e, b"Id"), attr_val(&e, b"Target"))
+                {
+                    targets.push((id, target));
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("parse document relationships: {e}")),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    let mut images = HashMap::new();
+    let mut total_bytes = 0usize;
+    for (relationship_id, target) in targets {
+        let target = target.replace('\\', "/");
+        if target.split('/').any(|part| part == "..") {
+            continue;
+        }
+        let archive_path = if target.starts_with('/') {
+            target.trim_start_matches('/').to_string()
+        } else {
+            format!("word/{target}")
+        };
+        if !archive_path.starts_with("word/media/") {
+            continue;
+        }
+        let extension = archive_path
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase())
+            .unwrap_or_default();
+        let mime = match extension.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            _ => continue,
+        };
+        let Ok(mut file) = archive.by_name(&archive_path) else {
+            continue;
+        };
+        if file.size() > MAX_EMBEDDED_IMAGE_BYTES as u64 {
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(file.size() as usize);
+        file.read_to_end(&mut bytes)
+            .map_err(|e| format!("read embedded image: {e}"))?;
+        total_bytes = total_bytes.saturating_add(bytes.len());
+        if total_bytes > MAX_TOTAL_IMAGE_BYTES {
+            break;
+        }
+        images.insert(
+            relationship_id,
+            format!("data:{mime};base64,{}", BASE64.encode(bytes)),
+        );
+    }
+    Ok(images)
 }
 
 fn read_core_title<R: std::io::Read + std::io::Seek>(
@@ -498,7 +682,7 @@ struct NumberingRef {
 }
 
 struct ParsedParagraph {
-    block: Block,
+    blocks: Vec<Block>,
     numbering: Option<NumberingRef>,
 }
 
@@ -563,15 +747,22 @@ fn append_paragraph(
 ) {
     let Some(reference) = parsed.numbering else {
         flush_pending_list(pending, blocks);
-        blocks.push(parsed.block);
+        blocks.extend(parsed.blocks);
         return;
     };
 
     let ordered = numbering.is_ordered(&reference.num_id, reference.level);
-    let runs = match parsed.block {
-        Block::Paragraph(paragraph) => paragraph.runs,
-        Block::Heading(heading) => heading.runs,
-        _ => Vec::new(),
+    let mut parsed_blocks = parsed.blocks.into_iter();
+    let runs = match parsed_blocks.next() {
+        Some(Block::Paragraph(paragraph)) => paragraph.runs,
+        Some(Block::Heading(heading)) => heading.runs,
+        Some(other) => {
+            flush_pending_list(pending, blocks);
+            blocks.push(other);
+            blocks.extend(parsed_blocks);
+            return;
+        }
+        None => return,
     };
     let same_list = pending
         .as_ref()
@@ -587,9 +778,18 @@ fn append_paragraph(
     if let Some(list) = pending {
         list.entries.push((reference.level, runs));
     }
+    let remaining: Vec<Block> = parsed_blocks.collect();
+    if !remaining.is_empty() {
+        flush_pending_list(pending, blocks);
+        blocks.extend(remaining);
+    }
 }
 
-fn parse_body(xml: &str, numbering: &NumberingDefinitions) -> Result<Vec<Block>, String> {
+fn parse_body(
+    xml: &str,
+    numbering: &NumberingDefinitions,
+    images: &HashMap<String, String>,
+) -> Result<Vec<Block>, String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -605,14 +805,14 @@ fn parse_body(xml: &str, numbering: &NumberingDefinitions) -> Result<Vec<Block>,
                     in_body = true;
                 } else if in_body && n == b"w:p" {
                     append_paragraph(
-                        parse_paragraph(&mut reader)?,
+                        parse_paragraph(&mut reader, images)?,
                         numbering,
                         &mut pending_list,
                         &mut blocks,
                     );
                 } else if in_body && n == b"w:tbl" {
                     flush_pending_list(&mut pending_list, &mut blocks);
-                    blocks.push(parse_table(&mut reader, numbering)?);
+                    blocks.push(parse_table(&mut reader, numbering, images)?);
                 }
             }
             Ok(Event::End(e)) if e.name().as_ref() == b"w:body" => break,
@@ -626,11 +826,15 @@ fn parse_body(xml: &str, numbering: &NumberingDefinitions) -> Result<Vec<Block>,
     Ok(blocks)
 }
 
-fn parse_paragraph(reader: &mut Reader<&[u8]>) -> Result<ParsedParagraph, String> {
+fn parse_paragraph(
+    reader: &mut Reader<&[u8]>,
+    images: &HashMap<String, String>,
+) -> Result<ParsedParagraph, String> {
     let mut buf = Vec::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut heading_level: Option<u8> = None;
     let mut numbering = None;
+    let mut image_blocks = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
@@ -640,7 +844,11 @@ fn parse_paragraph(reader: &mut Reader<&[u8]>) -> Result<ParsedParagraph, String
                     heading_level = properties.heading_level;
                     numbering = properties.numbering;
                 } else if n == b"w:r" {
-                    runs.push(parse_run(reader)?);
+                    let (run, run_images) = parse_run(reader, images)?;
+                    if !run.text.is_empty() {
+                        runs.push(run);
+                    }
+                    image_blocks.extend(run_images.into_iter().map(Block::Image));
                 }
             }
             Ok(Event::End(e)) if e.name().as_ref() == b"w:p" => break,
@@ -650,22 +858,35 @@ fn parse_paragraph(reader: &mut Reader<&[u8]>) -> Result<ParsedParagraph, String
         }
         buf.clear();
     }
-    let block = if let Some(level) = heading_level {
-        Block::Heading(Heading {
+    let mut blocks = Vec::new();
+    if !runs.is_empty() {
+        blocks.push(if let Some(level) = heading_level {
+            Block::Heading(Heading {
+                id: Uuid::new_v4(),
+                level,
+                runs,
+            })
+        } else {
+            Block::Paragraph(Paragraph {
+                id: Uuid::new_v4(),
+                runs,
+                alignment: Default::default(),
+                indent_level: 0,
+                spacing: Default::default(),
+            })
+        });
+    }
+    blocks.extend(image_blocks);
+    if blocks.is_empty() {
+        blocks.push(Block::Paragraph(Paragraph {
             id: Uuid::new_v4(),
-            level,
-            runs,
-        })
-    } else {
-        Block::Paragraph(Paragraph {
-            id: Uuid::new_v4(),
-            runs,
+            runs: Vec::new(),
             alignment: Default::default(),
             indent_level: 0,
             spacing: Default::default(),
-        })
-    };
-    Ok(ParsedParagraph { block, numbering })
+        }));
+    }
+    Ok(ParsedParagraph { blocks, numbering })
 }
 
 #[derive(Default)]
@@ -711,9 +932,13 @@ fn parse_p_pr(reader: &mut Reader<&[u8]>) -> Result<ParagraphProperties, String>
     Ok(properties)
 }
 
-fn parse_run(reader: &mut Reader<&[u8]>) -> Result<TextRun, String> {
+fn parse_run(
+    reader: &mut Reader<&[u8]>,
+    images: &HashMap<String, String>,
+) -> Result<(TextRun, Vec<ImageBlock>), String> {
     let mut buf = Vec::new();
     let mut run = TextRun::default();
+    let mut run_images = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
@@ -723,6 +948,10 @@ fn parse_run(reader: &mut Reader<&[u8]>) -> Result<TextRun, String> {
                 } else if n == b"w:t" {
                     let text = read_text_content(reader, b"w:t")?;
                     run.text.push_str(&text);
+                } else if n == b"w:drawing"
+                    && let Some(image) = parse_drawing(reader, images)?
+                {
+                    run_images.push(image);
                 }
             }
             Ok(Event::Empty(_)) => {}
@@ -733,7 +962,54 @@ fn parse_run(reader: &mut Reader<&[u8]>) -> Result<TextRun, String> {
         }
         buf.clear();
     }
-    Ok(run)
+    Ok((run, run_images))
+}
+
+fn parse_drawing(
+    reader: &mut Reader<&[u8]>,
+    images: &HashMap<String, String>,
+) -> Result<Option<ImageBlock>, String> {
+    let mut buf = Vec::new();
+    let mut relationship_id = None;
+    let mut width = None;
+    let mut height = None;
+    let mut alt_text = String::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => match e.name().as_ref() {
+                b"a:blip" => relationship_id = attr_val(&e, b"r:embed"),
+                b"wp:extent" => {
+                    width = attr_val(&e, b"cx")
+                        .and_then(|value| value.parse::<f32>().ok())
+                        .map(|value| value / 9525.0);
+                    height = attr_val(&e, b"cy")
+                        .and_then(|value| value.parse::<f32>().ok())
+                        .map(|value| value / 9525.0);
+                }
+                b"wp:docPr" | b"pic:cNvPr" if alt_text.is_empty() => {
+                    alt_text = attr_val(&e, b"descr")
+                        .or_else(|| attr_val(&e, b"name"))
+                        .unwrap_or_default();
+                }
+                _ => {}
+            },
+            Ok(Event::End(e)) if e.name().as_ref() == b"w:drawing" => break,
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("xml parse drawing: {e}")),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(relationship_id.and_then(|relationship_id| {
+        images.get(&relationship_id).map(|url| ImageBlock {
+            id: Uuid::new_v4(),
+            url: url.clone(),
+            alt_text,
+            width,
+            height,
+            alignment: Default::default(),
+        })
+    }))
 }
 
 fn apply_r_pr(reader: &mut Reader<&[u8]>, run: &mut TextRun) -> Result<(), String> {
@@ -796,6 +1072,7 @@ fn read_text_content(reader: &mut Reader<&[u8]>, end: &[u8]) -> Result<String, S
 fn parse_table(
     reader: &mut Reader<&[u8]>,
     numbering: &NumberingDefinitions,
+    images: &HashMap<String, String>,
 ) -> Result<Block, String> {
     let mut buf = Vec::new();
     let mut rows: Vec<TableRow> = Vec::new();
@@ -803,7 +1080,7 @@ fn parse_table(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 if e.name().as_ref() == b"w:tr" {
-                    rows.push(parse_row(reader, numbering)?);
+                    rows.push(parse_row(reader, numbering, images)?);
                 }
             }
             Ok(Event::End(e)) if e.name().as_ref() == b"w:tbl" => break,
@@ -827,6 +1104,7 @@ fn parse_table(
 fn parse_row(
     reader: &mut Reader<&[u8]>,
     numbering: &NumberingDefinitions,
+    images: &HashMap<String, String>,
 ) -> Result<TableRow, String> {
     let mut buf = Vec::new();
     let mut cells: Vec<TableCell> = Vec::new();
@@ -834,7 +1112,7 @@ fn parse_row(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 if e.name().as_ref() == b"w:tc" {
-                    cells.push(parse_cell(reader, numbering)?);
+                    cells.push(parse_cell(reader, numbering, images)?);
                 }
             }
             Ok(Event::End(e)) if e.name().as_ref() == b"w:tr" => break,
@@ -850,6 +1128,7 @@ fn parse_row(
 fn parse_cell(
     reader: &mut Reader<&[u8]>,
     numbering: &NumberingDefinitions,
+    images: &HashMap<String, String>,
 ) -> Result<TableCell, String> {
     let mut buf = Vec::new();
     let mut blocks: Vec<Block> = Vec::new();
@@ -860,14 +1139,14 @@ fn parse_cell(
                 let n = e.name().as_ref().to_vec();
                 if n == b"w:p" {
                     append_paragraph(
-                        parse_paragraph(reader)?,
+                        parse_paragraph(reader, images)?,
                         numbering,
                         &mut pending_list,
                         &mut blocks,
                     );
                 } else if n == b"w:tbl" {
                     flush_pending_list(&mut pending_list, &mut blocks);
-                    blocks.push(parse_table(reader, numbering)?);
+                    blocks.push(parse_table(reader, numbering, images)?);
                 }
             }
             Ok(Event::End(e)) if e.name().as_ref() == b"w:tc" => break,
@@ -922,6 +1201,53 @@ mod tests {
         let bytes = writer_to_docx(&doc).unwrap();
         assert!(bytes.len() > 100);
         assert_eq!(&bytes[0..2], b"PK");
+    }
+
+    #[test]
+    fn embedded_image_is_packaged_and_round_trips() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let data_url = format!("data:image/png;base64,{PNG}");
+        let mut doc = WriterDocument::new("Image document".into());
+        doc.body.push(Block::Image(ImageBlock {
+            id: Uuid::new_v4(),
+            url: data_url.clone(),
+            alt_text: "A tiny pixel".into(),
+            width: Some(32.0),
+            height: Some(16.0),
+            alignment: Default::default(),
+        }));
+
+        let bytes = writer_to_docx(&doc).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        let mut media = Vec::new();
+        archive
+            .by_name("word/media/image1.png")
+            .unwrap()
+            .read_to_end(&mut media)
+            .unwrap();
+        assert_eq!(media, BASE64.decode(PNG).unwrap());
+        let mut relationships = String::new();
+        archive
+            .by_name("word/_rels/document.xml.rels")
+            .unwrap()
+            .read_to_string(&mut relationships)
+            .unwrap();
+        assert!(relationships.contains("relationships/image"));
+        drop(archive);
+
+        let imported = docx_to_writer(&bytes).unwrap();
+        let image = imported
+            .body
+            .iter()
+            .find_map(|block| match block {
+                Block::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("embedded image should be restored");
+        assert_eq!(image.url, data_url);
+        assert_eq!(image.alt_text, "A tiny pixel");
+        assert_eq!(image.width, Some(32.0));
+        assert_eq!(image.height, Some(16.0));
     }
 
     #[test]

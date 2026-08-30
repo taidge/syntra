@@ -1120,36 +1120,6 @@ pub struct NewClientLog {
 }
 
 // ---------------------------------------------------------------------------
-// IntegrationSettings
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable)]
-#[diesel(table_name = crate::schema::integration_settings)]
-pub struct IntegrationSetting {
-    pub id: String,
-    pub service_name: String,
-    pub is_enabled: bool,
-    pub api_url: Option<String>,
-    pub api_key: Option<String>,
-    pub extra_config: Option<String>,
-    pub updated_by: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Insertable)]
-#[diesel(table_name = crate::schema::integration_settings)]
-pub struct NewIntegrationSetting {
-    pub id: String,
-    pub service_name: String,
-    pub is_enabled: bool,
-    pub api_url: Option<String>,
-    pub api_key: Option<String>,
-    pub extra_config: Option<String>,
-    pub updated_by: String,
-    pub updated_at: String,
-}
-
-// ---------------------------------------------------------------------------
 // ConversionJob
 // ---------------------------------------------------------------------------
 

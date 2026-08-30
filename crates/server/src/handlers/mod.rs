@@ -19,7 +19,6 @@ pub mod files;
 pub mod folders;
 pub mod groups;
 pub mod health;
-pub mod integrations;
 pub mod invitations;
 pub mod ip_restrictions;
 pub mod monitoring;

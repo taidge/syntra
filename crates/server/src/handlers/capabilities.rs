@@ -40,9 +40,7 @@ pub async fn get_capabilities(depot: &mut Depot, res: &mut Response) {
         "limits": {
             "max_upload_size_mb": state.config.storage.max_upload_size_mb,
         },
-        // Integration settings exist, but LanguageTool/DeepL request paths are
-        // not implemented. Do not advertise configuration records as usable
-        // end-user capabilities.
+        // No third-party language integrations are currently implemented.
         "integrations": [],
     });
     res.status_code(StatusCode::OK);

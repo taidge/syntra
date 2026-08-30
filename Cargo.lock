@@ -722,6 +722,7 @@ dependencies = [
 name = "contrix-export"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "calamine",
  "contrix-doc-engine",
  "quick-xml",

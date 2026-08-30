@@ -1615,53 +1615,6 @@ async fn test_admin_activity_log() {
 }
 
 #[tokio::test]
-async fn test_admin_integration_responses_never_echo_api_keys() {
-    let server = TestServer::new().await;
-    let (_, reg_body) = server
-        .register(
-            "integration-admin",
-            "integration-admin@test.com",
-            "password123",
-        )
-        .await;
-    let user_id = reg_body["data"]["user"]["id"].as_str().unwrap();
-    server.make_admin(user_id).await;
-    let (admin_token, _) = server
-        .login("integration-admin@test.com", "password123")
-        .await;
-
-    let update = server
-        .client
-        .put(server.url("/api/v1/admin/integrations/example"))
-        .headers(server.auth_header(&admin_token))
-        .json(&serde_json::json!({
-            "is_enabled": true,
-            "api_url": "https://example.test/api",
-            "api_key": "must-never-be-returned"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(update.status(), 201);
-    let update_body: serde_json::Value = update.json().await.unwrap();
-    assert_eq!(update_body["data"]["has_api_key"], true);
-    assert!(update_body["data"].get("api_key").is_none());
-    assert!(!update_body.to_string().contains("must-never-be-returned"));
-
-    let get = server
-        .client
-        .get(server.url("/api/v1/admin/integrations/example"))
-        .headers(server.auth_header(&admin_token))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get.status(), 200);
-    let get_body: serde_json::Value = get.json().await.unwrap();
-    assert_eq!(get_body["data"]["has_api_key"], true);
-    assert!(get_body["data"].get("api_key").is_none());
-}
-
-#[tokio::test]
 async fn test_admin_backup_is_consistent_and_restore_is_staged() {
     use contrix_core::schema::users::dsl as users;
     use diesel::prelude::*;
@@ -2110,12 +2063,13 @@ async fn test_api_key_authentication_enforces_scopes_and_revocation() {
     assert_eq!(denied.status(), 403);
 
     // Changing the scope takes effect immediately because permissions are
-    // read from the database on every request.
+    // read from the database on every request. Resource scopes only authorize
+    // the matching top-level API route family.
     let update = server
         .client
         .put(server.url(&format!("/api/v1/api-keys/{api_key_id}")))
         .headers(server.auth_header(&token))
-        .json(&serde_json::json!({ "permissions": "write" }))
+        .json(&serde_json::json!({ "permissions": "folders:write" }))
         .send()
         .await
         .unwrap();
@@ -2145,6 +2099,16 @@ async fn test_api_key_authentication_enforces_scopes_and_revocation() {
         .await
         .unwrap();
     assert_eq!(write.status(), 201);
+
+    let other_resource = server
+        .client
+        .post(server.url("/api/v1/documents"))
+        .headers(server.auth_header(api_key))
+        .json(&serde_json::json!({ "title": "must-not-exist" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_resource.status(), 403);
 
     let revoke = server
         .client

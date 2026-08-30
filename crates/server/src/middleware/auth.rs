@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -30,38 +31,74 @@ const USER_ROLE_KEY: &str = "current_user_role";
 /// Canonicalize the comma-separated scopes accepted by API key endpoints.
 ///
 /// `read` authorizes safe HTTP methods, `write` authorizes mutating methods,
-/// and `*` authorizes both. Unknown scopes are rejected instead of being
-/// stored as permissions that the server cannot enforce.
+/// `<resource>:read` and `<resource>:write` restrict access to one API route
+/// family, and `*` authorizes everything. Unknown scopes are rejected instead
+/// of being stored as permissions that the server cannot enforce.
 pub fn normalize_api_key_permissions(value: &str) -> Result<String, &'static str> {
-    let mut read = false;
-    let mut write = false;
-    let mut wildcard = false;
+    let mut scopes = BTreeSet::new();
 
     for scope in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        match scope.to_ascii_lowercase().as_str() {
-            "read" => read = true,
-            "write" => write = true,
-            "*" => wildcard = true,
-            _ => return Err("Permissions must be '*', 'read', 'write', or 'read,write'"),
+        let scope = scope.to_ascii_lowercase();
+        if matches!(scope.as_str(), "*" | "read" | "write") {
+            scopes.insert(scope);
+            continue;
         }
+        let Some((resource, action)) = scope.split_once(':') else {
+            return Err("Invalid API key permission scope");
+        };
+        if !matches!(action, "read" | "write") || !is_api_resource(resource) {
+            return Err("Invalid API key permission scope");
+        }
+        scopes.insert(scope);
     }
 
-    if wildcard {
-        if read || write {
+    if scopes.contains("*") {
+        if scopes.len() != 1 {
             return Err("Wildcard permission '*' cannot be combined with other scopes");
         }
         return Ok("*".to_string());
     }
-
-    match (read, write) {
-        (true, true) => Ok("read,write".to_string()),
-        (true, false) => Ok("read".to_string()),
-        (false, true) => Ok("write".to_string()),
-        (false, false) => Err("At least one API key permission is required"),
+    if scopes.is_empty() {
+        return Err("At least one API key permission is required");
     }
+    Ok(scopes.into_iter().collect::<Vec<_>>().join(","))
 }
 
-fn api_key_allows_method(permissions: &str, method: &salvo::http::Method) -> bool {
+fn is_api_resource(resource: &str) -> bool {
+    matches!(
+        resource,
+        "admin"
+            | "ai"
+            | "auth"
+            | "comments"
+            | "convert"
+            | "documents"
+            | "favorites"
+            | "files"
+            | "folders"
+            | "groups"
+            | "invitations"
+            | "notification-preferences"
+            | "notifications"
+            | "presence"
+            | "quota"
+            | "recent"
+            | "rooms"
+            | "search"
+            | "sessions"
+            | "settings"
+            | "shares"
+            | "tags"
+            | "templates"
+            | "totp"
+            | "trash"
+            | "upload"
+            | "webhooks"
+            | "ws"
+    )
+}
+
+fn api_key_allows_request(permissions: &str, method: &salvo::http::Method, path: &str) -> bool {
     if permissions == "*" {
         return true;
     }
@@ -78,10 +115,18 @@ fn api_key_allows_method(permissions: &str, method: &salvo::http::Method) -> boo
         "write"
     };
 
-    permissions
-        .split(',')
-        .map(str::trim)
-        .any(|scope| scope == required_scope)
+    let resource = path
+        .strip_prefix("/api/v1/")
+        .and_then(|path| path.split('/').next())
+        .filter(|resource| is_api_resource(resource));
+    permissions.split(',').map(str::trim).any(|scope| {
+        scope == required_scope
+            || resource.is_some_and(|resource| {
+                scope
+                    .split_once(':')
+                    .is_some_and(|parts| parts == (resource, required_scope))
+            })
+    })
 }
 
 /// Hash a bearer token before storing or looking it up in the session table.
@@ -238,7 +283,7 @@ pub async fn jwt_auth_middleware(
                         return;
                     }
 
-                    if !api_key_allows_method(&permissions, req.method()) {
+                    if !api_key_allows_request(&permissions, req.method(), path) {
                         res.status_code(StatusCode::FORBIDDEN);
                         res.render(Json(serde_json::json!({
                             "success": false,
@@ -288,7 +333,7 @@ pub fn get_user_role(depot: &Depot) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{api_key_allows_method, normalize_api_key_permissions};
+    use super::{api_key_allows_request, normalize_api_key_permissions};
     use salvo::http::Method;
 
     #[test]
@@ -301,14 +346,45 @@ mod tests {
         assert!(normalize_api_key_permissions("").is_err());
         assert!(normalize_api_key_permissions("admin").is_err());
         assert!(normalize_api_key_permissions("*,read").is_err());
+        assert_eq!(
+            normalize_api_key_permissions("files:write, documents:read,files:write"),
+            Ok("documents:read,files:write".into())
+        );
+        assert!(normalize_api_key_permissions("unknown:read").is_err());
+        assert!(normalize_api_key_permissions("files:delete").is_err());
     }
 
     #[test]
     fn api_key_permissions_control_http_methods() {
-        assert!(api_key_allows_method("read", &Method::GET));
-        assert!(!api_key_allows_method("read", &Method::POST));
-        assert!(api_key_allows_method("write", &Method::DELETE));
-        assert!(!api_key_allows_method("write", &Method::GET));
-        assert!(api_key_allows_method("*", &Method::PATCH));
+        assert!(api_key_allows_request(
+            "read",
+            &Method::GET,
+            "/api/v1/files"
+        ));
+        assert!(!api_key_allows_request(
+            "read",
+            &Method::POST,
+            "/api/v1/files"
+        ));
+        assert!(api_key_allows_request(
+            "files:write",
+            &Method::DELETE,
+            "/api/v1/files/123"
+        ));
+        assert!(!api_key_allows_request(
+            "files:write",
+            &Method::POST,
+            "/api/v1/documents"
+        ));
+        assert!(api_key_allows_request(
+            "documents:read,files:write",
+            &Method::GET,
+            "/api/v1/documents/123"
+        ));
+        assert!(api_key_allows_request(
+            "*",
+            &Method::PATCH,
+            "/api/v1/admin/users/123"
+        ));
     }
 }

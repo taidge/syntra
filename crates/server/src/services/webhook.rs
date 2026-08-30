@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use chrono::Utc;
 use diesel::SqliteConnection;
@@ -17,6 +17,10 @@ const RETRY_DELAYS: &[u64] = &[5, 30, 180];
 
 /// Maximum number of delivery attempts (1 initial + 3 retries = 4 total).
 const MAX_ATTEMPTS: usize = 4;
+
+/// Bound untrusted webhook responses before buffering them in memory and
+/// persisting them in SQLite.
+const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024;
 
 pub struct WebhookService;
 
@@ -108,17 +112,39 @@ impl WebhookService {
 fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let octets = v4.octets();
             v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.is_broadcast()
-                || v4.octets()[0] == 0
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || octets[0] == 0
+                // Shared address space 100.64.0.0/10.
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                // IETF protocol assignments and deprecated 6to4 relay anycast.
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+                // Benchmarking 198.18.0.0/15.
+                || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+                // Reserved 240.0.0.0/4.
+                || octets[0] >= 240
         }
         IpAddr::V6(v6) => {
             let seg = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
+                || v6.is_multicast()
+                // Only globally routed unicast space 2000::/3 is eligible.
+                || (seg[0] & 0xe000) != 0x2000
+                // IETF protocol assignments 2001::/23.
+                || (seg[0] == 0x2001 && seg[1] < 0x0200)
+                // Documentation 2001:db8::/32 and 3fff::/20.
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+                || (seg[0] == 0x3fff && (seg[1] & 0xf000) == 0)
+                // Deprecated 6to4 2002::/16.
+                || seg[0] == 0x2002
                 // Unique-local fc00::/7
                 || (v6.octets()[0] & 0xfe) == 0xfc
                 // Link-local fe80::/10
@@ -129,11 +155,99 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Resolve and pin a webhook hostname to a validated public address. Every
+/// resolved A/AAAA record must be public; accepting a mixed public/private set
+/// would leave room for resolver ordering attacks. The returned client has
+/// environment proxies disabled so the pinned destination cannot be bypassed.
+async fn client_for_webhook(raw: &str) -> Result<(reqwest::Client, reqwest::Url), String> {
+    if !is_safe_webhook_url(raw) {
+        return Err("unsafe URL scheme or host".into());
+    }
+
+    let url = reqwest::Url::parse(raw).map_err(|e| format!("invalid URL: {e}"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "webhook URL has no host".to_string())?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "webhook URL has no usable port".to_string())?;
+
+    let (pin_host, addresses) = match host.parse::<IpAddr>() {
+        Ok(ip) => (None, vec![SocketAddr::new(ip, port)]),
+        Err(_) => {
+            let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+                .await
+                .map_err(|e| format!("DNS resolution failed: {e}"))?
+                .collect();
+            (Some(host.to_string()), resolved)
+        }
+    };
+
+    if addresses.is_empty() {
+        return Err("DNS resolution returned no addresses".into());
+    }
+    if addresses.iter().any(|address| is_blocked_ip(address.ip())) {
+        return Err("DNS resolution returned an internal or reserved address".into());
+    }
+
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(host) = pin_host {
+        builder = builder.resolve(&host, addresses[0]);
+    }
+    let client = builder
+        .build()
+        .map_err(|e| format!("HTTP client setup failed: {e}"))?;
+    Ok((client, url))
+}
+
+async fn read_bounded_response_body(response: &mut reqwest::Response) -> String {
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or(0)
+            .min(MAX_RESPONSE_BODY_BYTES as u64) as usize,
+    );
+    let mut truncated = response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BODY_BYTES as u64);
+
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_RESPONSE_BODY_BYTES.saturating_sub(body.len());
+                if chunk.len() > remaining {
+                    body.extend_from_slice(&chunk[..remaining]);
+                    truncated = true;
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+                if body.len() == MAX_RESPONSE_BODY_BYTES {
+                    // Stop without requesting another untrusted chunk. An
+                    // exact-size body may receive the marker, which is safer
+                    // than buffering beyond the hard limit to distinguish it.
+                    truncated = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return format!("Failed to read response body: {e}"),
+        }
+    }
+
+    let mut text = String::from_utf8_lossy(&body).into_owned();
+    if truncated {
+        text.push_str("\n[response truncated at 65536 bytes]");
+    }
+    text
+}
+
 /// Validate that a webhook target URL is safe to call: an http(s) URL whose
 /// host is not localhost or an internal/private IP. This is a best-effort SSRF
-/// guard; IP-literal hosts are checked directly, hostnames are checked against
-/// obvious internal suffixes (it does not resolve DNS, so DNS-rebinding is out
-/// of scope).
+/// guard for the static URL shape. IP-literal hosts are checked directly and
+/// hostnames are checked against obvious internal suffixes; `client_for_webhook`
+/// performs the authoritative DNS validation and connection pinning.
 fn is_safe_webhook_url(raw: &str) -> bool {
     let url = match reqwest::Url::parse(raw) {
         Ok(u) => u,
@@ -184,12 +298,20 @@ async fn deliver_with_retry(
         return;
     }
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
     for attempt in 0..MAX_ATTEMPTS {
+        // Resolve again for every retry and pin the connection to the checked
+        // address. This closes the DNS-rebinding gap between validation and
+        // connection establishment.
+        let (client, target_url) = match client_for_webhook(&hook.url).await {
+            Ok(target) => target,
+            Err(e) => {
+                let message = format!("Refused webhook target: {e}");
+                update_delivery(&pool, &delivery_id, None, Some(&message), false);
+                tracing::warn!("WebhookService: {message}");
+                return;
+            }
+        };
+
         tracing::info!(
             "WebhookService: POST attempt {}/{} event={} to url={} (webhook={})",
             attempt + 1,
@@ -200,7 +322,7 @@ async fn deliver_with_retry(
         );
 
         let mut request = client
-            .post(&hook.url)
+            .post(target_url)
             .header("Content-Type", "application/json")
             .header("X-Webhook-Event", &event);
 
@@ -216,12 +338,9 @@ async fn deliver_with_retry(
         let result = request.body(payload.clone()).send().await;
 
         match result {
-            Ok(response) => {
+            Ok(mut response) => {
                 let status = response.status().as_u16() as i32;
-                let body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|e| format!("Failed to read response body: {e}"));
+                let body = read_bounded_response_body(&mut response).await;
                 let success = (200..300).contains(&status);
 
                 update_delivery(&pool, &delivery_id, Some(status), Some(&body), success);
@@ -296,7 +415,8 @@ fn update_delivery(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_signature, is_safe_webhook_url};
+    use super::{MAX_RESPONSE_BODY_BYTES, compute_signature, is_blocked_ip, is_safe_webhook_url};
+    use std::net::IpAddr;
 
     #[test]
     fn webhook_signature_matches_hmac_sha256_test_vector() {
@@ -315,5 +435,35 @@ mod tests {
         ));
         assert!(!is_safe_webhook_url("file:///etc/passwd"));
         assert!(is_safe_webhook_url("https://hooks.example.com/events"));
+    }
+
+    #[test]
+    fn webhook_ip_filter_rejects_non_public_ranges() {
+        for value in [
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "192.0.2.1",
+            "192.88.99.1",
+            "198.18.0.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "::1",
+            "100::1",
+            "2001:db8::1",
+            "2002::1",
+            "3fff::1",
+            "fc00::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(is_blocked_ip(value.parse::<IpAddr>().unwrap()), "{value}");
+        }
+        assert!(!is_blocked_ip("8.8.8.8".parse().unwrap()));
+        assert_eq!(MAX_RESPONSE_BODY_BYTES, 65_536);
     }
 }

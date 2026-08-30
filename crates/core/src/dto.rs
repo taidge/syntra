@@ -774,26 +774,6 @@ pub struct ClientLogEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Integration
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IntegrationSettingsRequest {
-    pub is_enabled: Option<bool>,
-    pub api_url: Option<String>,
-    pub api_key: Option<String>,
-    pub extra_config: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IntegrationSettingsResponse {
-    pub service_name: String,
-    pub is_enabled: bool,
-    pub api_url: Option<String>,
-    pub extra_config: Option<serde_json::Value>,
-}
-
-// ---------------------------------------------------------------------------
 // Conversion
 // ---------------------------------------------------------------------------
 

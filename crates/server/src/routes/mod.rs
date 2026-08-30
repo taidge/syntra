@@ -309,16 +309,6 @@ fn admin_routes() -> Router {
                 .delete(handlers::client_log::clear_client_logs),
         )
         .push(
-            Router::with_path("integrations")
-                .get(handlers::integrations::list_integrations)
-                .push(
-                    Router::with_path("{service_name}")
-                        .get(handlers::integrations::get_integration)
-                        .put(handlers::integrations::update_integration)
-                        .delete(handlers::integrations::delete_integration),
-                ),
-        )
-        .push(
             Router::with_path("monitoring")
                 .get(handlers::monitoring::get_monitoring)
                 .push(Router::with_path("documents").get(handlers::monitoring::get_document_stats)),

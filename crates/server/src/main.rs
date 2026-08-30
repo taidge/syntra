@@ -234,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
         "migrations/021_document_signatures.sql",
         "migrations/022_tenants.sql",
         "migrations/023_remove_oauth.sql",
+        "migrations/024_remove_integration_settings.sql",
     ];
 
     let mut conn = db.get()?;

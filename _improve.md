@@ -1,8 +1,8 @@
 # 改进审查报告
 
-## 第十二轮复审（2026-08-30，当前结论）
+## 第十二轮复审（2026-08-30 至 2026-08-31，当前结论）
 
-本轮从本地 `main@4cf95ef` 开始，覆盖 Rust workspace、HTTP 路由与认证中间件、配置/迁移、前端四类编辑器、Office 导入导出以及现有测试。开始时工作区干净；仓库没有配置 remote，因此只能确认 `main` 是全部本地引用中的最新提交，不能证明或拉取远端最新版本。
+本轮从本地 `main@4cf95ef` 开始，并在 `main@887d424` 上继续完成未勾选项，覆盖 Rust workspace、HTTP 路由与认证中间件、配置/迁移、前端四类编辑器、Office 导入导出以及现有测试。仓库没有配置 remote，因此只能确认 `main` 是全部本地引用中的最新提交，不能证明或拉取远端最新版本。
 
 ### 本轮已改进
 
@@ -14,19 +14,18 @@
 - [x] **第三方集成密钥仍会在更新/创建响应中原样回吐。** 旧报告只修复了 list/get，upsert 两个响应仍返回 `api_key`。现四类响应都只返回 `has_api_key`，并增加回归测试保证响应正文不含密钥。
 - [x] **Capabilities 返回与实际配置/实现不一致。** `max_upload_size_mb` 固定写成 100（生产配置实际为 500，测试配置为 10），还宣称未实现的 50 MB 文档限制和 LanguageTool/DeepL 集成。现上传限制读取运行时配置、删除虚假的文档限制、未接入集成返回空数组，并公开 `api_key_authentication=true`。
 - [x] **最新依赖审计发现 `h2 0.4.15` DoS 漏洞及已撤回的 `chacha20 0.10.1`。** 已将锁文件分别更新到 `h2 0.4.16`、`chacha20 0.10.2`；重新扫描 559 个依赖为 0 vulnerability、0 warning。
+- [x] **Webhook DNS SSRF / DNS rebinding。** 投递前及每次重试都会重新解析全部 A/AAAA，拒绝任一私网、环回、链路本地、共享地址、基准测试、组播、未指定和保留地址；请求禁用环境代理与重定向，并把连接固定到本次已校验地址，避免 DNS 二次解析绕过。
+- [x] **Webhook 响应体可造成内存/数据库放大。** 响应改为流式读取且最多保留 64 KiB，超限内容写入明确截断标记，不再调用无界 `response.text()`。
+- [x] **未接入的第三方集成 CRUD 与明文 secret。** LanguageTool/DeepL 等配置没有消费者或前端入口，却把 `api_key` 明文写入 SQLite。现删除 handler、路由、DTO、模型和 schema，并新增迁移 024 删除 `integration_settings` 表；Capabilities 继续诚实返回空集成列表。
+- [x] **API Key 只能做全局读/写授权。** 在保留 `read`、`write`、`*` 兼容性的同时，新增 `<resource>:read` / `<resource>:write`（如 `documents:read,files:write`），按 `/api/v1/<resource>` 路由族执行且拒绝未知资源/动作；端到端测试验证 `folders:write` 可建文件夹但不能写 documents。
+- [x] **Writer 图片在 DOCX 中退化为文本占位。** DOCX 导出会把 PNG/JPEG/GIF base64 data URL 写入 `word/media`、关系文件和真实 `w:drawing`，保留尺寸与 alt text；导入会安全解析关系并恢复 `Block::Image`，同时限制单图 20 MiB、总计 50 MiB、拒绝关系路径穿越。远程 URL 不由同步导出器主动抓取，仍以可见占位保留。
 
 ### 仍待处理：安全与可靠性
 
-- [ ] **P1 — Webhook DNS SSRF / DNS rebinding。** 当前会拒绝私网/环回 IP 字面量和明显的内部域名，也禁用重定向，但主机名没有在连接前解析并固定到已验证的公网地址。恶意 DNS 可把看似公网的域名解析到内网。建议解析全部 A/AAAA、拒绝任何保留/私网地址，并将连接固定到校验后的地址，重试时重新校验。
-- [ ] **P1 — 第三方集成 secret 明文落 SQLite。** API 已不再回吐 `api_key`，但 `integration_settings.api_key` 仍以明文保存，数据库备份也会携带该 secret。应使用外部 secret manager，或用独立于数据库的主密钥做信封加密；在没有真实消费者前也可直接删除这套未接入配置。
 - [ ] **P2 — CSP 仍允许 `unsafe-inline` 与 `unsafe-eval`。** 这会明显削弱 XSS 防护。需要确认 Dioxus 产物约束后改用 nonce/hash，逐步移除两项放行，并补浏览器端 CSP 回归测试。
-- [ ] **P2 — Webhook 响应体无显式大小上限。** 投递端会完整缓冲对方响应再写入 `webhook_deliveries`，恶意目标可制造内存/数据库放大。应限制读取字节数并截断持久化内容。
-- [ ] **P2 — API Key scope 粒度只有读/写。** 当前足以让功能从“不可用”变为可安全执行，但还不能限制到 documents/files/admin 等资源域。面向第三方自动化开放前，建议增加资源级 scope 和敏感账户操作的显式禁止规则。
 
 ### 仍待处理：死代码、未完成或未接入
 
-- [ ] **P1 — `integration_settings` 仍只有管理 CRUD，没有 LanguageTool/DeepL 的调用链或前端入口。** 这是典型“配置写了但没有功能消费者”。应选择其一：完整接入并做超时、配额、SSRF、密钥保护；或删除 handler、路由、模型、schema 和迁移，避免形成虚假能力面。
-- [ ] **P1 — Writer 图片模型未接入完整 OOXML。** `Block::Image` 已存在，但 DOCX 导出仍输出 `[Image: ...]` 文本占位，图片在 Office 往返中丢失。需要 media part、relationship、尺寸/DPI、alt text 以及导入反向映射。
 - [ ] **P1 — Slides 媒体/图表/组合对象导出未完成。** PPTX 导出把 Image、Chart、Video、Group 变成带标签矩形；这避免静默丢失位置，却不是真实 Office 兼容实现。
 - [ ] **P2 — Calc 条件格式只存在于 doc-engine 数据模型。** 前端没有编辑、渲染和导入/导出闭环；同类表格产品常见的数据验证、命名区域、数据透视表也尚未看到实现。
 - [ ] **P2 — Slides/Whiteboard 没有实时协作发送链路。** Writer 和 Calc 已连接协作 WebSocket，Slides/Whiteboard 页面没有对应客户端接线；多人同时编辑时只能依赖保存覆盖，容易丢更新。
@@ -35,7 +34,7 @@
 
 ### 产品能力建议（按价值排序）
 
-- [ ] **Office 保真优先：** 先完成 DOCX/PPTX 图片、图表和分组对象往返，再扩充格式种类；对办公产品而言，“能打开但内容降级”比缺少一个边缘按钮更影响可信度。
+- [ ] **Office 保真优先：** DOCX 内嵌图片已经完成；下一步完成 PPTX 图片、图表和分组对象往返，再扩充格式种类。对办公产品而言，“能打开但内容降级”比缺少一个边缘按钮更影响可信度。
 - [ ] **协作一致性：** 为 Slides/Whiteboard 接入实时同步，并把 Calc 从整 workbook `Replace` 演进为单元格级操作，加入冲突提示与断线恢复测试。
 - [ ] **Calc 数据工具：** 条件格式、数据验证、冻结窗格、命名区域、数据透视表和更完整图表持久化，是与 Excel/Google Sheets/OnlyOffice 的主要差距。
 - [ ] **Writer 专业排版：** 页眉页脚、页码、分页/分节、脚注、目录、引用与审阅合并，是与 Word/Google Docs 的主要差距。
@@ -46,12 +45,12 @@
 
 - [x] 新增 API Key 认证单元测试 2 项通过。
 - [x] 新增 API Key 端到端测试 2 项通过。
-- [x] 服务端 lib 单元测试 33 项通过（含新增 Webhook HMAC/URL 测试）。
-- [x] 集成密钥不回吐回归测试通过。
+- [x] 服务端 lib/main 单元测试各 34 项通过（含新增 Webhook HMAC、URL 与公网地址范围测试）。
+- [x] 废弃集成配置的 handler/路由/schema/model/DTO 已无残留引用，完整 API 测试启动链成功执行迁移 024。
 - [x] `cargo fmt --all -- --check` 与 `git diff --check` 通过。
 - [x] `cargo check --workspace --all-targets` 通过且无 warning。
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 通过。
-- [x] `cargo test --workspace --all-targets` 使用更新后的锁文件通过，共 368 项（collab 12、doc-engine 82、export 43、frontend 23、server lib/main 各 33、server API 142）。
+- [x] `cargo test --workspace --all-targets` 使用更新后的锁文件通过，共 370 项（collab 12、doc-engine 82、export 44、frontend 23、server lib/main 各 34、server API 141）。
 - [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
 - [x] `cargo audit` 扫描 559 个依赖，结果为 0 vulnerability、0 warning。
 - [x] Playwright `--list` 在 `e2e/` 成功发现 87 项测试。

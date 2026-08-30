@@ -131,6 +131,7 @@ impl TestServer {
                 "021_document_signatures.sql",
                 "022_tenants.sql",
                 "023_remove_oauth.sql",
+                "024_remove_integration_settings.sql",
             ];
             for migration_file in &additional_migrations {
                 if let Ok(sql) = std::fs::read_to_string(migration_dir.join(migration_file)) {

@@ -15,6 +15,7 @@ zip = { workspace = true }
 quick-xml = { workspace = true }
 calamine = { workspace = true }
 uuid = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 uuid = { workspace = true }
