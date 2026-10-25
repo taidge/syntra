@@ -60,21 +60,42 @@ pub fn Login(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     let error = scope.cage(String::new());
     let loading = scope.cage(false);
     let weak = scope.downgrade();
-    col().class("auth-page").fill(
-        col().class("auth-card").fill((
-            heading(crate::i18n::t("auth.login_title")),
+    view().class("auth-page").fill(
+        view().class("auth-card").fill((
+            view().class("auth-header").fill((
+                heading(crate::i18n::t("auth.login_title")),
+                label(crate::i18n::t("auth.login_subtitle")).class("auth-subtitle"),
+            )),
             sapid::form("login")
                 .theme(theme())
+                .unstyled()
                 .enabled(scope.bond(move || !loading.get()))
                 .on_submit(move |_| submit(&weak, auth, email, password, code, error, loading))
                 .fill((
-                    field(crate::i18n::t("auth.email"), email, Purpose::Email),
-                    field(crate::i18n::t("auth.password"), password, Purpose::Password),
-                    field(crate::i18n::t("auth.totp_code"), code, Purpose::Text),
-                    label(crate::i18n::t("auth.totp_hint")),
-                    status(error),
+                    field_placeholder(
+                        crate::i18n::t("auth.email"),
+                        email,
+                        Purpose::Email,
+                        crate::i18n::t("auth.email_placeholder"),
+                    ),
+                    field_placeholder(
+                        crate::i18n::t("auth.password"),
+                        password,
+                        Purpose::Password,
+                        crate::i18n::t("auth.password_placeholder"),
+                    ),
+                    field_placeholder(
+                        crate::i18n::t("auth.totp_code"),
+                        code,
+                        Purpose::Text,
+                        crate::i18n::t("auth.totp_placeholder"),
+                    ),
+                    label(crate::i18n::t("auth.totp_hint")).class("form-hint"),
+                    status(error).class("form-error"),
                     sapid::submit_button()
                         .theme(theme())
+                        .unstyled()
+                        .class("btn btn-primary btn-block")
                         .label(scope.bond(move || {
                             crate::i18n::t(if loading.get() {
                                 "auth.signing_in"
@@ -83,7 +104,10 @@ pub fn Login(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                             })
                         })),
                 )),
-            anchor(crate::i18n::t("auth.register_link"), "/register"),
+            view().class("auth-footer").fill((
+                label(crate::i18n::t("auth.no_account")),
+                anchor(crate::i18n::t("auth.register_link"), "/register"),
+            )),
         )),
     )
 }

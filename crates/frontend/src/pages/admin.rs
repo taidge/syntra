@@ -47,6 +47,20 @@ fn users_load(
         }
     });
 }
+fn choice(name: &str, value: Cage<String>, options: Vec<(&str, String)>) -> sapid::NativeSelect {
+    sapid::native_select(name.replace(' ', "-").to_ascii_lowercase())
+        .theme(theme())
+        .unstyled()
+        .class("form-select")
+        .label(name)
+        .value(value.map(|value| Some(value.clone())))
+        .options(
+            options
+                .into_iter()
+                .map(|(key, label)| sapid::select_option(key, label)),
+        )
+        .on_value_change(move |selected| set(value, selected.unwrap_or_default()))
+}
 #[allow(non_snake_case)]
 pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     let allowed = auth.get().user.is_some_and(|user| user.role == "admin");
@@ -62,6 +76,9 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     let activity = scope.cage(Vec::<Activity>::new());
     let feedback = scope.cage(String::new());
     let search = scope.cage(String::new());
+    let role_filter = scope.cage("all".to_string());
+    let activity_search = scope.cage(String::new());
+    let action_filter = scope.cage("all".to_string());
     load::<Stats>(&scope, "/admin/stats".into(), auth, stats);
     users_load(&scope, auth, users, feedback);
     let activity_token = token(auth);
@@ -102,6 +119,7 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     let email = scope.cage(String::new());
     let password = scope.cage(String::new());
     let selected_role = scope.cage("editor".to_string());
+    let create_open = scope.cage(false);
     let create_weak = scope.downgrade();
     let users_weak = scope.downgrade();
     let settings_weak = scope.downgrade();
@@ -114,24 +132,101 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 format!("{} {}", user.username, user.email)
                     .to_lowercase()
                     .contains(&search)
+                    && (role_filter.get() == "all" || user.role == role_filter.get())
             })
             .collect::<Vec<_>>()
     });
     let overview = when(scope.bond(move || tab.get() == "overview"), move || {
         widget(move |mounted_scope| {
-            let totals = result_text(mounted_scope, stats, |stats| {
-                format!(
-                    "Users: {}\nFiles: {}\nDocuments: {}\nStorage: {} MB",
-                    stats.total_users,
-                    stats.total_files,
-                    stats.total_documents,
-                    stats.total_storage_used / 1_048_576,
-                )
-            });
-            col().class("admin-grid").fill(totals).build(mounted_scope)
+            let cards = [
+                ("U", "users", "admin.total_users"),
+                ("F", "files", "admin.total_files"),
+                ("D", "docs", "admin.total_documents"),
+                ("S", "storage", "admin.storage_used"),
+            ]
+            .into_iter()
+            .map(|(icon, key, title)| {
+                view().class("stat-card").fill((
+                    view()
+                        .class(format!("stat-icon {key}-icon"))
+                        .fill(label(icon)),
+                    view().class("stat-info").fill((
+                        text()
+                            .kind(TextKind::Heading(3))
+                            .content(crate::i18n::t(title)),
+                        result_text(mounted_scope, stats, move |stats| match key {
+                            "users" => stats.total_users.to_string(),
+                            "files" => stats.total_files.to_string(),
+                            "docs" => stats.total_documents.to_string(),
+                            _ => format!("{} MB", stats.total_storage_used / 1_048_576),
+                        })
+                        .class("stat-value"),
+                    )),
+                ))
+            })
+            .collect::<Vec<_>>();
+            let bars = [
+                ("admin.total_users", "users"),
+                ("admin.total_files", "files"),
+                ("admin.total_documents", "docs"),
+            ]
+            .into_iter()
+            .map(|(title, key)| {
+                view().class("chart-bar-row").fill((
+                    label(crate::i18n::t(title)).class("chart-bar-label"),
+                    view()
+                        .class("chart-bar-track")
+                        .fill(
+                            view()
+                                .class("chart-bar-fill")
+                                .style(stats.map(move |value| {
+                                    let (value, max) = value
+                                        .as_ref()
+                                        .and_then(|value| value.as_ref().ok())
+                                        .map(|stats| {
+                                            let n = match key {
+                                                "users" => stats.total_users,
+                                                "files" => stats.total_files,
+                                                _ => stats.total_documents,
+                                            };
+                                            (
+                                                n,
+                                                stats
+                                                    .total_users
+                                                    .max(stats.total_files)
+                                                    .max(stats.total_documents)
+                                                    .max(1),
+                                            )
+                                        })
+                                        .unwrap_or((0, 1));
+                                    Style::new()
+                                        .width(Length::Percent(value as f64 / max as f64 * 100.))
+                                })),
+                        ),
+                    result_text(mounted_scope, stats, move |stats| match key {
+                        "users" => stats.total_users.to_string(),
+                        "files" => stats.total_files.to_string(),
+                        _ => stats.total_documents.to_string(),
+                    })
+                    .class("chart-bar-value"),
+                ))
+            })
+            .collect::<Vec<_>>();
+            view()
+                .fill((
+                    view().class("admin-grid").fill(cards),
+                    view().class("admin-charts").fill(
+                        view().class("chart-card").fill((
+                            text()
+                                .kind(TextKind::Heading(3))
+                                .content(crate::i18n::t("admin.totals_chart")),
+                            view().class("chart-bars").fill(bars),
+                        )),
+                    ),
+                ))
+                .build(mounted_scope)
         })
     });
-
     let user_panel = when(scope.bond(move || tab.get() == "users"), move || {
         let create_weak = create_weak.clone();
         let users_weak = users_weak.clone();
@@ -144,20 +239,8 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 let disable_weak = users_weak.clone();
                 let role_id = user.id.clone();
                 let disable_id = user.id.clone();
-                let details = label(format!(
-                    "{} · {} · {} · {} bytes · {}",
-                    user.username,
-                    user.email,
-                    user.role,
-                    user.storage_used,
-                    user.last_login_at.unwrap_or_default(),
-                ));
-                let update_role = action("Set role", move || {
-                    let Some(window) = web_sys::window() else {
-                        return;
-                    };
-                    let Ok(Some(role)) = window.prompt_with_message("Role: admin, editor, viewer")
-                    else {
+                let update_role = move |selected: Option<String>| {
+                    let Some(role) = selected else {
                         return;
                     };
                     if !["admin", "editor", "viewer"].contains(&role.as_str()) {
@@ -181,7 +264,7 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                             Err(error) => set(feedback, error),
                         }
                     });
-                });
+                };
                 let disable = action("Disable", move || {
                     let confirmed = web_sys::window().is_some_and(|window| {
                         window
@@ -214,10 +297,32 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                         }
                     });
                 });
-                row().fill((details, update_role, disable))
+                view().class("admin-user-row").fill((
+                    text().content(item.map(|user| user.username.clone())),
+                    text().content(item.map(|user| user.email.clone())),
+                    sapid::native_select(format!("user-role-{}", user.id))
+                        .theme(theme())
+                        .unstyled()
+                        .class("form-select")
+                        .label(crate::i18n::t("admin.col.role"))
+                        .value(item.map(|user| Some(user.role.clone())))
+                        .options(["admin", "editor", "viewer"].map(|role| {
+                            sapid::select_option(
+                                role,
+                                crate::i18n::t(&format!("admin.role.{role}")),
+                            )
+                        }))
+                        .on_value_change(update_role),
+                    text()
+                        .content(item.map(|user| format!("{} MB", user.storage_used / 1_048_576))),
+                    text().content(item.map(|user| user.last_login_at.clone().unwrap_or_default())),
+                    row()
+                        .class("table-actions")
+                        .fill(disable.unstyled().class("btn btn-outline btn-sm danger")),
+                ))
             },
         );
-        let create = action("Create user", move || {
+        let create_submit = std::rc::Rc::new(std::cell::RefCell::new(move || {
             if password.get().len() < 8 {
                 set(feedback, crate::i18n::t("profile.password_too_short"));
                 return;
@@ -264,44 +369,159 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                             users_load(&scope, auth, users, feedback);
                         }
                         set(feedback, "User created".into());
+                        set(create_open, false);
                     }
                     Err(error) => set(feedback, error),
                 }
             });
-        });
-        col().fill((
-            field(crate::i18n::t("common.search"), search, Purpose::Search),
-            col().fill(rows),
-            heading("Create user"),
-            field(crate::i18n::t("auth.username"), username, Purpose::Text),
-            field(crate::i18n::t("auth.email"), email, Purpose::Email),
-            field(crate::i18n::t("auth.password"), password, Purpose::Password),
-            field("Role", selected_role, Purpose::Text),
-            create,
+        }));
+        view().class("admin-section").fill((
+            view().class("section-header").fill((
+                text()
+                    .kind(TextKind::Heading(2))
+                    .content(crate::i18n::t("admin.users_heading")),
+                action(crate::i18n::t("admin.add_user"), move || {
+                    set(create_open, true)
+                })
+                .unstyled()
+                .class("btn btn-primary btn-sm"),
+            )),
+            view().class("admin-filter-bar").fill((
+                sapid::text_field()
+                    .theme(theme())
+                    .unstyled()
+                    .class("form-input")
+                    .name(crate::i18n::t("admin.search_users"))
+                    .placeholder(crate::i18n::t("admin.search_users"))
+                    .value(search)
+                    .on_value_change(move |value| set(search, value)),
+                choice(
+                    "Role filter",
+                    role_filter,
+                    vec![
+                        ("all", crate::i18n::t("admin.all_roles")),
+                        ("admin", crate::i18n::t("admin.role.admin")),
+                        ("editor", crate::i18n::t("admin.role.editor")),
+                        ("viewer", crate::i18n::t("admin.role.viewer")),
+                    ],
+                ),
+            )),
+            view().class("admin-user-table").fill((
+                view().class("admin-user-row admin-user-head").fill(
+                    [
+                        "Username",
+                        "Email",
+                        "Role",
+                        "Storage Used",
+                        "Last login",
+                        "Actions",
+                    ]
+                    .into_iter()
+                    .map(label)
+                    .collect::<Vec<_>>(),
+                ),
+                rows,
+            )),
+            sapid::dialog("admin-create-user")
+                .theme(theme())
+                .class("office-modal")
+                .title(crate::i18n::t("admin.add_user"))
+                .close_label(crate::i18n::t("common.close"))
+                .close_content(|| text().kind(TextKind::Inline).content("×"))
+                .show_trigger(false)
+                .open(create_open)
+                .on_open_change(move |value| set(create_open, value))
+                .content({
+                    let create_submit = create_submit.clone();
+                    move || {
+                        view().class("modal-form modal-body").fill((
+                            field(crate::i18n::t("auth.username"), username, Purpose::Text),
+                            field(crate::i18n::t("auth.email"), email, Purpose::Email),
+                            field(crate::i18n::t("auth.password"), password, Purpose::Password),
+                            field("Role", selected_role, Purpose::Text),
+                            view().class("modal-actions").fill((
+                                action(crate::i18n::t("common.cancel"), move || {
+                                    set(create_open, false)
+                                })
+                                .unstyled()
+                                .class("btn btn-outline"),
+                                action("Create user", {
+                                    let create_submit = create_submit.clone();
+                                    move || (create_submit.borrow_mut())()
+                                })
+                                .unstyled()
+                                .class("btn btn-primary"),
+                            )),
+                        ))
+                    }
+                }),
         ))
     });
 
+    let shown_activity = scope.bond(move || {
+        let needle = activity_search.get().to_lowercase();
+        activity
+            .get()
+            .into_iter()
+            .filter(|entry| {
+                (action_filter.get() == "all" || action_filter.get() == entry.action)
+                    && format!(
+                        "{} {} {} {}",
+                        entry.user_id, entry.action, entry.resource_type, entry.resource_id
+                    )
+                    .to_lowercase()
+                    .contains(&needle)
+            })
+            .collect::<Vec<_>>()
+    });
     let activity_panel = when(scope.bond(move || tab.get() == "activity"), move || {
-        col().fill(each(
-            activity,
-            |entry| entry.id.clone(),
-            |entry, _| {
-                let entry = entry.get();
-                label(format!(
-                    "{} · {} · {} · {}/{}",
-                    entry.created_at,
-                    entry.user_id,
-                    entry.action,
-                    entry.resource_type,
-                    entry.resource_id,
-                ))
-            },
+        view().class("admin-section admin-activity").fill((
+            text()
+                .kind(TextKind::Heading(2))
+                .content(crate::i18n::t("admin.activity_log")),
+            view().class("admin-filter-bar").fill((
+                sapid::text_field()
+                    .theme(theme())
+                    .unstyled()
+                    .class("form-input")
+                    .name(crate::i18n::t("admin.search_activity"))
+                    .placeholder(crate::i18n::t("admin.search_activity"))
+                    .value(activity_search)
+                    .on_value_change(move |value| set(activity_search, value)),
+                choice(
+                    "Action filter",
+                    action_filter,
+                    std::iter::once(("all", crate::i18n::t("admin.all_actions")))
+                        .chain(
+                            ["create", "update", "delete", "share", "login"]
+                                .into_iter()
+                                .map(|action| {
+                                    (action, crate::i18n::t(&format!("admin.action.{action}")))
+                                }),
+                        )
+                        .collect(),
+                ),
+            )),
+            view().class("activity-log").fill(each(
+                shown_activity,
+                |entry| entry.id.clone(),
+                |entry, _| {
+                    let entry = entry.get();
+                    view().class("log-entry").fill((
+                        label(entry.created_at).class("log-time"),
+                        label(entry.user_id).class("log-user"),
+                        label(entry.action).class("log-action"),
+                        label(format!("{}/{}", entry.resource_type, entry.resource_id))
+                            .class("log-resource"),
+                    ))
+                },
+            )),
         ))
     });
 
     let settings_panel = when(scope.bond(move || tab.get() == "settings"), move || {
         let weak = settings_weak.clone();
-        let save = action(crate::i18n::t("common.save"), move || {
+        let save = action(crate::i18n::t("admin.save_settings"), move || {
             let Some(scope) = weak.upgrade() else {
                 return;
             };
@@ -329,16 +549,41 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 set(feedback, crate::i18n::t("admin.settings_saved"));
             });
         });
-        col().fill((
-            field("Default quota (MB)", quota, Purpose::Number),
-            field("Maximum upload (MB)", upload, Purpose::Number),
-            field(
-                "Allow registration (true/false)",
-                registration,
-                Purpose::Text,
-            ),
-            field("Default role", role, Purpose::Text),
-            save,
+        view().class("admin-section admin-settings").fill((
+            text()
+                .kind(TextKind::Heading(2))
+                .content(crate::i18n::t("admin.system_settings")),
+            view().class("settings-form").fill((
+                field(
+                    crate::i18n::t("admin.default_quota"),
+                    quota,
+                    Purpose::Number,
+                ),
+                field(crate::i18n::t("admin.max_upload"), upload, Purpose::Number),
+                view().class("form-group").fill((
+                    label(crate::i18n::t("admin.allow_registration")).class("form-label"),
+                    choice(
+                        "Allow registration",
+                        registration,
+                        vec![
+                            ("true", crate::i18n::t("admin.yes")),
+                            ("false", crate::i18n::t("admin.no")),
+                        ],
+                    ),
+                )),
+                view().class("form-group").fill((
+                    label(crate::i18n::t("admin.default_role")).class("form-label"),
+                    choice(
+                        "Default role",
+                        role,
+                        vec![
+                            ("editor", crate::i18n::t("admin.role.editor")),
+                            ("viewer", crate::i18n::t("admin.role.viewer")),
+                        ],
+                    ),
+                )),
+                save.unstyled().class("btn btn-primary"),
+            )),
         ))
     });
 
@@ -348,16 +593,28 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
             action(crate::i18n::t(&format!("admin.tab.{value}")), move || {
                 set(tab, value.into());
             })
+            .unstyled()
+            .class(tab.map(move |tab| {
+                if tab == value {
+                    "tab-btn active".to_string()
+                } else {
+                    "tab-btn".to_string()
+                }
+            }))
         })
         .collect::<Vec<_>>();
-    let panel = col().class("admin-panel").fill((
+    let panel = view().class("admin-panel").fill((
         heading(crate::i18n::t("admin.title")),
-        row().class("admin-tabs").fill(tabs),
+        view().class("admin-tabs").fill(tabs),
         status(feedback),
         overview,
         user_panel,
         activity_panel,
         settings_panel,
     ));
-    Box::new(col().fill((Navbar(scope, auth), panel))) as Box<dyn Widget>
+    Box::new(
+        view()
+            .class("app-page admin-page")
+            .fill((Navbar(scope, auth), panel)),
+    ) as Box<dyn Widget>
 }

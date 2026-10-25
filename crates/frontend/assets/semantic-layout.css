@@ -1,0 +1,98 @@
+/* Keep the original Office stylesheet authoritative over semantic host resets. */
+#main { min-height: 100vh; }
+#main [data-gly-kind] { min-width: 0; }
+#main .form-group > [data-gly-kind=text]:first-child { margin-bottom: 4px; font-weight: 500; font-size: .875rem; }
+#main .form-input.sapid-text-field { box-sizing: border-box; width: 100%; min-height: 40px; padding: 10px 14px; font: inherit; font-size: .9375rem; line-height: normal; color:var(--text); background:var(--bg-white); border:1px solid var(--border-dark); border-radius:var(--radius-md); }
+#main .form-input.sapid-text-field:focus { outline:2px solid color-mix(in srgb,var(--primary) 20%,transparent); border-color:var(--primary); }
+#main .sapid-button.btn { min-height:0; height:auto; font-family:Arial,sans-serif; font-size:.9375rem; font-weight:500; line-height:normal; border-radius:var(--radius-md); padding:10px 20px; color:var(--primary); background:transparent; border:1px solid var(--border-dark); }
+#main .sapid-button.btn-primary { color:var(--text-white); background:var(--primary); border-color:var(--primary); }
+#main .sapid-button.btn-secondary { color:var(--text-white); background:var(--secondary); border-color:var(--secondary); }
+#main .sapid-button.btn-outline { color:var(--primary); background:transparent; border-color:var(--border-dark); }
+#main .sapid-button.btn-sm { padding:6px 12px; font-size:.8125rem; }
+#main .sapid-button.btn-lg { padding:14px 28px; font-size:1.0625rem; }
+#main .sapid-button.btn-icon, #main .sapid-button.btn-link { min-height:0; height:auto; font:inherit; font-size:.8125rem; padding:4px 8px; background:transparent; color:var(--text-light); border:1px solid var(--border); border-radius:var(--radius-sm); }
+#main .sapid-button.btn-link { border:0; color:var(--primary); }
+#main .form-status:empty { display:none; }
+#main .form-status { white-space:pre-wrap; overflow-wrap:anywhere; color:var(--text-light); font-size:.875rem; }
+#main .not-found { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:75vh; gap:16px; }
+#main .mobile-bar { display:none !important; }
+
+/* Document side panes are fixed surfaces rather than extra document rows. */
+#main .comments-pane, #main .version-pane { position:fixed; top:136px; right:0; bottom:28px; width:320px; max-width:90vw; z-index:120; background:var(--bg-white); color:var(--text); border-left:1px solid var(--border); box-shadow:var(--shadow-lg); display:flex; flex-direction:column; overflow:hidden; }
+#main .comments-pane-header, #main .version-pane-header { flex:0 0 auto; padding:14px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:8px; }
+#main .comments-pane-header h2, #main .version-pane-header h2 { font-size:1rem; }
+#main .comments-pane-header .sapid-button, #main .version-pane-header .sapid-button, #main .ai-pane-header .sapid-button { width:28px; height:28px; min-height:0; padding:0; border:0; background:transparent; color:var(--text-light); font-size:20px; }
+#main .writer-app .comments-pane, #main .writer-app .version-pane,
+#main .whiteboard-app .comments-pane, #main .whiteboard-app .version-pane { top:174px; }
+#main .slides-app .comments-pane, #main .slides-app .version-pane { top:130px; }
+#main .comments-list, #main .version-list { flex:1; min-height:0; overflow:auto; padding:12px 16px; }
+#main .comment-item { padding:12px 0; border-bottom:1px solid var(--border); gap:6px; font-size:.875rem; }
+#main .comment-meta { font-size:.75rem; color:var(--text-light); }
+#main .comment-body { white-space:pre-wrap; overflow-wrap:anywhere; }
+#main .comment-reply { margin-left:16px; padding-left:12px; border-left:2px solid var(--border); }
+#main .comments-compose { flex:0 0 auto; border-top:1px solid var(--border); padding:14px; gap:10px; }
+#main .comments-compose textarea { width:100%; min-height:80px; }
+#main .comment-compose-actions { justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+#main .version-item { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 0; border-bottom:1px solid var(--border); font-size:.8125rem; }
+#main .version-meta { gap:4px; }
+#main .version-meta > :first-child { font-weight:600; }
+#main .pane-empty { color:var(--text-light); padding:16px 0; font-size:.875rem; }
+#main .ai-pane { gap:12px; }
+#main .ai-pane-header { flex:0 0 auto; gap:12px; }
+#main .ai-pane-header h2 { font-size:1rem; }
+#main .ai-modes { flex-wrap:wrap; gap:6px; }
+#main .ai-prompt { width:100%; min-height:90px; }
+#main .ai-answer { white-space:pre-wrap; overflow:auto; max-height:40vh; }
+#main .ai-fab { position:fixed; right:24px; bottom:44px; z-index:130; width:48px; height:48px; min-height:0; border-radius:50%; padding:0; font-size:24px; background:var(--primary); color:white; border:0; box-shadow:var(--shadow-lg); }
+#main .notification-center { position:relative; flex:0 0 auto; }
+#main .notification-button.sapid-button { padding:4px 8px; min-height:32px; height:32px; background:transparent; border:0; color:var(--text-white); font-size:16px; }
+#main .notification-panel { color:var(--text); width:360px; max-width:calc(100vw - 32px); }
+#main .notification-header { flex-direction:row; }
+#main .notification-list { overflow:auto; }
+#main .notification-item { gap:6px; }
+#main .notification-item-header { font-size:.875rem; }
+#main .notification-message { font-size:.8125rem; color:var(--text-light); }
+#main .toast-msg { flex:1; }
+#main .toast-close.sapid-button { min-height:0; border:0; background:transparent; padding:4px; color:var(--text-muted); }
+@media(max-width:760px) {
+  #main .mobile-bar { display:flex !important; position:fixed; bottom:0; left:0; right:0; height:52px; justify-content:space-around; align-items:center; z-index:140; padding:8px; background:var(--bg-white); border-top:1px solid var(--border); }
+  #main .comments-pane, #main .version-pane { top:110px; bottom:52px; }
+  #main .notification-panel { position:fixed; top:56px; right:12px; }
+}
+
+/* Shared dialogs retain the original title, close icon, and padded form body. */
+.sapid-dialog.office-modal {
+  width:480px !important; max-width:calc(100vw - 48px) !important;
+  max-height:90dvh; overflow:auto; padding:0 !important; gap:0 !important;
+  background:var(--bg-white) !important; color:var(--text) !important;
+  border:1px solid var(--border); border-radius:var(--radius-lg) !important;
+  box-shadow:var(--shadow-lg);
+}
+.sapid-dialog.office-modal > h2 {
+  margin:0; padding:16px 60px 16px 24px; border-bottom:1px solid var(--border);
+  font-size:18px !important; font-weight:600 !important; line-height:28px;
+}
+.sapid-dialog.office-modal > .modal-body {
+  width:100%; min-width:0; padding:24px; gap:0;
+}
+.sapid-dialog.office-modal .modal-form { min-width:0; }
+.sapid-dialog.office-modal .modal-actions .sapid-button.btn-outline { background:transparent !important; color:var(--primary) !important; border-color:var(--border-dark) !important; }
+.sapid-dialog.office-modal .modal-actions .sapid-button {
+  min-height:43px !important; padding:10px 20px !important;
+  font-size:15px !important; border-radius:var(--radius-md) !important;
+}
+.sapid-dialog.office-modal .modal-actions .sapid-button-primary {
+  background:var(--primary) !important; border-color:var(--primary) !important;
+}
+.sapid-dialog.office-modal .modal-actions .sapid-button-outline {
+  color:var(--primary) !important; border-color:var(--border-dark) !important;
+}
+.sapid-dialog.office-modal .sapid-layer-close {
+  position:absolute; top:14px; right:16px; width:32px; height:32px;
+  min-height:0; margin:0; padding:0; border:0; border-radius:var(--radius-sm);
+  background:transparent; color:var(--text-muted); font:inherit;
+  font-size:24px; line-height:32px; cursor:pointer; display:flex;
+  align-items:center; justify-content:center;
+}
+.sapid-dialog.office-modal .sapid-layer-close:hover { background:var(--bg); color:var(--text); }
+.sapid-dialog.office-modal .sapid-layer-close:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }

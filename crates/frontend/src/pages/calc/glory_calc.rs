@@ -484,10 +484,31 @@ impl Editor {
 }
 
 fn action(label: &str, callback: impl FnMut() + 'static) -> Box<dyn Widget> {
+    let caption = match label {
+        "Bold" => "B",
+        "Italic" => "I",
+        "Underline" => "U",
+        "Align left" => "⇤",
+        "Align center" => "↔",
+        "Align right" => "⇥",
+        "Currency" => "$",
+        "Percent" => "%",
+        "Merge cells" => "Merge",
+        "Unmerge cells" => "Unmerge",
+        "Sort ascending" => "A↓Z",
+        "Sort descending" => "Z↓A",
+        "All borders" => "▦",
+        "Clear borders" => "□",
+        _ => label,
+    };
     Box::new(
         sapid::button()
             .theme(crate::components::ui::theme())
-            .label(label.to_owned())
+            .variant(sapid::ButtonVariant::Subtle)
+            .size(sapid::Size::Small)
+            .class("toolbar-btn")
+            .name(label.to_owned())
+            .label(caption.to_owned())
             .on_press(callback),
     )
 }
@@ -507,12 +528,25 @@ fn format_control(
     name: &str,
     default: &str,
     callback: impl FnMut(String) + 'static,
-) -> sapid::TextField {
-    sapid::text_field()
-        .theme(crate::components::ui::theme())
-        .name(name.to_owned())
-        .default_value(default)
-        .on_value_change(callback)
+) -> impl Widget {
+    col()
+        .class(format!(
+            "calc-format-field {}",
+            match name {
+                "Font size" => "font-size-field",
+                "Font family" => "font-family-field",
+                _ => "advanced-format-field",
+            }
+        ))
+        .fill((
+            text().class("toolbar-label").content(name.to_owned()),
+            sapid::text_field()
+                .theme(crate::components::ui::theme())
+                .size(sapid::Size::Small)
+                .name(name.to_owned())
+                .default_value(default)
+                .on_value_change(callback),
+        ))
 }
 
 /// Browser workbook editor. Every mutation stays in application-owned Cages.
@@ -709,6 +743,11 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     let comments_open = scope.cage(false);
     let versions_open = scope.cage(false);
     let ai_open = scope.cage(false);
+    let advanced_open = scope.cage(false);
+    let clipboard_open = scope.cage(false);
+    let find_open = scope.cage(false);
+    let selection_open = scope.cage(false);
+    let sheets_open = scope.cage(false);
     let metadata_name = scope.cage("Selection".to_owned());
     let threshold = scope.cage("0".to_owned());
     let filter_query = scope.cage(String::new());
@@ -718,14 +757,12 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 .target("/dashboard")
                 .fill(text().content("← Dashboard")),
         ),
-        Box::new(text().content(title)),
-        Box::new(text().content(ed.status)),
+        Box::new(text().class("calc-document-name").content(title)),
+        Box::new(text().class("save-status").content(ed.status)),
         action("Save", {
             let save = save.clone();
             move || save()
         }),
-        action("Undo", move || ed.history(false)),
-        action("Redo", move || ed.history(true)),
         action("Comments", move || comments_open.revise(|v| *v = !*v)),
         action("Version history", move || {
             versions_open.revise(|v| *v = !*v)
@@ -852,7 +889,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             ed.format(|s| s.borders = CellBorders::default())
         }),
     ];
-    let formats: Vec<Box<dyn Widget>> = vec![
+    let mut formats: Vec<Box<dyn Widget>> = vec![
         Box::new(format_control("Font size", "14", move |v| {
             if v.parse::<f64>().is_ok_and(f64::is_finite) {
                 ed.format(|s| s.font_size = v.clone());
@@ -882,7 +919,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         Box::new(format_control("Number format", "general", move |v| {
             ed.format(|s| s.number_format = v.clone())
         })),
-        Box::new(format_control("Column width", "96", move |value| {
+        Box::new(format_control("Column width", "80", move |value| {
             let Some(width) = value
                 .parse::<f64>()
                 .ok()
@@ -898,7 +935,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 content["sheets"][si]["column_widths"][col] = serde_json::json!(width);
             });
         })),
-        Box::new(format_control("Row height", "28", move |value| {
+        Box::new(format_control("Row height", "24", move |value| {
             let Some(height) = value
                 .parse::<f64>()
                 .ok()
@@ -915,6 +952,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             });
         })),
     ];
+    let extra_formats = formats.split_off(2);
     let export: Vec<Box<dyn Widget>> = ["xlsx", "csv", "pdf", "ods"]
         .into_iter()
         .map(|format| {
@@ -935,11 +973,174 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             })
         })
         .collect();
-    col().class("editor-layout calc-editor").fill((
-        row().class("editor-navbar").fill(chrome),
-        group().fill((row().class("calc-toolbar").fill(toolbar),
-        row().class("calc-format-toolbar").fill(formats))),
-        row().class("metadata-toolbar").fill((
+    let file_save = save.clone();
+    let menu_bar = row().class("menubar calc-menubar").fill((
+        sapid::dropdown_menu("calc-file")
+            .theme(crate::components::ui::theme())
+            .label(crate::i18n::t("menubar.file"))
+            .item(
+                sapid::menu_item("save")
+                    .label(crate::i18n::t("menu.file.save"))
+                    .on_activate(move || file_save()),
+            )
+            .item(
+                sapid::menu_item("open")
+                    .label(crate::i18n::t("menu.file.open"))
+                    .on_activate(|| crate::components::ui::go("/files")),
+            )
+            .item(
+                sapid::menu_item("print")
+                    .label(crate::i18n::t("menu.file.print"))
+                    .on_activate(|| {
+                        #[cfg(target_arch = "wasm32")]
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.print();
+                        }
+                    }),
+            )
+            .item(
+                sapid::menu_item("close")
+                    .label(crate::i18n::t("menu.file.close"))
+                    .on_activate(|| crate::components::ui::go("/dashboard")),
+            ),
+        sapid::dropdown_menu("calc-edit")
+            .theme(crate::components::ui::theme())
+            .label(crate::i18n::t("menubar.edit"))
+            .item(
+                sapid::menu_item("undo")
+                    .label(crate::i18n::t("menu.edit.undo"))
+                    .on_activate(move || ed.history(false)),
+            )
+            .item(
+                sapid::menu_item("redo")
+                    .label(crate::i18n::t("menu.edit.redo"))
+                    .on_activate(move || ed.history(true)),
+            )
+            .item(
+                sapid::menu_item("clipboard")
+                    .label("Clipboard")
+                    .on_activate(move || clipboard_open.revise(|value| *value = !*value)),
+            )
+            .item(
+                sapid::menu_item("find")
+                    .label(crate::i18n::t("menu.edit.find"))
+                    .on_activate(move || find_open.revise(|value| *value = !*value)),
+            ),
+        sapid::dropdown_menu("calc-view")
+            .theme(crate::components::ui::theme())
+            .label(crate::i18n::t("menubar.view"))
+            .item(
+                sapid::menu_item("selection-tools")
+                    .label("Selection tools")
+                    .on_activate(move || selection_open.revise(|value| *value = !*value)),
+            )
+            .item(
+                sapid::menu_item("sheet-tools")
+                    .label("Sheet tools")
+                    .on_activate(move || sheets_open.revise(|value| *value = !*value)),
+            )
+            .item(
+                sapid::menu_item("freeze-rows")
+                    .label(crate::i18n::t("menu.view.freeze_rows"))
+                    .on_activate(move || {
+                        ed.metadata(|content, si, range| {
+                            let frozen = content["sheets"][si]["frozen_rows"].as_u64().unwrap_or(0);
+                            content["sheets"][si]["frozen_rows"] =
+                                serde_json::json!(if frozen > 0 { 0 } else { range.start.0 + 1 });
+                        })
+                    }),
+            )
+            .item(
+                sapid::menu_item("freeze-cols")
+                    .label(crate::i18n::t("menu.view.freeze_cols"))
+                    .on_activate(move || {
+                        ed.metadata(|content, si, range| {
+                            let frozen = content["sheets"][si]["frozen_cols"].as_u64().unwrap_or(0);
+                            content["sheets"][si]["frozen_cols"] =
+                                serde_json::json!(if frozen > 0 { 0 } else { range.start.1 + 1 });
+                        })
+                    }),
+            ),
+        sapid::dropdown_menu("calc-insert")
+            .theme(crate::components::ui::theme())
+            .label(crate::i18n::t("menubar.insert"))
+            .item(
+                sapid::menu_item("row")
+                    .label(crate::i18n::t("menu.insert.row_above"))
+                    .on_activate(move || ed.row_column(false, false)),
+            )
+            .item(
+                sapid::menu_item("column")
+                    .label(crate::i18n::t("menu.insert.col_left"))
+                    .on_activate(move || ed.row_column(true, false)),
+            )
+            .item(
+                sapid::menu_item("sheet")
+                    .label(crate::i18n::t("menu.insert.sheet"))
+                    .on_activate(move || {
+                        ed.book.revise(|book| {
+                            book.checkpoint();
+                            let n = book.snapshot.sheets.len() + 1;
+                            book.snapshot.sheets.push(format!("Sheet{n}"));
+                        })
+                    }),
+            ),
+        sapid::dropdown_menu("calc-format")
+            .theme(crate::components::ui::theme())
+            .label(crate::i18n::t("menubar.format"))
+            .item(
+                sapid::menu_item("bold")
+                    .label("Bold")
+                    .on_activate(move || ed.format(|style| style.bold = !style.bold)),
+            )
+            .item(
+                sapid::menu_item("italic")
+                    .label("Italic")
+                    .on_activate(move || ed.format(|style| style.italic = !style.italic)),
+            )
+            .item(
+                sapid::menu_item("merge")
+                    .label("Merge cells")
+                    .on_activate(move || ed.merge(false)),
+            )
+            .item(
+                sapid::menu_item("unmerge")
+                    .label("Unmerge cells")
+                    .on_activate(move || ed.merge(true)),
+            ),
+        sapid::dropdown_menu("calc-tools")
+            .theme(crate::components::ui::theme())
+            .label(crate::i18n::t("menubar.tools"))
+            .item(
+                sapid::menu_item("data")
+                    .label("Data tools")
+                    .on_activate(move || advanced_open.revise(|value| *value = !*value)),
+            )
+            .item(
+                sapid::menu_item("comments")
+                    .label("Comments")
+                    .on_activate(move || comments_open.revise(|value| *value = !*value)),
+            )
+            .item(
+                sapid::menu_item("history")
+                    .label("Version history")
+                    .on_activate(move || versions_open.revise(|value| *value = !*value)),
+            )
+            .item(
+                sapid::menu_item("ai")
+                    .label("AI assist")
+                    .on_activate(move || ai_open.revise(|value| *value = !*value)),
+            ),
+    ));
+    col().class("editor-layout calc-editor")
+        .fill(crate::components::navbar::Navbar(scope.clone(),auth))
+        .fill(row().class("editor-navbar").fill(chrome))
+        .fill(menu_bar)
+        .fill((
+        row().class("calc-ribbon").fill((row().class("calc-format-toolbar").fill(formats),
+        row().class("calc-toolbar").fill(toolbar))),
+        row().class("metadata-toolbar").style(advanced_open.map(|open|Style::new().display(if *open { Display::Flex } else { Display::None }))).fill((
+            row().class("calc-advanced-formats").fill(extra_formats),
             control("Named range name",metadata_name,move|v|metadata_name.revise(|s|*s=v)),
             sapid::button().theme(crate::components::ui::theme()).label("Define named range").on_press(move||{
                 let name=metadata_name.get();if name.trim().is_empty(){return;}
@@ -999,7 +1200,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             control("Cell address or named range", address, move |v| {
                 address.revise(|s| *s = v)
             }),
-            sapid::button().theme(crate::components::ui::theme()).label("Go to cell").on_press(move || {
+            sapid::button().theme(crate::components::ui::theme()).name("Go to cell").label("↵").on_press(move || {
                 let address = address.get();
                 if let Some(point) =
                     parse_cell_ref(&address).filter(|p| p.0 < NUM_ROWS && p.1 < NUM_COLS)
@@ -1035,7 +1236,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 }),
             input()
                 .name("Formula")
-                .class("calc-formula-input")
+                .class("calc-formula-input formula-input")
                 .value(ed.formula)
                 .node_ref(formula_node)
                 .semantics(Some(Box::new(Semantics {
@@ -1066,15 +1267,15 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                     }
                 }),
             sapid::button().theme(crate::components::ui::theme())
-                .label("Apply formula")
+                .name("Apply formula").label("✓")
                 .on_press(move || ed.commit(ed.formula.get())),
         )),
-        row().class("clipboard-toolbar").fill((
+        row().class("clipboard-toolbar").style(clipboard_open.map(|open|Style::new().display(if *open { Display::Flex } else { Display::None }))).fill((
             sapid::text_field().theme(crate::components::ui::theme()).name("Selection data (tab separated)").multiline(true).value(clipboard)
                 .on_value_change(move|value|clipboard.revise(|v|*v=value)),
             sapid::button().theme(crate::components::ui::theme()).label("Load selection data").on_press(move||clipboard.revise(|v|*v=selection_text(ed))),
         )),
-        row().class("selection-toolbar").fill((
+        row().class("selection-toolbar").style(selection_open.map(|open|Style::new().display(if *open { Display::Flex } else { Display::None }))).fill((
             control("Selection range", selection, move |v| {
                 selection.revise(|s| *s = v)
             }),
@@ -1136,20 +1337,24 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 |(i, _)| *i,
                 move |sheet, _| {
                     let index = sheet.get().0;
-                    sapid::button().theme(crate::components::ui::theme()).label(scope_label(sheet)).on_press(move || {
+                    sapid::button().theme(crate::components::ui::theme())
+                        .variant(sapid::ButtonVariant::Subtle).size(sapid::Size::Small)
+                        .class(ed.sheet.map(move |active|if *active==index { "sheet-tab active".to_string() } else { "sheet-tab".to_string() }))
+                        .label(scope_label(sheet)).on_press(move || {
                         ed.sheet.revise(|v| *v = index);
                         ed.activate((0, 0));
                         ed.layout.revise(|v| *v += 1);
                     })
                 },
             ),
-            sapid::button().theme(crate::components::ui::theme()).label("Add sheet").on_press(move || {
+            sapid::button().theme(crate::components::ui::theme()).name("Add sheet").label("+").class("sheet-tab-add").on_press(move || {
                 ed.book.revise(|b| {
                     b.checkpoint();
                     let count = b.snapshot.sheets.len();
                     b.snapshot.sheets.push(format!("Sheet{}", count + 1));
                 });
             }),
+            row().class("sheet-management").style(sheets_open.map(|open|Style::new().display(if *open { Display::Flex } else { Display::None }))).fill((
             sapid::button().theme(crate::components::ui::theme()).label("Duplicate sheet").on_press(move||ed.duplicate_sheet()),
             sapid::button().theme(crate::components::ui::theme()).label("Move sheet left").on_press(move||ed.move_sheet(false)),
             sapid::button().theme(crate::components::ui::theme()).label("Move sheet right").on_press(move||ed.move_sheet(true)),
@@ -1196,9 +1401,9 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 ed.sheet.revise(|v| *v = 0);
                 ed.activate((0, 0));
                 ed.layout.revise(|v| *v += 1);
-            }),
+            }),)),
         )),
-        row().class("find-toolbar").fill((
+        row().class("find-toolbar").style(find_open.map(|open|Style::new().display(if *open { Display::Flex } else { Display::None }))).fill((
             control("Find", find, move |v| find.revise(|s| *s = v)),
             control("Replace with", replace, move |v| replace.revise(|s| *s = v)),
             sapid::button().theme(crate::components::ui::theme()).label("Find next").on_press(move || {
@@ -1320,7 +1525,7 @@ fn color(value: &str) -> Option<Color> {
 fn cell_style(style: &CellStyle) -> Style {
     let mut out = Style::new()
         .width(Length::Percent(100.0))
-        .min_height(Length::Px(28.0));
+        .min_height(Length::Px(24.0));
     if style.bold {
         out.font_weight = Some(700.0);
     }
@@ -1352,7 +1557,11 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
             .cloned()
             .unwrap_or_default()
     });
-    let mut head = sapid::table_row("head").cell(sapid::table_header_cell("corner").text(""));
+    let mut head = sapid::table_row("head").cell(
+        sapid::table_header_cell("corner")
+            .class("corner-cell row-header")
+            .text(""),
+    );
     for c in 0..NUM_COLS {
         head = head.cell(
             sapid::table_header_cell(format!("h{c}"))
@@ -1397,18 +1606,18 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                         let sheet = &b.content["sheets"][si];
                         let width = sheet["column_widths"][c.to_string()]
                             .as_f64()
-                            .unwrap_or(96.0);
-                        let height = sheet["row_heights"][r.to_string()].as_f64().unwrap_or(28.0);
+                            .unwrap_or(80.0);
+                        let height = sheet["row_heights"][r.to_string()].as_f64().unwrap_or(24.0);
                         let mut style = Style::new()
                             .width(Length::Px(width.clamp(24.0, 800.0)))
                             .height(Length::Px(height.clamp(18.0, 400.0)));
                         if (r as u64) < sheet["frozen_rows"].as_u64().unwrap_or(0) {
                             style.position = Some(Position::Sticky);
-                            style.top = Some(Length::Px((r + 1) as f64 * 28.0));
+                            style.top = Some(Length::Px((r + 1) as f64 * 24.0));
                         }
                         if (c as u64) < sheet["frozen_cols"].as_u64().unwrap_or(0) {
                             style.position = Some(Position::Sticky);
-                            style.left = Some(Length::Px(c as f64 * 96.0 + 40.0));
+                            style.left = Some(Length::Px(c as f64 * 80.0 + 80.0));
                         }
                         style
                     })
@@ -1567,7 +1776,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                 }
             }
         })
-        .class("sheet-scroll")
+        .class("sheet-scroll spreadsheet")
         .style(Style::new().overflow_x(Overflow::Auto))
         .fill(
             sapid::table("workbook")

@@ -45,10 +45,18 @@ pub fn AiAssist(scope: Scope, auth: Cage<AuthState>, doc_id: String) -> impl Wid
                     action(crate::i18n::t(&format!("ai.{value}")), move || {
                         set(mode, value.into());
                     })
+                    .class(mode.map(move |mode| {
+                        if mode == value {
+                            "ai-mode active".to_owned()
+                        } else {
+                            "ai-mode".to_owned()
+                        }
+                    }))
                 })
                 .collect::<Vec<_>>();
             let send = sapid::button()
                 .theme(theme())
+                .class("btn btn-primary btn-sm")
                 .label(crate::i18n::t("ai.send"))
                 .loading(busy)
                 .on_press(move || {
@@ -74,20 +82,30 @@ pub fn AiAssist(scope: Scope, auth: Cage<AuthState>, doc_id: String) -> impl Wid
                     });
                 });
             col().class("ai-pane").fill((
-                heading(crate::i18n::t("ai.title")),
-                row().fill(modes),
+                row().class("ai-pane-header").fill((
+                    text()
+                        .kind(TextKind::Heading(2))
+                        .content(crate::i18n::t("ai.title")),
+                    action("×", move || set(open, false))
+                        .name("Close AI assistant")
+                        .class("btn-icon"),
+                )),
+                row().class("ai-modes").fill(modes),
                 sapid::text_field()
                     .theme(theme())
+                    .class("form-input ai-prompt")
                     .name(crate::i18n::t("ai.placeholder"))
                     .multiline(true)
                     .value(prompt)
                     .on_value_change(move |value| set(prompt, value)),
                 send,
-                status(answer),
+                status(answer).class("ai-answer"),
             ))
         });
-        col().fill((
-            action(crate::i18n::t("ai.title"), move || set(open, !open.get())),
+        group().fill((
+            action("✦", move || set(open, !open.get()))
+                .name(crate::i18n::t("ai.title"))
+                .class("ai-fab"),
             panel,
         ))
     })

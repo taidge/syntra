@@ -577,6 +577,39 @@ fn slide_svg(content: &Value, index: usize) -> String {
     )
 }
 
+fn slides_command(session: &EditorSession, current: Cage<usize>, command: &str) {
+    let base = session.content.get();
+    let mut slides = hydrate_presentation(&base);
+    let pos = current.get().min(slides.len().saturating_sub(1));
+    match command {
+        "new-slide" => {
+            slides.push(SlideData::empty(slides.len()));
+            current.revise(|value| *value = slides.len() - 1);
+        }
+        "duplicate-slide" => {
+            if let Some(mut slide) = slides.get(pos).cloned() {
+                slide.native_id = uuid::Uuid::new_v4().to_string();
+                slides.insert(pos + 1, slide);
+                current.revise(|value| *value = pos + 1);
+            }
+        }
+        "delete-slide" if slides.len() > 1 => {
+            slides.remove(pos);
+            current.revise(|value| *value = pos.min(slides.len() - 1));
+        }
+        "move-up" if pos > 0 => {
+            slides.swap(pos, pos - 1);
+            current.revise(|value| *value = pos - 1);
+        }
+        "move-down" if pos + 1 < slides.len() => {
+            slides.swap(pos, pos + 1);
+            current.revise(|value| *value = pos + 1);
+        }
+        _ => return,
+    }
+    session.edit(merge_presentation(&base, &slides, &session.name.get()));
+}
+
 #[allow(non_snake_case)]
 pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     widget(move |scope| {
@@ -652,109 +685,88 @@ pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         let edit_transition = session.clone();
         let edit_layout = session.clone();
         let add = session.clone();
-        let duplicate = session.clone();
-        let delete = session.clone();
-        let move_up = session.clone();
-        let move_down = session.clone();
+        let content_open = scope.cage(false);
+        let properties_open = scope.cage(false);
         let previous = session.clone();
         let next = session.clone();
         let object_session = session.clone();
-        let controls = row().class("editor-toolbar").fill((
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("New slide")
-                .on_press(move || {
-                    let base = add.content.get();
-                    let mut slides = hydrate_presentation(&base);
-                    slides.push(SlideData::empty(slides.len()));
-                    current.revise(|value| *value = slides.len() - 1);
-                    add.edit(merge_presentation(&base, &slides, &add.name.get()));
-                }),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Duplicate")
-                .on_press(move || {
-                    let base = duplicate.content.get();
-                    let mut slides = hydrate_presentation(&base);
-                    if let Some(mut slide) = slides.get(current.get()).cloned() {
-                        slide.native_id = uuid::Uuid::new_v4().to_string();
-                        let pos = current.get() + 1;
-                        slides.insert(pos, slide);
-                        current.revise(|value| *value = pos);
-                        duplicate.edit(merge_presentation(&base, &slides, &duplicate.name.get()));
-                    }
-                }),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Delete slide")
-                .on_press(move || {
-                    let base = delete.content.get();
-                    let mut slides = hydrate_presentation(&base);
-                    if slides.len() > 1 {
-                        slides.remove(current.get().min(slides.len() - 1));
-                        current.revise(|value| *value = (*value).min(slides.len() - 1));
-                        delete.edit(merge_presentation(&base, &slides, &delete.name.get()));
-                    }
-                }),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Move up")
-                .on_press(move || {
-                    let base = move_up.content.get();
-                    let mut slides = hydrate_presentation(&base);
-                    let pos = current.get();
-                    if pos > 0 && pos < slides.len() {
-                        slides.swap(pos, pos - 1);
-                        current.revise(|value| *value -= 1);
-                        move_up.edit(merge_presentation(&base, &slides, &move_up.name.get()));
-                    }
-                }),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Move down")
-                .on_press(move || {
-                    let base = move_down.content.get();
-                    let mut slides = hydrate_presentation(&base);
-                    let pos = current.get();
-                    if pos + 1 < slides.len() {
-                        slides.swap(pos, pos + 1);
-                        current.revise(|value| *value += 1);
-                        move_down.edit(merge_presentation(&base, &slides, &move_down.name.get()));
-                    }
-                }),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Present / exit")
-                .on_press(move || presenting.revise(|value| *value = !*value)),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Objects & theme")
-                .on_press(move || objects.revise(|value| *value = !*value)),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Comments")
-                .on_press(move || comments.revise(|value| *value = !*value)),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Versions")
-                .on_press(move || versions.revise(|value| *value = !*value)),
-        ));
+        let new_slide = sapid::button()
+            .theme(crate::components::ui::theme())
+            .class("slide-add-button")
+            .label("+ Add Slide")
+            .name("New slide")
+            .on_press(move || slides_command(&add, current, "new-slide"));
+        let menu_session = session.clone();
+        let menu_commands: std::rc::Rc<dyn Fn(&str)> =
+            std::rc::Rc::new(move |command| match command {
+                "present" => presenting.revise(|value| *value = !*value),
+                "comments" => comments.revise(|value| *value = !*value),
+                "versions" => versions.revise(|value| *value = !*value),
+                "objects" => objects.revise(|value| *value = !*value),
+                "properties" => properties_open.revise(|value| *value = !*value),
+                "new-slide" | "duplicate-slide" | "delete-slide" | "move-up" | "move-down" => {
+                    slides_command(&menu_session, current, command)
+                }
+                _ => {}
+            });
         col()
             .class("slides-app editor-shell")
             .fill((
-                editor_header(&session, "Slides", &["pptx", "pdf", "odp", "html"]),
-                controls,
-                row().class("slides-workspace").fill((
-                    col().class("slide-list").fill(each(
-                        titles,
-                        |item| item.0,
-                        move |item, _| {
-                            sapid::button()
-                                .theme(crate::components::ui::theme())
-                                .label(item.map(|item| format!("{}. {}", item.0 + 1, item.1)))
-                                .on_press(move || current.revise(|value| *value = item.get().0))
-                        },
-                    )),
+                editor_header(
+                    &session,
+                    "Slides",
+                    &["pptx", "pdf", "odp", "html"],
+                    menu_commands,
+                ),
+                row().class("slides-editor slides-workspace").fill((
+                    col()
+                        .class("slide-panel slide-list")
+                        .fill(each(
+                            titles,
+                            |item| item.0,
+                            move |item, _| {
+                                widget(move |scope| {
+                                    sapid::button()
+                                        .theme(crate::components::ui::theme())
+                                        .class(scope.bond(move || {
+                                            if current.get() == item.get().0 {
+                                                "slide-thumbnail slide-thumb active".into()
+                                            } else {
+                                                "slide-thumbnail slide-thumb".into()
+                                            }
+                                        }))
+                                        .name(item.map(|item| {
+                                            format!("Slide {}: {}", item.0 + 1, item.1)
+                                        }))
+                                        .fill((
+                                            text()
+                                                .kind(TextKind::Inline)
+                                                .class("slide-thumb-number")
+                                                .content(item.map(|item| (item.0 + 1).to_string())),
+                                            image()
+                                                .source(scope.bond(move || {
+                                                    slide_svg(&content.get(), item.get().0)
+                                                }))
+                                                .alt("Slide thumbnail"),
+                                            text()
+                                                .kind(TextKind::Inline)
+                                                .class("slide-thumb-title")
+                                                .content(item.map(|item| {
+                                                    if item.1.is_empty() {
+                                                        "Untitled slide".into()
+                                                    } else {
+                                                        item.1.clone()
+                                                    }
+                                                })),
+                                        ))
+                                        .on_press(move || {
+                                            current.revise(|value| *value = item.get().0)
+                                        })
+                                        .build(scope)
+                                })
+                            },
+                        ))
+                        .fill(new_slide),
                     col()
                         .class_fn(move || {
                             if presenting.get() {
@@ -785,65 +797,65 @@ pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                                         1080.,
                                     ),
                                 )),
-                            row().fill((
-                                sapid::button()
-                                    .theme(crate::components::ui::theme())
-                                    .label("Previous")
-                                    .on_press(move || {
-                                        let count =
-                                            hydrate_presentation(&previous.content.get()).len();
-                                        current.revise(|value| {
-                                            *value =
-                                                value.saturating_sub(1).min(count.saturating_sub(1))
-                                        });
-                                    }),
-                                text().content(scope.bond(move || {
-                                    format!(
-                                        "Slide {} / {}",
-                                        current.get() + 1,
-                                        hydrate_presentation(&content.get()).len()
-                                    )
-                                })),
-                                sapid::button()
-                                    .theme(crate::components::ui::theme())
-                                    .label("Next")
-                                    .on_press(move || {
-                                        let count = hydrate_presentation(&next.content.get()).len();
-                                        current.revise(|value| {
-                                            *value = (*value + 1).min(count.saturating_sub(1))
-                                        });
-                                    }),
-                            )),
-                            sapid::text_field()
+                            row()
+                                .class_fn(move || {
+                                    if presenting.get() {
+                                        "slide-navigation status-bar".into()
+                                    } else {
+                                        "slide-navigation status-bar hidden".into()
+                                    }
+                                })
+                                .fill((
+                                    sapid::button()
+                                        .theme(crate::components::ui::theme())
+                                        .label("Previous")
+                                        .on_press(move || {
+                                            let count =
+                                                hydrate_presentation(&previous.content.get()).len();
+                                            current.revise(|value| {
+                                                *value = value
+                                                    .saturating_sub(1)
+                                                    .min(count.saturating_sub(1))
+                                            });
+                                        }),
+                                    text().content(scope.bond(move || {
+                                        format!(
+                                            "Slide {} / {}",
+                                            current.get() + 1,
+                                            hydrate_presentation(&content.get()).len()
+                                        )
+                                    })),
+                                    sapid::button()
+                                        .theme(crate::components::ui::theme())
+                                        .label("Next")
+                                        .on_press(move || {
+                                            let count =
+                                                hydrate_presentation(&next.content.get()).len();
+                                            current.revise(|value| {
+                                                *value = (*value + 1).min(count.saturating_sub(1))
+                                            });
+                                        }),
+                                )),
+                        )),
+                    col()
+                        .class_fn(move || {
+                            if properties_open.get() {
+                                "properties-panel slide-properties open".into()
+                            } else {
+                                "properties-panel slide-properties".into()
+                            }
+                        })
+                        .fill((
+                            text().kind(TextKind::Heading(3)).content("Properties"),
+                            text().class("property-label").content("Presentation theme"),
+                            sapid::native_select("presentation-theme")
                                 .theme(crate::components::ui::theme())
-                                .name("Slide title")
-                                .value(title)
-                                .on_value_change(move |value| {
-                                    edit_slide(&edit_title, current.get(), |slide| {
-                                        slide.title = value
-                                    })
-                                }),
-                            sapid::textarea()
-                                .theme(crate::components::ui::theme())
-                                .name("Slide body")
-                                .rows(8)
-                                .value(body)
-                                .on_value_change(move |value| {
-                                    edit_slide(&edit_body, current.get(), |slide| {
-                                        slide.body = value
-                                    })
-                                }),
-                            sapid::textarea()
-                                .theme(crate::components::ui::theme())
-                                .name("Speaker notes")
-                                .rows(4)
-                                .value(notes)
-                                .on_value_change(move |value| {
-                                    edit_slide(&edit_notes, current.get(), |slide| {
-                                        slide.notes = value
-                                    })
-                                }),
-                            row().fill((
+                                .name("Presentation theme")
+                                .default_value(Some("current".into()))
+                                .options([sapid::select_option("current", "Contrix Light")])
+                                .enabled(false),
+                            col().class("slide-appearance-controls").fill((
+                                text().class("property-label").content("Background color"),
                                 sapid::text_field()
                                     .theme(crate::components::ui::theme())
                                     .name("Background color")
@@ -853,6 +865,7 @@ pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                                             slide.bg_color = value
                                         })
                                     }),
+                                text().class("property-label").content("Transition"),
                                 sapid::native_select("slide-transition")
                                     .theme(crate::components::ui::theme())
                                     .name("Transition")
@@ -871,6 +884,7 @@ pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                                             })
                                         }
                                     }),
+                                text().class("property-label").content("Slide layout"),
                                 sapid::native_select("slide-layout")
                                     .theme(crate::components::ui::theme())
                                     .name("Slide layout")
@@ -894,8 +908,58 @@ pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                                         }
                                     }),
                             )),
+                            text().class("property-label").content("Speaker notes"),
+                            sapid::textarea()
+                                .theme(crate::components::ui::theme())
+                                .name("Speaker notes")
+                                .rows(4)
+                                .value(notes)
+                                .on_value_change(move |value| {
+                                    edit_slide(&edit_notes, current.get(), |slide| {
+                                        slide.notes = value
+                                    })
+                                }),
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .class("slide-content-toggle")
+                                .label("Content")
+                                .on_press(move || content_open.revise(|value| *value = !*value)),
+                            when(content_open, move || {
+                                let edit_title = edit_title.clone();
+                                let edit_body = edit_body.clone();
+                                col().class("slide-content-fields").fill((
+                                    text().class("property-label").content("Slide title"),
+                                    sapid::text_field()
+                                        .theme(crate::components::ui::theme())
+                                        .name("Slide title")
+                                        .value(title)
+                                        .on_value_change(move |value| {
+                                            edit_slide(&edit_title, current.get(), |slide| {
+                                                slide.title = value
+                                            })
+                                        }),
+                                    text().class("property-label").content("Slide body"),
+                                    sapid::textarea()
+                                        .theme(crate::components::ui::theme())
+                                        .name("Slide body")
+                                        .rows(8)
+                                        .value(body)
+                                        .on_value_change(move |value| {
+                                            edit_slide(&edit_body, current.get(), |slide| {
+                                                slide.body = value
+                                            })
+                                        }),
+                                ))
+                            }),
                         )),
                 )),
+                text().class("status-bar").content(scope.bond(move || {
+                    format!(
+                        "Slide {} of {}",
+                        current.get() + 1,
+                        hydrate_presentation(&content.get()).len()
+                    )
+                })),
                 when(objects, move || {
                     slide_objects(object_session.clone(), current)
                 }),

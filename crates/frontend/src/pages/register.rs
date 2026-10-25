@@ -94,28 +94,53 @@ pub fn Register(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
         error,
         loading,
     };
-    col().class("auth-page").fill(
-        col().class("auth-card").fill((
-            heading(crate::i18n::t("auth.register_title")),
+    view().class("auth-page").fill(
+        view().class("auth-card").fill((
+            view().class("auth-header").fill((
+                heading(crate::i18n::t("auth.register_title")),
+                label(crate::i18n::t("auth.register_subtitle")).class("auth-subtitle"),
+            )),
             sapid::form("register")
                 .theme(theme())
+                .unstyled()
                 .enabled(scope.bond(move || !loading.get()))
                 .on_submit(move |_| submit(&weak, form))
                 .fill((
-                    field(crate::i18n::t("auth.username"), username, Purpose::Text),
-                    field(crate::i18n::t("auth.email"), email, Purpose::Email),
-                    field(crate::i18n::t("auth.password"), password, Purpose::Password),
-                    field(
+                    field_placeholder(
+                        crate::i18n::t("auth.username"),
+                        username,
+                        Purpose::Text,
+                        crate::i18n::t("auth.username_placeholder"),
+                    ),
+                    field_placeholder(
+                        crate::i18n::t("auth.email"),
+                        email,
+                        Purpose::Email,
+                        crate::i18n::t("auth.email_placeholder"),
+                    ),
+                    field_placeholder(
+                        crate::i18n::t("auth.password"),
+                        password,
+                        Purpose::Password,
+                        crate::i18n::t("auth.new_password_placeholder"),
+                    ),
+                    field_placeholder(
                         crate::i18n::t("auth.confirm_password"),
                         confirm,
                         Purpose::Password,
+                        crate::i18n::t("auth.confirm_password_placeholder"),
                     ),
-                    status(error),
+                    status(error).class("form-error"),
                     sapid::submit_button()
                         .theme(theme())
+                        .unstyled()
+                        .class("btn btn-primary btn-block")
                         .label(crate::i18n::t("auth.register_link")),
                 )),
-            anchor(crate::i18n::t("auth.sign_in"), "/login"),
+            view().class("auth-footer").fill((
+                label(crate::i18n::t("auth.have_account")),
+                anchor(crate::i18n::t("auth.sign_in"), "/login"),
+            )),
         )),
     )
 }

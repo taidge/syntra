@@ -350,94 +350,304 @@ pub(super) fn editor_header(
     session: &EditorSession,
     kind: &'static str,
     formats: &'static [&'static str],
+    commands: Rc<dyn Fn(&str)>,
 ) -> impl Widget {
-    let save = session.clone();
     let undo = session.clone();
     let redo = session.clone();
     let accept_remote = session.clone();
     let keep_local = session.clone();
     let retry = session.clone();
-    let exports = formats
-        .iter()
-        .map(|format| {
-            let export = session.clone();
-            let format = *format;
-            sapid::button()
-                .theme(crate::components::ui::theme())
+    let present = commands.clone();
+    let session = session.clone();
+    widget(move |scope| {
+        let undo = undo.clone();
+        let redo = redo.clone();
+        let accept_remote = accept_remote.clone();
+        let keep_local = keep_local.clone();
+        let retry = retry.clone();
+        let present = present.clone();
+        let conflict = session.remote;
+        let retry_visible = scope.bond({
+            let session = session.clone();
+            move || {
+                !session.loaded.get()
+                    && session.status.get() != crate::i18n::t("editor.loading_document")
+            }
+        });
+        col()
+            .class(format!(
+                "editor-header editor-header-{}",
+                kind.to_lowercase()
+            ))
+            .fill((
+                crate::components::navbar::Navbar(scope.clone(), session.auth),
+                row().class("doc-title-bar editor-topbar").fill((
+                    link().target("/dashboard").class("editor-back").label("←"),
+                    text()
+                        .class("document-type-badge")
+                        .content(kind.to_string()),
+                    text()
+                        .class("doc-title-input editor-title")
+                        .content(session.name),
+                    text().class("save-status").content(session.status),
+                    row().class("editor-presence").fill((
+                        text()
+                            .class("connection-status")
+                            .content(session.connection),
+                        text().content(session.peers.map(|peers| {
+                            peers
+                                .iter()
+                                .map(|peer| peer.username.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })),
+                    )),
+                    when(kind == "Slides", move || {
+                        let present = present.clone();
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .class("btn-present editor-present")
+                            .label("Present")
+                            .on_press(move || present("present"))
+                    }),
+                )),
+                row().class("editor-commandbar").fill((
+                    editor_menus(&session, kind, formats, commands.clone()),
+                    row().class("editor-history-actions").fill((
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .name("Undo")
+                            .label("↶")
+                            .enabled(session.loaded)
+                            .on_press(move || undo.undo(false)),
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .name("Redo")
+                            .label("↷")
+                            .enabled(session.loaded)
+                            .on_press(move || redo.undo(true)),
+                    )),
+                )),
+                when(conflict.map(Option::is_some), move || {
+                    let accept_remote = accept_remote.clone();
+                    let keep_local = keep_local.clone();
+                    row().class("editor-conflict").fill((
+                        text().content(
+                            "A collaborator changed this document while you have unsaved edits.",
+                        ),
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .label("Use collaborator's version")
+                            .on_press(move || {
+                                if let Some(next) = accept_remote.remote.get() {
+                                    accept_remote.remote.revise(|value| *value = None);
+                                    accept_remote.edit(next);
+                                    accept_remote.save();
+                                }
+                            }),
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .label("Keep my version")
+                            .on_press(move || {
+                                if let Some(previous) = keep_local.remote.get() {
+                                    keep_local.remote.revise(|value| *value = None);
+                                    keep_local.replace(keep_local.content.get(), previous);
+                                    keep_local.save();
+                                }
+                            }),
+                    ))
+                }),
+                when(retry_visible, move || {
+                    let retry = retry.clone();
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .class("editor-retry")
+                        .label("Retry loading")
+                        .on_press(move || retry.reload())
+                }),
+            ))
+            .show_in(scope)
+    })
+}
+
+fn editor_menus(
+    session: &EditorSession,
+    kind: &'static str,
+    formats: &'static [&'static str],
+    commands: Rc<dyn Fn(&str)>,
+) -> impl Widget {
+    let save = session.clone();
+    let undo = session.clone();
+    let redo = session.clone();
+    let action = |key: &str, label: &str, command: &'static str| {
+        let commands = commands.clone();
+        sapid::menu_item(key)
+            .label(label)
+            .on_activate(move || commands(command))
+    };
+    let unavailable = |key: &str, label: &str| sapid::menu_item(key).label(label).enabled(false);
+    let mut exports = sapid::menu_submenu("exports").label("Export");
+    for format in formats {
+        let session = session.clone();
+        let format = *format;
+        exports = exports.item(
+            sapid::menu_item(format!("export-{format}"))
                 .label(format.to_ascii_uppercase())
-                .on_press(move || export.export(format))
-        })
-        .collect::<Vec<_>>();
-    col().class("editor-header").fill((
-        row().class("editor-topbar").fill((
-            link().target("/files").label("← Files"),
-            text().content(kind.to_string()),
-            text().class("editor-title").content(session.name),
-            text().content(session.status),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label(crate::i18n::t("common.save"))
-                .enabled(session.loaded)
-                .on_press(move || save.save()),
-            sapid::button()
-                .theme(crate::components::ui::theme())
+                .on_activate(move || session.export(format)),
+        );
+    }
+    let file = sapid::menubar_menu("file")
+        .label(crate::i18n::t("menubar.file"))
+        .item(
+            sapid::menu_item("new")
+                .label("New document")
+                .on_activate(|| crate::components::ui::go("/dashboard")),
+        )
+        .item(
+            sapid::menu_item("open")
+                .label("Open…")
+                .on_activate(|| crate::components::ui::go("/files")),
+        )
+        .separator("open-save")
+        .item(
+            sapid::menu_item("save")
+                .label("Save    Ctrl+S")
+                .on_activate(move || save.save()),
+        )
+        .item(unavailable("save-as", "Save as…"))
+        .submenu(exports)
+        .item(sapid::menu_item("print").label("Print").on_activate(|| {
+            #[cfg(target_arch = "wasm32")]
+            if let Some(window) = web_sys::window() {
+                let _ = window.print();
+            }
+        }))
+        .item(
+            sapid::menu_item("close")
+                .label("Close")
+                .on_activate(|| crate::components::ui::go("/dashboard")),
+        );
+    let edit = sapid::menubar_menu("edit")
+        .label(crate::i18n::t("menubar.edit"))
+        .item(
+            sapid::menu_item("undo")
                 .label("Undo")
-                .enabled(session.loaded)
-                .on_press(move || undo.undo(false)),
-            sapid::button()
-                .theme(crate::components::ui::theme())
+                .on_activate(move || undo.undo(false)),
+        )
+        .item(
+            sapid::menu_item("redo")
                 .label("Redo")
-                .enabled(session.loaded)
-                .on_press(move || redo.undo(true)),
-            row().fill(exports),
-        )),
-        row().class("editor-presence").fill((
-            text().content(session.connection),
-            text().content(session.peers.map(|peers| {
-                peers
-                    .iter()
-                    .map(|peer| peer.username.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })),
-        )),
-        row().class("editor-conflict").fill((
-            text().content(session.remote.map(|remote| {
-                if remote.is_some() {
-                    "A collaborator changed this document while you have unsaved edits.".to_string()
+                .on_activate(move || redo.undo(true)),
+        )
+        .separator("clipboard")
+        .item(unavailable("cut", "Cut"))
+        .item(unavailable("copy", "Copy"))
+        .item(unavailable("paste", "Paste"))
+        .item(action("find", "Find & replace…", "find").enabled(kind == "Writer"));
+    let edit = if kind == "Slides" {
+        edit.separator("slide-actions")
+            .item(action(
+                "duplicate-slide",
+                "Duplicate slide",
+                "duplicate-slide",
+            ))
+            .item(action("delete-slide", "Delete slide", "delete-slide"))
+            .item(action("move-up", "Move slide up", "move-up"))
+            .item(action("move-down", "Move slide down", "move-down"))
+    } else {
+        edit
+    };
+    let view_menu = sapid::menubar_menu("view")
+        .label(crate::i18n::t("menubar.view"))
+        .item(action("sidebar", "Toggle sidebar", "toggle-sidebar").enabled(kind == "Writer"))
+        .item(action("zoom-in", "Zoom in", "zoom-in").enabled(kind == "Whiteboard"))
+        .item(action("zoom-out", "Zoom out", "zoom-out").enabled(kind == "Whiteboard"))
+        .item(action("present", "Present / exit", "present").enabled(kind == "Slides"))
+        .item(
+            sapid::menu_item("theme")
+                .label("Toggle dark mode")
+                .on_activate(|| {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let dark = web_sys::window()
+                            .and_then(|window| window.local_storage().ok().flatten())
+                            .and_then(|storage| storage.get_item("theme").ok().flatten())
+                            .as_deref()
+                            == Some("dark");
+                        crate::components::navbar::set_theme(if dark { "light" } else { "dark" });
+                    }
+                }),
+        );
+    let insert = match kind {
+        "Writer" => sapid::menubar_menu("insert")
+            .label(crate::i18n::t("menubar.insert"))
+            .items([
+                action("image", "Image…", "insert-image"),
+                action("table", "Table", "insert-table"),
+                action("list", "List", "insert-list"),
+                action("code", "Code block", "insert-code"),
+                action("link", "Link…", "find"),
+                action("page-break", "Page break", "insert-page-break"),
+                action("insert-controls", "More insert options…", "insert-controls"),
+            ]),
+        "Slides" => sapid::menubar_menu("insert")
+            .label(crate::i18n::t("menubar.insert"))
+            .items([
+                action("new-slide", "New slide", "new-slide"),
+                action("objects", "Shape / image / chart…", "objects"),
+            ]),
+        _ => sapid::menubar_menu("insert")
+            .label(crate::i18n::t("menubar.insert"))
+            .items([
+                action("rectangle", "Rectangle", "tool-rect"),
+                action("ellipse", "Ellipse", "tool-circle"),
+                action("line", "Line", "tool-line"),
+                action("text", "Text", "tool-text"),
+            ]),
+    };
+    let format = if kind == "Writer" {
+        sapid::menubar_menu("format")
+            .label(crate::i18n::t("menubar.format"))
+            .items([
+                action("bold", "Bold", "format-bold"),
+                action("italic", "Italic", "format-italic"),
+                action("code", "Code", "format-code"),
+                action("heading", "Heading", "format-heading"),
+                action("paragraph", "Normal text", "format-paragraph"),
+            ])
+    } else {
+        sapid::menubar_menu("format")
+            .label(crate::i18n::t("menubar.format"))
+            .item(action(
+                "properties",
+                "Properties…",
+                if kind == "Slides" {
+                    "properties"
                 } else {
-                    String::new()
-                }
-            })),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Use collaborator's version")
-                .enabled(session.remote.map(Option::is_some))
-                .on_press(move || {
-                    if let Some(next) = accept_remote.remote.get() {
-                        accept_remote.remote.revise(|value| *value = None);
-                        accept_remote.edit(next);
-                        accept_remote.save();
-                    }
-                }),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Keep my version")
-                .enabled(session.remote.map(Option::is_some))
-                .on_press(move || {
-                    if let Some(previous) = keep_local.remote.get() {
-                        keep_local.remote.revise(|value| *value = None);
-                        keep_local.replace(keep_local.content.get(), previous);
-                        keep_local.save();
-                    }
-                }),
-            sapid::button()
-                .theme(crate::components::ui::theme())
-                .label("Retry loading")
-                .enabled(session.loaded.map(|loaded| !*loaded))
-                .on_press(move || retry.reload()),
-        )),
-    ))
+                    "objects"
+                },
+            ))
+    };
+    let tools = sapid::menubar_menu("tools")
+        .label(crate::i18n::t("menubar.tools"))
+        .item(action("comments", "Comments", "comments"))
+        .item(action("versions", "Version history", "versions"))
+        .item(action("tracking", "Toggle track changes", "tracking").enabled(kind == "Writer"))
+        .item(
+            action("settings", "Page & document settings…", "settings").enabled(kind == "Writer"),
+        );
+    let help = sapid::menubar_menu("help")
+        .label(crate::i18n::t("menubar.help"))
+        .item(
+            sapid::menu_item("project")
+                .label("Contrix Office on GitHub")
+                .on_activate(|| crate::components::ui::go("https://github.com/contrix-org/office")),
+        );
+    sapid::menubar(format!("{}-document-menu", kind.to_lowercase()))
+        .name("Document menu")
+        .theme(crate::components::ui::theme())
+        .class("menubar office-menubar")
+        .menus([file, edit, view_menu, insert, format, tools, help])
 }
 
 /// Separate semantic images preserve object paint order and let the browser

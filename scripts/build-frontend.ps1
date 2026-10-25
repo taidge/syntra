@@ -46,7 +46,7 @@ try {
     & $Bindgen "$taskBuild/target/wasm32-unknown-unknown/$profile/contrix_frontend.wasm" --target web --out-dir "$taskBuild/web/assets" --out-name contrix_frontend
     if ($LASTEXITCODE -ne 0) { throw 'wasm-bindgen failed' }
     Copy-Item -Path static/* -Destination "$taskBuild/web" -Recurse -Force
-    Copy-Item -LiteralPath crates/frontend/assets/main.css -Destination "$taskBuild/web/assets/main.css"
+    Copy-Item -Path crates/frontend/assets/* -Destination "$taskBuild/web/assets" -Recurse -Force
     $sapid = $metadata.packages | Where-Object name -eq 'contrix-frontend' | ForEach-Object { $_.dependencies | Where-Object name -eq 'sapid' }
     Copy-Item -LiteralPath (Join-Path $sapid.path 'styles/sapid.css') -Destination "$taskBuild/web/assets/sapid.css"
     Write-Host "Browser assets: $taskBuild/web"

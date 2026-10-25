@@ -135,6 +135,8 @@ test.describe('Calc page UI @ui', () => {
         await cellAt(page, 0, 0).click();
         await page.getByRole('textbox', { name: 'Formula', exact: true }).fill('7');
         await page.getByRole('button', { name: 'Apply formula', exact: true }).click();
+        await page.getByRole('button', { name: 'View', exact: true }).click();
+        await page.getByRole('menuitem', { name: 'Selection tools', exact: true }).click();
         await page.getByRole('textbox', { name: 'Selection range', exact: true }).fill('A1:A3');
         await page.getByRole('button', { name: 'Select range', exact: true }).click();
         await page.getByRole('button', { name: 'Fill down', exact: true }).click();
@@ -146,6 +148,8 @@ test.describe('Calc page UI @ui', () => {
 
     test('Add cells to selection retains a non-contiguous selection', async ({ page }) => {
         await cellAt(page, 0, 0).click();
+        await page.getByRole('button', { name: 'View', exact: true }).click();
+        await page.getByRole('menuitem', { name: 'Selection tools', exact: true }).click();
         await page.getByRole('checkbox', { name: 'Add cells to selection', exact: true }).check();
         await cellAt(page, 2, 2).click();
 
@@ -161,6 +165,8 @@ test.describe('Calc page UI @ui', () => {
     test('Extend selection highlights the rectangle from the anchor', async ({ page }) => {
         await cellAt(page, 0, 0).click();
         // (row=2, col=1) → B3. Selection rect is A1..B3 → 3 rows × 2 cols = 6 cells.
+        await page.getByRole('button', { name: 'View', exact: true }).click();
+        await page.getByRole('menuitem', { name: 'Selection tools', exact: true }).click();
         await page.getByRole('checkbox', { name: 'Extend selection', exact: true }).check();
         await cellAt(page, 2, 1).click();
 
@@ -212,6 +218,8 @@ test.describe('Calc page UI @ui', () => {
         await page.getByRole('textbox', { name: 'Formula', exact: true }).fill('42');
         await page.getByRole('button', { name: 'Apply formula', exact: true }).click();
         await page.getByRole('button', { name: 'Bold', exact: true }).click();
+        await page.getByRole('button', { name: 'View', exact: true }).click();
+        await page.getByRole('menuitem', { name: 'Selection tools', exact: true }).click();
         await page.getByRole('textbox', { name: 'Selection range', exact: true }).fill('A1:B2');
         await page.getByRole('button', { name: 'Select range', exact: true }).click();
         await page.getByRole('button', { name: 'Merge cells', exact: true }).click();

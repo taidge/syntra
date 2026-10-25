@@ -48,10 +48,14 @@ pub fn ToastRack(_scope: Scope, bus: Cage<Vec<Toast>>) -> impl Widget {
                 row()
                     .class(class)
                     .fill((
-                        text().content_fn(move || item.get().message),
-                        action("Dismiss", move || {
+                        text()
+                            .class("toast-msg")
+                            .content_fn(move || item.get().message),
+                        action("×", move || {
                             let _ = bus.try_revise(|items| items.retain(|toast| toast.id != id));
-                        }),
+                        })
+                        .name("Dismiss")
+                        .class("toast-close"),
                     ))
                     .build(scope)
             })

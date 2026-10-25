@@ -81,44 +81,106 @@ pub fn Profile(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
         });
     });
 
-    let account = result_text(&scope, profile, |profile| {
-        format!(
-            "{} · {} · {}\n{} MB / {} MB",
-            profile.username,
-            profile.email,
-            profile.role,
-            profile.storage_used / 1_048_576,
-            profile.storage_quota / 1_048_576,
-        )
-    });
-    let content = col().class("profile-container").fill((
+    let account_value = move |key: &'static str| {
+        profile.map(move |result| {
+            result
+                .as_ref()
+                .and_then(|value| value.as_ref().ok())
+                .map(|profile| match key {
+                    "username" => profile.username.clone(),
+                    "email" => profile.email.clone(),
+                    "role" => profile.role.clone(),
+                    _ => String::new(),
+                })
+                .unwrap_or_else(|| crate::i18n::t("common.loading"))
+        })
+    };
+    let account = view().class("profile-section").fill((
+        text()
+            .kind(TextKind::Heading(2))
+            .content(crate::i18n::t("profile.account")),
+        view().class("profile-row").fill((
+            label(crate::i18n::t("auth.username")).class("profile-label"),
+            text().content(account_value("username")),
+        )),
+        view().class("profile-row").fill((
+            label(crate::i18n::t("auth.email")).class("profile-label"),
+            text().content(account_value("email")),
+        )),
+        view().class("profile-row").fill((
+            label(crate::i18n::t("profile.role")).class("profile-label"),
+            text().class("badge").content(account_value("role")),
+        )),
+        view().class("profile-row").fill((
+            label(crate::i18n::t("profile.storage")).class("profile-label"),
+            view().class("storage-bar-wrap").fill((
+                view()
+                    .class("storage-bar")
+                    .fill(view().class("storage-bar-fill").style(profile.map(|value| {
+                        Style::new().width(Length::Percent(
+                            value
+                                .as_ref()
+                                .and_then(|value| value.as_ref().ok())
+                                .map(storage_percent)
+                                .unwrap_or(0.),
+                        ))
+                    }))),
+                result_text(&scope, profile, |profile| {
+                    crate::i18n::t("profile.storage_usage")
+                        .replace(
+                            "{used}",
+                            &format!("{:.1}", profile.storage_used as f64 / 1_048_576.),
+                        )
+                        .replace(
+                            "{quota}",
+                            &format!("{:.2}", profile.storage_quota as f64 / 1_073_741_824.),
+                        )
+                })
+                .class("storage-text"),
+            )),
+        )),
+    ));
+    let content = view().class("profile-container").fill((
         heading(crate::i18n::t("profile.title")),
         account,
-        field(
-            crate::i18n::t("profile.display_name"),
-            display,
-            Purpose::Text,
-        ),
-        save_profile,
-        heading(crate::i18n::t("profile.change_password")),
-        field(
-            crate::i18n::t("profile.current_password"),
-            current,
-            Purpose::Password,
-        ),
-        field(
-            crate::i18n::t("profile.new_password"),
-            password,
-            Purpose::Password,
-        ),
-        field(
-            crate::i18n::t("profile.confirm_new_password"),
-            confirm,
-            Purpose::Password,
-        ),
-        change_password,
-        status(feedback),
+        view().class("profile-section").fill((
+            text()
+                .kind(TextKind::Heading(2))
+                .content(crate::i18n::t("profile.display_name")),
+            sapid::text_field()
+                .theme(theme())
+                .unstyled()
+                .class("form-input")
+                .name(crate::i18n::t("profile.display_name"))
+                .value(display)
+                .on_value_change(move |value| set(display, value)),
+            save_profile.unstyled().class("btn btn-primary"),
+        )),
+        view().class("profile-section").fill((
+            text()
+                .kind(TextKind::Heading(2))
+                .content(crate::i18n::t("profile.change_password")),
+            field(
+                crate::i18n::t("profile.current_password"),
+                current,
+                Purpose::Password,
+            ),
+            field(
+                crate::i18n::t("profile.new_password"),
+                password,
+                Purpose::Password,
+            ),
+            field(
+                crate::i18n::t("profile.confirm_new_password"),
+                confirm,
+                Purpose::Password,
+            ),
+            change_password.unstyled().class("btn btn-primary"),
+            status(feedback),
+        )),
         TotpSecurity(scope.clone(), token(auth)),
     ));
-    col().fill((Navbar(scope, auth), content))
+    view()
+        .class("app-page profile-page")
+        .fill((Navbar(scope, auth), content))
 }

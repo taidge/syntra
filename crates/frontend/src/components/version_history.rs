@@ -43,50 +43,61 @@ pub fn VersionHistory(
     when(open, move || {
         let weak = weak.clone();
         let id = doc_id.clone();
-        col().class("version-history").fill((
-            heading(crate::i18n::t("versions.title")),
-            action("Close", move || set(open, false)),
+        col().class("version-pane version-history").fill((
+            row().class("version-pane-header").fill((
+                text()
+                    .kind(TextKind::Heading(2))
+                    .content(crate::i18n::t("versions.title")),
+                action("×", move || set(open, false))
+                    .name("Close version history")
+                    .class("btn-icon"),
+            )),
             status(feedback),
-            col().fill(each(
-                items,
-                |item| item.id.clone(),
-                move |item, _| {
-                    let weak = weak.clone();
-                    let id = id.clone();
-                    let version = item.get();
-                    let version_id = version.id;
-                    row().fill((
-                        label(format!(
-                            "v{} · {} · {}",
-                            version.version_number,
-                            version.created_at,
-                            version.label.unwrap_or_default()
-                        )),
-                        action(crate::i18n::t("versions.restore"), move || {
-                            let Some(scope) = weak.upgrade() else {
-                                return;
-                            };
-                            let token = token(auth);
-                            let path = format!("/documents/{id}/restore/{version_id}");
-                            let _ = scope.spawn(async move {
-                                match state::api_post::<serde_json::Value, _>(
-                                    &path,
-                                    &serde_json::json!({}),
-                                    &token,
-                                )
-                                .await
-                                {
-                                    Ok(_) => {
-                                        if let Some(window) = web_sys::window() {
-                                            let _ = window.location().reload();
+            col().class("version-list").fill((
+                when(items.map(|items| items.is_empty()), || {
+                    label(crate::i18n::t("versions.empty")).class("pane-empty")
+                }),
+                each(
+                    items,
+                    |item| item.id.clone(),
+                    move |item, _| {
+                        let weak = weak.clone();
+                        let id = id.clone();
+                        let version = item.get();
+                        let version_id = version.id;
+                        row().class("version-item").fill((
+                            col().class("version-meta").fill((
+                                label(format!("v{}", version.version_number)),
+                                label(version.created_at).class("muted"),
+                                label(version.label.unwrap_or_default()).class("version-label"),
+                            )),
+                            action(crate::i18n::t("versions.restore"), move || {
+                                let Some(scope) = weak.upgrade() else {
+                                    return;
+                                };
+                                let token = token(auth);
+                                let path = format!("/documents/{id}/restore/{version_id}");
+                                let _ = scope.spawn(async move {
+                                    match state::api_post::<serde_json::Value, _>(
+                                        &path,
+                                        &serde_json::json!({}),
+                                        &token,
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => {
+                                            if let Some(window) = web_sys::window() {
+                                                let _ = window.location().reload();
+                                            }
                                         }
+                                        Err(error) => set(feedback, error),
                                     }
-                                    Err(error) => set(feedback, error),
-                                }
-                            });
-                        }),
-                    ))
-                },
+                                });
+                            })
+                            .class("btn btn-outline btn-sm"),
+                        ))
+                    },
+                ),
             )),
         ))
     })

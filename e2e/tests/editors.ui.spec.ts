@@ -31,7 +31,7 @@ async function openEditor(page: Page, fixture: Fixture, kind: EditorKind) {
     localStorage.setItem('locale', 'en');
   }, fixture);
   await page.goto(`${APP_BASE}/${kind}/${fixture.id}`);
-  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled({ timeout: 30_000 });
+  await expect(page.locator('.save-status')).toHaveText('All changes saved', { timeout: 30_000 });
 }
 function writerText(content: any): string {
   return content.body.filter((block: any) => Array.isArray(block.runs))
@@ -75,13 +75,14 @@ test.describe('Glory document editors @ui', () => {
       expect(run.color).toBe('#123456');
     }
     await page.reload();
-    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+    await expect(page.locator('.save-status')).toHaveText('All changes saved');
     await expect(page.getByRole('textbox', { name: 'Document body', exact: true })).toContainText('Glory Writer saved 世界');
   });
 
   test('Slides saves title, body, notes and newly created slides', async ({ page, request }) => {
     const fixture = await createDocument(request, 'slides');
     await openEditor(page, fixture, 'slides');
+    await page.getByRole('button', { name: 'Content', exact: true }).click();
     await page.getByRole('textbox', { name: 'Slide title', exact: true }).fill('Quarterly review');
     await page.getByRole('textbox', { name: 'Slide body', exact: true }).fill('Revenue grew 世界');
     await page.getByRole('textbox', { name: 'Speaker notes', exact: true }).fill('Discuss the margin');
@@ -96,9 +97,10 @@ test.describe('Glory document editors @ui', () => {
       return [saved.slides.length, slideText(saved, 0), slideText(saved, 1)];
     }, { timeout: 15_000 }).toEqual([2, 'Quarterly review', 'Next quarter']);
     await page.reload();
-    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+    await expect(page.locator('.save-status')).toHaveText('All changes saved');
+    await page.getByRole('button', { name: 'Content', exact: true }).click();
     await expect(page.getByRole('textbox', { name: 'Slide title', exact: true })).toHaveValue('Quarterly review');
-    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await page.locator('.slide-thumbnail').nth(1).click();
     await expect(page.getByRole('textbox', { name: 'Slide title', exact: true })).toHaveValue('Next quarter');
   });
 
@@ -118,7 +120,7 @@ test.describe('Glory document editors @ui', () => {
     await expect.poll(async () => boardElements(await documentContent(request, fixture)).map(element => element.text), { timeout: 15_000 })
       .toEqual(['Saved board note']);
     await page.reload();
-    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+    await expect(page.locator('.save-status')).toHaveText('All changes saved');
     await expect(page.getByRole('img', { name: 'Drawing preview', exact: true })).toBeVisible();
     expect(boardElements(await documentContent(request, fixture))[0].text).toBe('Saved board note');
   });
@@ -150,7 +152,8 @@ for (const kind of ['slides', 'whiteboard'] as const) {
     await expect.poll(() => rendered.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth === 40)).toBe(true);
     await expect(rendered).toHaveCSS('position', 'absolute');
     if (kind === 'whiteboard') {
-      await page.getByRole('button', { name: 'Properties', exact: true }).click();
+      await page.getByRole('menuitem', { name: 'Format', exact: true }).click();
+      await page.getByRole('menuitem', { name: 'Properties…', exact: true }).click();
       await page.getByRole('button', { name: '1. Image', exact: true }).click();
       await page.getByRole('textbox', { name: 'Move X', exact: true }).fill('50');
       await page.getByRole('textbox', { name: 'Move Y', exact: true }).fill('0');
@@ -164,7 +167,7 @@ for (const kind of ['slides', 'whiteboard'] as const) {
       await expect.poll(async () => (await documentContent(request, fixture)).layers[0].visible, { timeout: 15_000 }).toBe(true);
     }
     await page.reload();
-    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeEnabled();
+    await expect(page.locator('.save-status')).toHaveText('All changes saved');
     await expect(page.getByRole('img', { name: 'Remote fixture image', exact: true })).toBeVisible();
   });
 }

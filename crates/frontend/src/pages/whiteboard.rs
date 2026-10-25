@@ -564,6 +564,14 @@ fn sanitize_filename(title: &str) -> String {
         trimmed.to_string()
     }
 }
+fn board_background_svg(background: &str) -> String {
+    let svg = build_svg_string(&[], background);
+    let base = svg.strip_suffix("</svg>").unwrap_or(&svg);
+    format!(
+        r##"{base}<defs><pattern id="board-grid" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M 20 0 L 0 0 0 20" fill="none" stroke="#e0e0e0" stroke-width="0.5"/></pattern></defs><rect width="100%" height="100%" fill="url(#board-grid)"/></svg>"##
+    )
+}
+
 fn board_elements(content: &Value) -> Vec<Value> {
     let mut elements = content["layers"]
         .as_array()
@@ -709,7 +717,7 @@ pub fn Whiteboard(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widg
             format!(
                 "data:image/svg+xml;base64,{}",
                 base64::engine::general_purpose::STANDARD
-                    .encode(build_svg_string(&[], &board_background(value)))
+                    .encode(board_background_svg(&board_background(value)))
             )
         });
         let render_objects = scope.bond(move || {
@@ -747,7 +755,12 @@ pub fn Whiteboard(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widg
         });
         let gesture = session.clone();
         let canvas = view()
-            .class("whiteboard-canvas")
+            .class(scope.bond(move || {
+                format!(
+                    "whiteboard-canvas tool-{}",
+                    tool.get().unwrap_or_else(|| "pen".into())
+                )
+            }))
             .name("Whiteboard drawing canvas")
             .style(scope.bond(move || {
                 Style::new()
@@ -755,6 +768,7 @@ pub fn Whiteboard(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widg
                     .overflow_x(Overflow::Hidden)
                     .overflow_y(Overflow::Hidden)
                     .width(Length::Percent(zoom.get() as f64))
+                    .height(Length::Percent(zoom.get() as f64))
             }))
             .semantics(Some(Box::new(glory::render::Semantics {
                 drag_capture: Some(glory::render::DragCapture::Press),
@@ -863,175 +877,261 @@ pub fn Whiteboard(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widg
         let svg = session.clone();
         let png = session.clone();
         let property_session = session.clone();
+        let menu_commands: std::rc::Rc<dyn Fn(&str)> =
+            std::rc::Rc::new(move |command| match command {
+                "comments" => comments.revise(|value| *value = !*value),
+                "versions" => versions.revise(|value| *value = !*value),
+                "objects" => properties.revise(|value| *value = !*value),
+                "zoom-in" => zoom.revise(|value| *value = (*value + 25).min(300)),
+                "zoom-out" => zoom.revise(|value| *value = value.saturating_sub(25).max(25)),
+                command if command.starts_with("tool-") => {
+                    tool.revise(|value| *value = Some(command[5..].to_string()))
+                }
+                _ => {}
+            });
         col()
             .class("whiteboard-app editor-shell")
             .fill((
-                editor_header(&session, "Whiteboard", &["pdf", "html"]),
-                row().class("editor-toolbar").fill((
-                    sapid::native_select("whiteboard-tool")
-                        .theme(crate::components::ui::theme())
-                        .name("Drawing tool")
-                        .value(tool)
-                        .options(
-                            [
-                                ("pen", "Pen"),
-                                ("select", "Select / move"),
-                                ("rect", "Rectangle"),
-                                ("circle", "Ellipse"),
-                                ("line", "Line"),
-                                ("text", "Text"),
-                                ("eraser", "Eraser"),
-                            ]
-                            .map(|(key, label)| sapid::select_option(key, label)),
-                        )
-                        .on_value_change(move |value| tool.revise(|current| *current = value)),
-                    sapid::text_field()
-                        .theme(crate::components::ui::theme())
-                        .name("Stroke color")
-                        .value(color)
-                        .on_value_change(move |value| color.revise(|current| *current = value)),
-                    sapid::text_field()
-                        .theme(crate::components::ui::theme())
-                        .name("Stroke width")
-                        .value(width)
-                        .on_value_change(move |value| width.revise(|current| *current = value)),
-                    sapid::text_field()
-                        .theme(crate::components::ui::theme())
-                        .name("Text to draw")
-                        .value(label)
-                        .on_value_change(move |value| label.revise(|current| *current = value)),
-                    sapid::text_field()
-                        .theme(crate::components::ui::theme())
-                        .name("Background color")
-                        .value(background)
-                        .on_commit(move |value| {
-                            let next = merge_whiteboard(
-                                &bg_edit.content.get(),
-                                &board_elements(&bg_edit.content.get()),
-                                &value,
-                                &bg_edit.name.get(),
-                            );
-                            bg_edit.edit(next);
-                        }),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Properties")
-                        .on_press(move || properties.revise(|value| *value = !*value)),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Comments")
-                        .on_press(move || comments.revise(|value| *value = !*value)),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Versions")
-                        .on_press(move || versions.revise(|value| *value = !*value)),
-                )),
-                row().class("editor-toolbar").fill((
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Delete selected")
-                        .on_press(move || {
-                            if let Some(index) = selected.get() {
-                                if !board_element_editable(&remove.content.get(), index) {
-                                    return;
-                                }
-                                let mut elements = board_elements(&remove.content.get());
-                                if index < elements.len() {
-                                    elements.remove(index);
-                                    save_elements(&remove, &elements);
-                                    selected.revise(|value| *value = None);
-                                }
-                            }
-                        }),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Duplicate selected")
-                        .on_press(move || {
-                            if let Some(index) = selected.get() {
-                                if !board_element_editable(&duplicate.content.get(), index) {
-                                    return;
-                                }
-                                let mut elements = board_elements(&duplicate.content.get());
-                                if let Some(mut value) = elements.get(index).cloned() {
-                                    value["id"] = json!(uuid::Uuid::new_v4());
-                                    move_element(&mut value, 20., 20.);
-                                    elements.push(value);
-                                    save_elements(&duplicate, &elements);
-                                }
-                            }
-                        }),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Clear board")
-                        .on_press(move || {
-                            let content = clear.content.get();
-                            let retained = board_elements(&content)
+                editor_header(&session, "Whiteboard", &["pdf", "html"], menu_commands),
+                row()
+                    .class("whiteboard-toolbar editor-toolbar board-tools-strip")
+                    .fill((
+                        row().class("drawing-toolbar").fill((
+                            row().class("toolbar-group whiteboard-tools").fill(
+                                [
+                                    ("pen", "Pen", "✎"),
+                                    ("select", "Select / move", "↖"),
+                                    ("rect", "Rectangle", "□"),
+                                    ("circle", "Ellipse", "○"),
+                                    ("line", "Line", "╱"),
+                                    ("text", "Text", "T"),
+                                    ("eraser", "Eraser", "⌫"),
+                                ]
                                 .into_iter()
-                                .enumerate()
-                                .filter(|(index, _)| !board_element_editable(&content, *index))
-                                .map(|(_, element)| element)
-                                .collect::<Vec<_>>();
-                            save_elements(&clear, &retained);
-                        }),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("SVG")
-                        .on_press(move || {
-                            let content = svg.content.get();
-                            trigger_download(
-                                &format!("{}.svg", sanitize_filename(&svg.name.get())),
-                                "image/svg+xml",
-                                build_svg_string(
-                                    &board_elements(&content),
-                                    &board_background(&content),
+                                .map(|(key, label, icon)| {
+                                    sapid::button()
+                                        .theme(crate::components::ui::theme())
+                                        .name(label)
+                                        .label(icon)
+                                        .class(scope.bond(move || {
+                                            if tool.get().as_deref() == Some(key) {
+                                                "tool-btn active".into()
+                                            } else {
+                                                "tool-btn".into()
+                                            }
+                                        }))
+                                        .on_press(move || {
+                                            tool.revise(|value| *value = Some(key.into()))
+                                        })
+                                })
+                                .collect::<Vec<_>>(),
+                            ),
+                            sapid::native_select("whiteboard-tool")
+                                .class("whiteboard-tool-select")
+                                .theme(crate::components::ui::theme())
+                                .name("Drawing tool")
+                                .value(tool)
+                                .options(
+                                    [
+                                        ("pen", "Pen"),
+                                        ("select", "Select / move"),
+                                        ("rect", "Rectangle"),
+                                        ("circle", "Ellipse"),
+                                        ("line", "Line"),
+                                        ("text", "Text"),
+                                        ("eraser", "Eraser"),
+                                    ]
+                                    .map(|(key, label)| sapid::select_option(key, label)),
                                 )
-                                .as_bytes(),
-                            );
-                        }),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("PNG")
-                        .on_press(move || {
-                            let content = png.content.get();
-                            svg_to_png_and_download(
-                                &build_svg_string(
-                                    &board_elements(&content),
-                                    &board_background(&content),
-                                ),
-                                &format!("{}.png", sanitize_filename(&png.name.get())),
-                            );
-                        }),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("−")
-                        .on_press(move || {
-                            zoom.revise(|value| *value = value.saturating_sub(25).max(25))
-                        }),
-                    text().content(zoom.map(|value| format!("{value}%"))),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("+")
-                        .on_press(move || zoom.revise(|value| *value = (*value + 25).min(300))),
+                                .on_value_change(move |value| {
+                                    tool.revise(|current| *current = value)
+                                }),
+                            row().class("toolbar-group").fill((
+                                text().class("toolbar-label").content("Color"),
+                                view()
+                                    .class("whiteboard-color-swatch")
+                                    .style(color.map(|value| {
+                                        let mut style = Style::new();
+                                        style.background = sapid::parse_hex_color(value).ok();
+                                        style
+                                    }))
+                                    .fill(
+                                        sapid::color_input("board-stroke")
+                                            .show_alpha(false)
+                                            .class("whiteboard-color-input")
+                                            .theme(crate::components::ui::theme())
+                                            .name("Stroke color")
+                                            .value(color)
+                                            .on_value_change(move |value| {
+                                                color.revise(|current| *current = value)
+                                            }),
+                                    ),
+                            )),
+                            row().class("toolbar-group").fill((
+                                text().class("toolbar-label").content("Size"),
+                                sapid::text_field()
+                                    .theme(crate::components::ui::theme())
+                                    .name("Stroke width")
+                                    .value(width)
+                                    .on_value_change(move |value| {
+                                        width.revise(|current| *current = value)
+                                    }),
+                            )),
+                            when(
+                                tool.map(|value| value.as_deref() == Some("text")),
+                                move || {
+                                    sapid::text_field()
+                                        .theme(crate::components::ui::theme())
+                                        .name("Text to draw")
+                                        .value(label)
+                                        .on_value_change(move |value| {
+                                            label.revise(|current| *current = value)
+                                        })
+                                },
+                            ),
+                            row().class("toolbar-group").fill((
+                                text().class("toolbar-label").content("Background"),
+                                view()
+                                    .class("whiteboard-color-swatch")
+                                    .style(scope.bond(move || {
+                                        let mut style = Style::new();
+                                        style.background =
+                                            sapid::parse_hex_color(&background.get()).ok();
+                                        style
+                                    }))
+                                    .fill(
+                                        sapid::color_input("board-background")
+                                            .show_alpha(false)
+                                            .class("whiteboard-color-input")
+                                            .theme(crate::components::ui::theme())
+                                            .name("Background color")
+                                            .value(background)
+                                            .on_commit(move |value| {
+                                                let next = merge_whiteboard(
+                                                    &bg_edit.content.get(),
+                                                    &board_elements(&bg_edit.content.get()),
+                                                    &value,
+                                                    &bg_edit.name.get(),
+                                                );
+                                                bg_edit.edit(next);
+                                            }),
+                                    ),
+                            )),
+                        )),
+                        row().class("whiteboard-edit-toolbar").fill((
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .label("Delete selected")
+                                .on_press(move || {
+                                    if let Some(index) = selected.get() {
+                                        if !board_element_editable(&remove.content.get(), index) {
+                                            return;
+                                        }
+                                        let mut elements = board_elements(&remove.content.get());
+                                        if index < elements.len() {
+                                            elements.remove(index);
+                                            save_elements(&remove, &elements);
+                                            selected.revise(|value| *value = None);
+                                        }
+                                    }
+                                }),
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .label("Duplicate selected")
+                                .on_press(move || {
+                                    if let Some(index) = selected.get() {
+                                        if !board_element_editable(&duplicate.content.get(), index)
+                                        {
+                                            return;
+                                        }
+                                        let mut elements = board_elements(&duplicate.content.get());
+                                        if let Some(mut value) = elements.get(index).cloned() {
+                                            value["id"] = json!(uuid::Uuid::new_v4());
+                                            move_element(&mut value, 20., 20.);
+                                            elements.push(value);
+                                            save_elements(&duplicate, &elements);
+                                        }
+                                    }
+                                }),
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .label("Clear board")
+                                .on_press(move || {
+                                    let content = clear.content.get();
+                                    let retained = board_elements(&content)
+                                        .into_iter()
+                                        .enumerate()
+                                        .filter(|(index, _)| {
+                                            !board_element_editable(&content, *index)
+                                        })
+                                        .map(|(_, element)| element)
+                                        .collect::<Vec<_>>();
+                                    save_elements(&clear, &retained);
+                                }),
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .label("SVG")
+                                .on_press(move || {
+                                    let content = svg.content.get();
+                                    trigger_download(
+                                        &format!("{}.svg", sanitize_filename(&svg.name.get())),
+                                        "image/svg+xml",
+                                        build_svg_string(
+                                            &board_elements(&content),
+                                            &board_background(&content),
+                                        )
+                                        .as_bytes(),
+                                    );
+                                }),
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .label("PNG")
+                                .on_press(move || {
+                                    let content = png.content.get();
+                                    svg_to_png_and_download(
+                                        &build_svg_string(
+                                            &board_elements(&content),
+                                            &board_background(&content),
+                                        ),
+                                        &format!("{}.png", sanitize_filename(&png.name.get())),
+                                    );
+                                }),
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .label("−")
+                                .on_press(move || {
+                                    zoom.revise(|value| *value = value.saturating_sub(25).max(25))
+                                }),
+                            text().content(zoom.map(|value| format!("{value}%"))),
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .label("+")
+                                .on_press(move || {
+                                    zoom.revise(|value| *value = (*value + 25).min(300))
+                                }),
+                        )),
+                    )),
+                row().class("editor-main whiteboard-main").fill((
+                    view()
+                        .class("whiteboard-canvas-container whiteboard-viewport")
+                        .style(
+                            Style::new()
+                                .overflow_x(Overflow::Auto)
+                                .overflow_y(Overflow::Auto),
+                        )
+                        .fill(canvas),
+                    when(properties, move || {
+                        board_properties(property_session.clone(), selected)
+                    }),
+                    crate::components::comments_pane::CommentsPane(
+                        scope.clone(),
+                        auth,
+                        id.clone(),
+                        comments,
+                    ),
                 )),
-                view()
-                    .class("whiteboard-viewport")
-                    .style(
-                        Style::new()
-                            .overflow_x(Overflow::Auto)
-                            .overflow_y(Overflow::Auto),
-                    )
-                    .fill(canvas),
-                text().content(
+                text().class("status-bar whiteboard-status").content(
                     content.map(|value| format!("{} objects", board_elements(value).len())),
-                ),
-                when(properties, move || {
-                    board_properties(property_session.clone(), selected)
-                }),
-                crate::components::comments_pane::CommentsPane(
-                    scope.clone(),
-                    auth,
-                    id.clone(),
-                    comments,
                 ),
                 crate::components::version_history::VersionHistory(
                     scope.clone(),

@@ -414,6 +414,9 @@ pub fn Writer(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         let comments = scope.cage(false);
         let versions = scope.cage(false);
         let settings = scope.cage(false);
+        let find_open = scope.cage(false);
+        let insert_open = scope.cage(false);
+        let sidebar_open = scope.cage(true);
         let search = scope.cage(String::new());
         let replacement = scope.cage(String::new());
         let link_url = scope.cage(String::new());
@@ -435,7 +438,7 @@ pub fn Writer(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             }
         });
         let change = session.clone();
-        let editor = sapid::rich_text_editor().theme(crate::components::ui::theme()).name("Document body").class("writer-body").document(rich).style(rich_ok.map(|visible| Style::new().display(if *visible { Display::Block } else { Display::None })))
+        let editor = sapid::rich_text_editor().theme(crate::components::ui::theme()).name("Document body").class("writer-body writer-content").toolbar(false).document(rich).style(rich_ok.map(|visible| Style::new().display(if *visible { Display::Block } else { Display::None })))
             .controller_ref(controller).enabled(session.loaded).on_document_change(move |document| {
                 let base = change.content.get(); let mut next = writer_from_rich(&base, &document);
                 if tracking.get() && writer_content_to_plain(&base) != document.plain_text() {
@@ -470,15 +473,6 @@ pub fn Writer(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         let add_link = session.clone();
         let settings_session = session.clone();
         let settings_widget = when(settings, move || writer_settings(settings_session.clone()));
-        let print = sapid::button()
-            .theme(crate::components::ui::theme())
-            .label("Print")
-            .on_press(|| {
-                #[cfg(target_arch = "wasm32")]
-                if let Some(window) = web_sys::window() {
-                    let _ = window.print();
-                }
-            });
         let count = content.map(|value| {
             let text = writer_content_to_plain(value);
             format!(
@@ -488,6 +482,32 @@ pub fn Writer(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 (text.chars().count() / 3000).max(1)
             )
         });
+        let menu_session = session.clone();
+        let menu_commands: Rc<dyn Fn(&str)> = Rc::new(move |command| match command {
+            "find" => find_open.revise(|value| *value = true),
+            "toggle-sidebar" => sidebar_open.revise(|value| *value = !*value),
+            "comments" => comments.revise(|value| *value = !*value),
+            "versions" => versions.revise(|value| *value = !*value),
+            "settings" => settings.revise(|value| *value = !*value),
+            "tracking" => tracking.revise(|value| *value = !*value),
+            "insert-controls" => insert_open.revise(|value| *value = !*value),
+            command if command.starts_with("insert-") => insert_writer_kind(&menu_session, command),
+            command if command.starts_with("format-") => {
+                if let Some(controller) = controller.get() {
+                    let format = match command {
+                        "format-bold" => sapid::RichFormat::Bold(true),
+                        "format-italic" => sapid::RichFormat::Italic(true),
+                        "format-code" => sapid::RichFormat::Code(true),
+                        "format-heading" => {
+                            sapid::RichFormat::Block(sapid::RichBlockKind::Heading(2))
+                        }
+                        _ => sapid::RichFormat::Block(sapid::RichBlockKind::Paragraph),
+                    };
+                    let _ = controller.format(format);
+                }
+            }
+            _ => {}
+        });
         col()
             .class("writer-app editor-shell")
             .fill((
@@ -495,85 +515,85 @@ pub fn Writer(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                     &session,
                     "Writer",
                     &["docx", "pdf", "html", "markdown", "odt", "txt"],
+                    menu_commands,
                 ),
-                row().class("editor-toolbar").fill((
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Comments")
-                        .on_press(move || comments.revise(|value| *value = !*value)),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Versions")
-                        .on_press(move || versions.revise(|value| *value = !*value)),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Page & document settings")
-                        .on_press(move || settings.revise(|value| *value = !*value)),
-                    sapid::checkbox()
-                        .theme(crate::components::ui::theme())
-                        .label("Track changes")
-                        .checked(tracking)
-                        .on_checked_change(move |value| {
-                            tracking.revise(|current| *current = value)
-                        }),
-                    print,
+                writer_formatting(controller, session.loaded, tracking, settings),
+                when(find_open, move || {
+                    let replace = replace.clone();
+                    let add_link = add_link.clone();
+                    row().class("editor-toolbar writer-find-toolbar").fill((
+                        sapid::text_field()
+                            .theme(crate::components::ui::theme())
+                            .name("Find")
+                            .value(search)
+                            .on_value_change(move |value| {
+                                search.revise(|current| *current = value)
+                            }),
+                        sapid::text_field()
+                            .theme(crate::components::ui::theme())
+                            .name("Replace with")
+                            .value(replacement)
+                            .on_value_change(move |value| {
+                                replacement.revise(|current| *current = value)
+                            }),
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .label("Replace all")
+                            .on_press(move || {
+                                let query = search.get();
+                                if !query.is_empty() {
+                                    let base = replace.content.get();
+                                    let text = writer_content_to_plain(&base)
+                                        .replace(&query, &replacement.get());
+                                    replace.edit(writer_content_with_text(&base, &text));
+                                }
+                            }),
+                        sapid::text_field()
+                            .theme(crate::components::ui::theme())
+                            .name("Link URL")
+                            .value(link_url)
+                            .on_value_change(move |value| {
+                                link_url.revise(|current| *current = value)
+                            }),
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .label("Link selection")
+                            .on_press(move || {
+                                if let Some(controller) = controller.get()
+                                    && let Err(error) = controller
+                                        .format(sapid::RichFormat::Link(Some(link_url.get())))
+                                {
+                                    add_link.status.revise(|value| *value = error.to_string());
+                                }
+                            }),
+                    ))
+                }),
+                when(insert_open, {
+                    let session = session.clone();
+                    move || writer_insert_controls(session.clone())
+                }),
+                row().class("editor-main writer-main").fill((
+                    when(sidebar_open, move || {
+                        widget(move |scope| {
+                            crate::components::sidebar::Sidebar(scope.clone(), auth).build(scope)
+                        })
+                    }),
+                    col().class("editor-canvas writer-canvas").fill(
+                        col().class("page writer-page").fill((
+                            editor,
+                            fallback,
+                            writer_native_blocks(session.clone()),
+                        )),
+                    ),
+                    settings_widget,
+                    crate::components::comments_pane::CommentsPane(
+                        scope.clone(),
+                        auth,
+                        id.clone(),
+                        comments,
+                    ),
                 )),
-                row().class("editor-toolbar").fill((
-                    sapid::text_field()
-                        .theme(crate::components::ui::theme())
-                        .name("Find")
-                        .value(search)
-                        .on_value_change(move |value| search.revise(|current| *current = value)),
-                    sapid::text_field()
-                        .theme(crate::components::ui::theme())
-                        .name("Replace with")
-                        .value(replacement)
-                        .on_value_change(move |value| {
-                            replacement.revise(|current| *current = value)
-                        }),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Replace all")
-                        .on_press(move || {
-                            let query = search.get();
-                            if !query.is_empty() {
-                                let base = replace.content.get();
-                                let text = writer_content_to_plain(&base)
-                                    .replace(&query, &replacement.get());
-                                replace.edit(writer_content_with_text(&base, &text));
-                            }
-                        }),
-                    sapid::text_field()
-                        .theme(crate::components::ui::theme())
-                        .name("Link URL")
-                        .value(link_url)
-                        .on_value_change(move |value| link_url.revise(|current| *current = value)),
-                    sapid::button()
-                        .theme(crate::components::ui::theme())
-                        .label("Link selection")
-                        .on_press(move || {
-                            if let Some(controller) = controller.get()
-                                && let Err(error) =
-                                    controller.format(sapid::RichFormat::Link(Some(link_url.get())))
-                            {
-                                add_link.status.revise(|value| *value = error.to_string());
-                            }
-                        }),
-                )),
-                col().fill((
-                    writer_insert_controls(session.clone()),
-                    editor,
-                    fallback,
-                    writer_native_blocks(session.clone()),
-                )),
-                text().class("editor-statusbar").content(count),
-                settings_widget,
-                crate::components::comments_pane::CommentsPane(
-                    scope.clone(),
-                    auth,
-                    id.clone(),
-                    comments,
-                ),
+                text().class("status-bar editor-statusbar").content(count),
                 crate::components::version_history::VersionHistory(
                     scope.clone(),
                     auth,
@@ -581,6 +601,147 @@ pub fn Writer(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                     versions,
                 ),
                 crate::components::ai_assist::AiAssist(scope.clone(), auth, id.clone()),
+            ))
+            .show_in(scope)
+    })
+}
+
+fn writer_formatting(
+    controller: Cage<Option<sapid::EditorController>>,
+    enabled: Cage<bool>,
+    tracking: Cage<bool>,
+    settings: Cage<bool>,
+) -> impl Widget {
+    widget(move |scope| {
+        let buttons = [("Bold", "B"), ("Italic", "I")]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, label))| {
+                let active = scope.cage(false);
+                sapid::button()
+                    .theme(crate::components::ui::theme())
+                    .class(scope.bond(move || {
+                        if active.get() {
+                            "toolbar-btn active".into()
+                        } else {
+                            "toolbar-btn".into()
+                        }
+                    }))
+                    .name(name)
+                    .label(label)
+                    .enabled(enabled)
+                    .on_press(move || {
+                        let value = !active.get();
+                        active.revise(|active| *active = value);
+                        if let Some(controller) = controller.get() {
+                            let format = match index {
+                                0 => sapid::RichFormat::Bold(value),
+                                1 => sapid::RichFormat::Italic(value),
+                                _ => sapid::RichFormat::Code(value),
+                            };
+                            let _ = controller.format(format);
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+        row()
+            .class("toolbar writer-format-toolbar")
+            .fill((
+                sapid::native_select("writer-font-family")
+                    .theme(crate::components::ui::theme())
+                    .class("toolbar-select font-family")
+                    .name("Font family")
+                    .enabled(false)
+                    .default_value(Some("Arial".to_string()))
+                    .options([sapid::select_option("Arial", "Arial")]),
+                sapid::native_select("writer-font-size")
+                    .theme(crate::components::ui::theme())
+                    .class("toolbar-select font-size")
+                    .name("Font size")
+                    .enabled(false)
+                    .default_value(Some("12".to_string()))
+                    .options([sapid::select_option("12", "12pt")]),
+                view().class("toolbar-separator"),
+                row().class("toolbar-group").fill((
+                    group().fill(buttons),
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .class("toolbar-btn underline")
+                        .name("Underline")
+                        .label("U")
+                        .enabled(false),
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .class("toolbar-btn strikethrough")
+                        .name("Strikethrough")
+                        .label("S")
+                        .enabled(false),
+                )),
+                view().class("toolbar-separator"),
+                row().class("toolbar-group").fill(
+                    [
+                        ("Bulleted list", "* List"),
+                        ("Numbered list", "1. List"),
+                        ("Indent", ">>"),
+                        ("Outdent", "<<"),
+                    ]
+                    .into_iter()
+                    .map(|(name, label)| {
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .class("toolbar-btn")
+                            .name(name)
+                            .label(label)
+                            .enabled(false)
+                    })
+                    .collect::<Vec<_>>(),
+                ),
+                view().class("toolbar-separator"),
+                row().class("toolbar-group").fill(
+                    [
+                        ("Align left", "L"),
+                        ("Align center", "C"),
+                        ("Align right", "R"),
+                        ("Justify", "J"),
+                    ]
+                    .into_iter()
+                    .map(|(name, label)| {
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .class("toolbar-btn")
+                            .name(name)
+                            .label(label)
+                            .enabled(false)
+                    })
+                    .collect::<Vec<_>>(),
+                ),
+            ))
+            .fill((
+                view().class("toolbar-separator"),
+                sapid::button()
+                    .theme(crate::components::ui::theme())
+                    .class("toolbar-color writer-text-color")
+                    .name("Text color")
+                    .label("■")
+                    .enabled(false),
+                sapid::button()
+                    .theme(crate::components::ui::theme())
+                    .class("toolbar-color writer-highlight-color")
+                    .name("Highlight color")
+                    .label("■")
+                    .enabled(false),
+                view().class("toolbar-separator"),
+                sapid::button()
+                    .theme(crate::components::ui::theme())
+                    .class("toolbar-btn")
+                    .name("Track changes")
+                    .label("TC")
+                    .on_press(move || tracking.revise(|value| *value = !*value)),
+                sapid::button()
+                    .theme(crate::components::ui::theme())
+                    .class("toolbar-btn")
+                    .label("Changes")
+                    .on_press(move || settings.revise(|value| *value = !*value)),
             ))
             .show_in(scope)
     })
@@ -883,6 +1044,39 @@ fn append_writer_block(session: &EditorSession, block: Value) {
     if let Some(body) = content["body"].as_array_mut() {
         body.push(block);
         session.edit(content);
+    }
+}
+fn insert_writer_kind(session: &EditorSession, command: &str) {
+    match command {
+        "insert-table" => {
+            let paragraph = || json!({"type":"Paragraph","id":uuid::Uuid::new_v4(),"runs":[plain_writer_run("")],"alignment":"Left","indent_level":0,"spacing":{"before":0.,"after":8.,"line_height":1.15}});
+            append_writer_block(
+                session,
+                json!({"type":"Table","id":uuid::Uuid::new_v4(),"column_widths":[240.,240.],"rows":(0..2).map(|_|json!({"cells":(0..2).map(|_|json!({"blocks":[paragraph()],"col_span":1,"row_span":1,"background_color":null})).collect::<Vec<_>>()})).collect::<Vec<_>>()}),
+            );
+        }
+        "insert-list" => append_writer_block(
+            session,
+            json!({"type":"List","id":uuid::Uuid::new_v4(),"ordered":false,"items":[{"runs":[plain_writer_run("List item")],"children":[]}]}),
+        ),
+        "insert-code" => append_writer_block(
+            session,
+            json!({"type":"CodeBlock","id":uuid::Uuid::new_v4(),"language":null,"code":""}),
+        ),
+        "insert-image" => {
+            #[cfg(target_arch = "wasm32")]
+            if let Some(url) = web_sys::window()
+                .and_then(|window| window.prompt_with_message("Image URL").ok().flatten())
+                .filter(|url| !url.trim().is_empty())
+            {
+                append_writer_block(
+                    session,
+                    json!({"type":"Image","id":uuid::Uuid::new_v4(),"url":url,"alt_text":"Document image","width":null,"height":null,"alignment":"Left"}),
+                );
+            }
+        }
+        "insert-page-break" => append_writer_block(session, json!({"type":"PageBreak"})),
+        _ => {}
     }
 }
 fn writer_insert_controls(session: EditorSession) -> impl Widget {

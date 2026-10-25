@@ -1,0 +1,106 @@
+/* Restore the original shell/card hierarchy on semantic Glory nodes. */
+.app-page { min-height: 100vh; width: 100%; }
+.navbar .navbar-end { margin-left: auto; }
+.navbar .navbar-menu { min-width: 0; }
+.navbar .navbar-user { flex-shrink: 0; }
+.navbar .brand-link { white-space: nowrap; }
+.navbar .user-avatar { flex-shrink: 0; }
+.navbar .search-input { min-height: 0; font-family: Arial, sans-serif; line-height: normal; }
+.navbar .search-input[data-gly-kind=input] { color: var(--text-white); }
+.navbar .lang-toggle, .navbar .theme-toggle { width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 1px solid rgba(255,255,255,.2); color: var(--text-white); cursor: pointer; border-radius: var(--radius-full); }
+.navbar .notifications { position: relative; flex-shrink: 0; }
+.navbar .notifications > button { font-size: .8125rem; min-height: 32px; }
+.navbar .notification-panel { color: var(--text); }
+.footer-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 6px; }
+.profile-container > h1 { margin-bottom: var(--space-lg); }
+.profile-label { font-weight: 500; color: var(--text-light); }
+.profile-section .form-input { width: 100%; }
+.profile-section > .form-group { margin-bottom: var(--space-md); }
+.profile-section > .badge { justify-self: start; }
+.auth-card > .auth-header h1 { font-size: 1.5rem; line-height: 1.3; margin: 0 0 var(--space-xs); }
+.auth-card .auth-footer { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 6px; }
+.auth-card .form-group { display: flex; flex-direction: column; }
+.auth-card .sapid-form { gap: 0; }
+.form-label { display: block; margin-bottom: var(--space-xs); font-size: .875rem; font-weight: 500; color: var(--text); }
+.sidebar .sidebar-storage { margin-top: auto; }
+.sidebar .sidebar-action { width: 100%; background: none; border: none; text-align: left; font: inherit; }
+.sidebar .storage-label { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.sidebar .storage-label > :last-child { text-align: right; font-size: .75rem; }
+.sidebar .storage-fill, .dashboard .storage-fill { height: 100%; background: var(--primary); }
+.admin-user-table { background: var(--bg-white); border: 1px solid var(--border); border-radius: var(--radius-md); overflow-x: auto; margin-bottom: var(--space-lg); }
+.admin-user-row { display: grid; grid-template-columns: minmax(100px,1fr) minmax(160px,1.6fr) 80px 100px 150px 160px; min-width: 840px; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); padding: 12px 16px; font-size: .875rem; }
+.admin-user-row:last-child { border-bottom: none; }
+.admin-user-row:hover { background: var(--bg); }
+.admin-user-head { background: var(--bg); font-weight: 600; color: var(--text-light); }
+.admin-user-row .badge { justify-self: start; }
+.admin-user-row .table-actions { gap: 6px; }
+.admin-section > h2, .admin-section > h3 { margin-bottom: var(--space-md); }
+.admin-section .settings-form { max-width: 560px; }
+.settings-form { max-width: 560px; }
+.settings-form .form-group { margin-bottom: var(--space-md); }
+@media (max-width: 900px) {
+  .navbar .navbar-brand { margin-right: 12px; }
+  .navbar .navbar-search { display: none; }
+  .navbar .navbar-menu .navbar-item { padding-inline: 8px; }
+}
+@media (max-width: 600px) {
+  .navbar .navbar-menu { display: none; }
+  .navbar .brand-text { font-size: 1rem; }
+  .navbar .navbar-end { gap: 6px; }
+  .navbar .navbar-user { gap: 4px; }
+  .navbar .navbar-user > .btn { padding: 4px 8px; }
+  .navbar .notifications > button { padding: 4px 6px; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .profile-row { grid-template-columns: 100px minmax(0,1fr); }
+  .profile-container { width: 100%; }
+}
+/* Browser measurements against the previous profile and 390px shell. */
+.profile-container > h1 { margin-bottom: 0; }
+
+
+.totp-security .totp-description { display: block; }
+.totp-security .totp-qr { width: 192px; height: 192px; }
+.totp-security .totp-secret, .totp-security .totp-backup-codes { white-space: pre-wrap; }
+.totp-security > .btn { margin-right: 8px; }
+@media (max-width: 600px) {
+  .navbar { padding-inline: 12px; }
+  .navbar .navbar-brand { margin-right: 8px; }
+  .navbar .brand-text { font-size: .875rem; }
+  .navbar .brand-icon { font-size: 1.25rem; }
+  .navbar .navbar-user > .btn { padding: 4px 6px; font-size: .75rem; }
+  .profile-row > :last-child { min-width: 0; overflow-wrap: anywhere; }
+  .auth-page, .app-page { padding-bottom: 60px; }
+  .auth-page { padding-bottom: 24px; }
+}
+/* A semantic Form owns a fieldset; the old form used ordinary block flow. */
+.auth-card .sapid-form, .auth-card .sapid-form-controls { display: block; }
+.auth-card .form-group { display: block; }
+@media (max-width: 600px) {
+  .auth-page { padding-bottom: 24px; }
+  body:has(.auth-page) { padding-bottom: 0; }
+}
+
+@media (max-width: 600px) {
+  #main .navbar .navbar-user > .sapid-button.btn { padding: 4px 6px; font-size: .75rem; }
+}
+/* The original account security panel followed the ordinary section text flow. */
+.totp-security .totp-description { font-size: 1rem; margin: 0; }
+.totp-security .totp-action-panel { max-width: none; }
+.totp-security .totp-action-panel .form-group { margin-bottom: 0; }
+#main .totp-security .form-group > [data-gly-kind=text]:first-child { font-size: 1rem; margin-bottom: 0; }
+/* Preserve native tab metrics and the original admin form spacing. */
+#main .admin-tabs .tab-btn { font-family: Arial, sans-serif; line-height: normal; }
+.admin-settings > h2, .admin-activity > h2 { margin-bottom: 0; }
+.admin-settings .settings-form { max-width: 500px; }
+.admin-settings .form-group { margin-bottom: var(--space-lg); }
+.admin-user-row { grid-template-columns: minmax(170px,1.25fr) minmax(250px,1.8fr) 112px 100px minmax(230px,1.7fr) 72px; min-width: 1070px; gap: 12px; }
+.admin-user-row > * { min-width: 0; overflow-wrap: anywhere; }
+.admin-user-row .form-select { width: 100%; }
+.admin-filter-bar > .form-input { width: 300px; }
+.admin-filter-bar > .form-select { width: 160px; }
+#main .form-select.sapid-native-select { min-height: 0; height: auto; padding: 10px 14px; font: inherit; font-size: .9375rem; line-height: normal; color: var(--text); background: var(--bg-white); border: 1px solid var(--border-dark); border-radius: var(--radius-md); }
+@media(max-width:600px) {
+  .admin-filter-bar > .form-input, .admin-filter-bar > .form-select { width: 100%; }
+}
+.navbar .lang-toggle, .navbar .theme-toggle { font-family: Arial, sans-serif; line-height: normal; }
+.admin-user-row { padding: 8px 16px; }
+.admin-user-head { font-size: .8125rem; }

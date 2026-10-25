@@ -34,19 +34,47 @@ pub fn go(path: &str) {
 pub fn heading(value: impl Into<String>) -> glory::ui::Text {
     text().kind(TextKind::Heading(1)).content(value.into())
 }
+pub fn format_size(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.)
+    } else {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.)
+    }
+}
+pub fn storage_percent(profile: &crate::state::UserProfile) -> f64 {
+    if profile.storage_quota > 0 {
+        (profile.storage_used as f64 / profile.storage_quota as f64 * 100.).clamp(0., 100.)
+    } else {
+        0.
+    }
+}
 pub fn label(value: impl Into<String>) -> glory::ui::Text {
     text().content(value.into())
 }
 pub fn field(name: impl Into<String>, value: Cage<String>, purpose: Purpose) -> impl Widget {
+    field_placeholder(name, value, purpose, String::new())
+}
+pub fn field_placeholder(
+    name: impl Into<String>,
+    value: Cage<String>,
+    purpose: Purpose,
+    placeholder: impl Into<String>,
+) -> impl Widget {
     let name = name.into();
-    col().class("form-group").fill((
-        label(name.clone()),
+    view().class("form-group").fill((
+        label(name.clone()).class("form-label"),
         sapid::text_field()
             .theme(theme())
+            .unstyled()
             .class("form-input")
             .name(name)
             .value(value)
             .purpose(purpose)
+            .placeholder(placeholder.into())
             .on_value_change(move |next| set(value, next)),
     ))
 }
@@ -60,7 +88,16 @@ pub fn anchor(name: impl Into<String>, target: impl Into<String>) -> glory::ui::
     link().label(name.into()).target(target.into())
 }
 pub fn status(value: Cage<String>) -> glory::ui::Text {
-    text().class("form-status").content(value)
+    text()
+        .class("form-status")
+        .content(value)
+        .style(value.map(|value| {
+            Style::new().display(if value.is_empty() {
+                Display::None
+            } else {
+                Display::Block
+            })
+        }))
 }
 pub fn load<T: serde::de::DeserializeOwned + Clone + 'static>(
     scope: &Scope,
