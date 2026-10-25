@@ -8,6 +8,7 @@ members = [
     "crates/collab",
     "crates/export",
 ]
+exclude = [".dependencies/glory", ".dependencies/sapid"]
 
 [workspace.package]
 version = "0.1.0"
@@ -56,8 +57,8 @@ lettre = "0.11.23"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
 
 # Frontend
-glory = { path = "D:/Works/glory-rs/glory/crates/glory", default-features = false }
-sapid = { path = "D:/Works/glory-rs/sapid", features = ["editor", "files", "charts", "json", "dates"] }
+glory = { path = ".dependencies/glory/crates/glory", default-features = false }
+sapid = { path = ".dependencies/sapid", features = ["editor", "files", "charts", "json", "dates"] }
 
 # HTTP client
 reqwest = { version = "0.13", features = ["json"] }

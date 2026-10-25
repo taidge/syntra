@@ -146,14 +146,14 @@ office/
 
 - [Rust](https://rustup.rs/) 1.94+ (edition 2024)
 - SQLite 3 (bundled with Diesel)
-- Glory checkout at `D:/Works/glory-rs/glory` and Sapid at `D:/Works/glory-rs/sapid`
+- [Git](https://git-scm.com/) to initialize the pinned [Glory](https://github.com/glory-rs/glory) and [Sapid](https://github.com/sapid-ui/sapid) source submodules
 - `wasm32-unknown-unknown` and wasm-bindgen-cli matching the version in `Cargo.lock`
 
 ### Quick Start
 
 ```powershell
 # Clone the repository
-git clone https://github.com/contrix-org/office.git
+git clone --recurse-submodules https://github.com/contrix-org/office.git
 cd office
 
 # Build the Glory + Sapid browser app, then start the backend
@@ -165,7 +165,36 @@ Open `http://localhost:3000`. The server serves the API and browser app from the
 Compiler output, temporary files and generated browser assets stay under `D:/BuildCache/office-glory`.
 To build separately, run `pwsh ./scripts/build-frontend.ps1`, then
 `pwsh ./scripts/dev.ps1 -SkipFrontendBuild` from the repository root.
-The scripts set Cargo's registry cache, target directory and compiler temporaries on D:.
+The scripts set Cargo's registry cache, target directory and compiler temporaries on D:,
+then verify the effective target directory with `cargo metadata --no-deps --format-version 1`.
+Pass the same `-BuildRoot D:/BuildCache/<task>` to both scripts to use a separate build directory.
+Under WSL, the default is `/mnt/d/BuildCache/office-glory`; the scripts verify that `/mnt/d`
+is mounted from Windows D: before building. Remote GitHub Actions runners use their runner
+temporary directory on Linux/macOS and D: on Windows.
+
+### Source dependencies
+
+Glory and Sapid live in `.dependencies/glory` and `.dependencies/sapid`. Cargo uses these
+relative paths, so no separate checkout or manifest editing is needed. The repository records
+an exact commit for each submodule; `branch = main` identifies the upstream branch used for
+deliberate upgrades. The build and development scripts automatically initialize missing sources.
+
+For an existing clone, or after pulling a commit that updates dependencies, run:
+
+```powershell
+git submodule update --init --recursive
+```
+
+To deliberately upgrade both dependencies to their latest upstream `main` revisions:
+
+```powershell
+git submodule update --init --recursive --remote -- .dependencies/glory .dependencies/sapid
+git add .dependencies/glory .dependencies/sapid
+# Validate the upgrade, then commit the updated submodule revisions and Cargo.lock if changed.
+```
+
+CI initializes the recorded submodule revisions without `--remote`, so a build remains
+reproducible as upstream `main` advances. Local edits in other Glory/Sapid checkouts are unaffected.
 
 ### Configuration
 

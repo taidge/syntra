@@ -392,7 +392,6 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     .unstyled()
                     .class("form-input")
                     .name(crate::i18n::t("admin.search_users"))
-                    .placeholder(crate::i18n::t("admin.search_users"))
                     .value(search)
                     .on_value_change(move |value| set(search, value)),
                 choice(
@@ -485,7 +484,6 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     .unstyled()
                     .class("form-input")
                     .name(crate::i18n::t("admin.search_activity"))
-                    .placeholder(crate::i18n::t("admin.search_activity"))
                     .value(activity_search)
                     .on_value_change(move |value| set(activity_search, value)),
                 choice(

@@ -1,4 +1,8 @@
 /* Restore the Dioxus layout contracts with Glory's semantic hosts. */
+.files-page .file-toolbar .sapid-button.btn-outline {
+  color: var(--primary) !important; background: transparent !important;
+  border-color: var(--border-dark) !important;
+}
 .calc-editor {
   height: 100dvh; min-height: 0; overflow: hidden; gap: 0;
   background: var(--bg-white); color: var(--text);

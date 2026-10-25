@@ -1,0 +1,8 @@
+[submodule ".dependencies/glory"]
+	path = .dependencies/glory
+	url = https://github.com/glory-rs/glory.git
+	branch = main
+[submodule ".dependencies/sapid"]
+	path = .dependencies/sapid
+	url = https://github.com/sapid-ui/sapid.git
+	branch = main

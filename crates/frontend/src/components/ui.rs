@@ -56,14 +56,6 @@ pub fn label(value: impl Into<String>) -> glory::ui::Text {
     text().content(value.into())
 }
 pub fn field(name: impl Into<String>, value: Cage<String>, purpose: Purpose) -> impl Widget {
-    field_placeholder(name, value, purpose, String::new())
-}
-pub fn field_placeholder(
-    name: impl Into<String>,
-    value: Cage<String>,
-    purpose: Purpose,
-    placeholder: impl Into<String>,
-) -> impl Widget {
     let name = name.into();
     view().class("form-group").fill((
         label(name.clone()).class("form-label"),
@@ -74,7 +66,6 @@ pub fn field_placeholder(
             .name(name)
             .value(value)
             .purpose(purpose)
-            .placeholder(placeholder.into())
             .on_value_change(move |next| set(value, next)),
     ))
 }

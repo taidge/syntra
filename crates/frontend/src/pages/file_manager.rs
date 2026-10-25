@@ -209,7 +209,8 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     action(crate::i18n::t("common.cancel"), move || {
                         set(folder_open, false)
                     })
-                    .variant(sapid::ButtonVariant::Outline),
+                    .variant(sapid::ButtonVariant::Secondary)
+                    .class("btn btn-outline btn-sm"),
                     action(crate::i18n::t("common.create"), move || {
                         if folder_name.get().trim().is_empty() {
                             return;
@@ -274,7 +275,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                     refresh(&scope, auth, parent, files, feedback);
                                 }
                             })
-                            .variant(sapid::ButtonVariant::Subtle)
+                            .variant(sapid::ButtonVariant::Secondary)
                             .class("breadcrumb-item"),
                         ) as Box<dyn Widget>
                     },
@@ -284,7 +285,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     action(crate::i18n::t("file_mgr.new_folder"), move || {
                         set(folder_open, true)
                     })
-                    .variant(sapid::ButtonVariant::Outline)
+                    .variant(sapid::ButtonVariant::Secondary)
                     .class("btn btn-outline btn-sm"),
                     view().class("toolbar-spacer"),
                     sapid::text_field()
@@ -292,7 +293,6 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                         .class("file-search")
                         .name(crate::i18n::t("common.search"))
                         .purpose(Purpose::Search)
-                        .placeholder(crate::i18n::t("file_mgr.search_files"))
                         .value(query)
                         .on_value_change(move |value| set(query, value)),
                 )),
@@ -301,7 +301,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     action(crate::i18n::t("file_list.view_grid"), move || {
                         set(grid_view, true)
                     })
-                    .variant(sapid::ButtonVariant::Subtle)
+                    .variant(sapid::ButtonVariant::Secondary)
                     .class(grid_view.map(|grid| {
                         if *grid {
                             "toggle-btn active".to_string()
@@ -312,7 +312,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     action(crate::i18n::t("file_list.view_list"), move || {
                         set(grid_view, false)
                     })
-                    .variant(sapid::ButtonVariant::Subtle)
+                    .variant(sapid::ButtonVariant::Secondary)
                     .class(grid_view.map(|grid| {
                         if !*grid {
                             "toggle-btn active".to_string()
@@ -397,7 +397,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                                 })),
                                             sapid::button()
                                                 .theme(theme())
-                                                .variant(sapid::ButtonVariant::Subtle)
+                                                .variant(sapid::ButtonVariant::Secondary)
                                                 .class("file-name")
                                                 .label(filename)
                                                 .on_press(move || {
@@ -480,7 +480,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                                     }
                                                 });
                                             })
-                                            .variant(sapid::ButtonVariant::Subtle)
+                                            .variant(sapid::ButtonVariant::Secondary)
                                             .class("file-rename"),
                                             action("Delete", move || {
                                                 let delete_file = item.get();
@@ -513,7 +513,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                                     }
                                                 });
                                             })
-                                            .variant(sapid::ButtonVariant::Subtle)
+                                            .variant(sapid::ButtonVariant::Secondary)
                                             .class("file-delete"),
                                         )),
                                     ))

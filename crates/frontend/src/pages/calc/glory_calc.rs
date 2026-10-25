@@ -504,7 +504,7 @@ fn action(label: &str, callback: impl FnMut() + 'static) -> Box<dyn Widget> {
     Box::new(
         sapid::button()
             .theme(crate::components::ui::theme())
-            .variant(sapid::ButtonVariant::Subtle)
+            .variant(sapid::ButtonVariant::Secondary)
             .size(sapid::Size::Small)
             .class("toolbar-btn")
             .name(label.to_owned())
@@ -1338,7 +1338,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 move |sheet, _| {
                     let index = sheet.get().0;
                     sapid::button().theme(crate::components::ui::theme())
-                        .variant(sapid::ButtonVariant::Subtle).size(sapid::Size::Small)
+                        .variant(sapid::ButtonVariant::Secondary).size(sapid::Size::Small)
                         .class(ed.sheet.map(move |active|if *active==index { "sheet-tab active".to_string() } else { "sheet-tab".to_string() }))
                         .label(scope_label(sheet)).on_press(move || {
                         ed.sheet.revise(|v| *v = index);
