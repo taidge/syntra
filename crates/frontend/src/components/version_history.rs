@@ -1,9 +1,9 @@
-use dioxus::prelude::*;
+use crate::{
+    components::ui::*,
+    state::{self, AuthState},
+};
+use glory::prelude::*;
 use serde::Deserialize;
-
-use crate::components::{Toast, ToastKind, push_toast};
-use crate::state::{AuthState, api_post};
-
 #[derive(Deserialize, Clone, PartialEq)]
 pub struct VersionItem {
     #[serde(default)]
@@ -17,114 +17,77 @@ pub struct VersionItem {
     #[serde(default)]
     pub label: Option<String>,
 }
-
-#[derive(Props, Clone, PartialEq)]
-pub struct VersionHistoryProps {
-    pub doc_id: String,
-    pub open: Signal<bool>,
-}
-
-#[component]
-pub fn VersionHistory(props: VersionHistoryProps) -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let auth = use_context::<Signal<AuthState>>();
-    let toast_bus = use_context::<Signal<Vec<Toast>>>();
-    let token = auth.read().token.clone().unwrap_or_default();
-    let doc_id_for_fetch = props.doc_id.clone();
-    let token_for_fetch = token.clone();
-    let refresh_tick = use_signal(|| 0u32);
-
-    let versions = use_resource(move || {
-        let _ = refresh_tick.read();
-        let id = doc_id_for_fetch.clone();
-        let t = token_for_fetch.clone();
-        async move {
-            crate::state::api_get::<Vec<VersionItem>>(&format!("/documents/{id}/versions"), &t)
-                .await
+#[allow(non_snake_case)]
+pub fn VersionHistory(
+    scope: Scope,
+    auth: Cage<AuthState>,
+    doc_id: String,
+    open: Cage<bool>,
+) -> impl Widget {
+    let items = scope.cage(Vec::<VersionItem>::new());
+    let feedback = scope.cage(String::new());
+    let token_value = token(auth);
+    let fetch_id = doc_id.clone();
+    let _ = scope.spawn(async move {
+        match state::api_get::<Vec<VersionItem>>(
+            &format!("/documents/{fetch_id}/versions"),
+            &token_value,
+        )
+        .await
+        {
+            Ok(value) => set(items, value),
+            Err(error) => set(feedback, error),
         }
     });
-
-    let mut open_sig = props.open;
-    if !*open_sig.read() {
-        return rsx! { Fragment {} };
-    }
-
-    let restore_token = token.clone();
-    let restore_id = props.doc_id.clone();
-
-    let title_label = crate::i18n::t("versions.title");
-    let close_label = crate::i18n::t("versions.close");
-    let loading_label = crate::i18n::t("versions.loading");
-    let empty_label = crate::i18n::t("versions.empty");
-    let restore_label = crate::i18n::t("versions.restore");
-    rsx! {
-        aside { class: "version-pane",
-            header { class: "version-pane-header",
-                strong { "{title_label}" }
-                button {
-                    class: "btn-icon",
-                    aria_label: "{close_label}",
-                    onclick: move |_| open_sig.set(false),
-                    "\u{2715}"
-                }
-            }
-            div { class: "version-list",
-                match versions.read().as_ref() {
-                    None => rsx! { p { class: "muted", "{loading_label}" } },
-                    Some(Err(e)) => rsx! { p { class: "muted", {crate::i18n::t("versions.failed").replace("{err}", &e.to_string())} } },
-                    Some(Ok(items)) if items.is_empty() => rsx! { p { class: "muted", "{empty_label}" } },
-                    Some(Ok(items)) => rsx! {
-                        for v in items.iter().cloned() {
-                            div { class: "version-item", key: "{v.id}",
-                                div { class: "version-meta",
-                                    strong { "v{v.version_number}" }
-                                    span { class: "muted", " \u{00b7} {v.created_at}" }
-                                    if let Some(label) = v.label.clone() {
-                                        if !label.is_empty() {
-                                            div { class: "version-label", "{label}" }
-                                        }
-                                    }
-                                }
+    let weak = scope.downgrade();
+    when(open, move || {
+        let weak = weak.clone();
+        let id = doc_id.clone();
+        col().class("version-history").fill((
+            heading(crate::i18n::t("versions.title")),
+            action("Close", move || set(open, false)),
+            status(feedback),
+            col().fill(each(
+                items,
+                |item| item.id.clone(),
+                move |item, _| {
+                    let weak = weak.clone();
+                    let id = id.clone();
+                    let version = item.get();
+                    let version_id = version.id;
+                    row().fill((
+                        label(format!(
+                            "v{} · {} · {}",
+                            version.version_number,
+                            version.created_at,
+                            version.label.unwrap_or_default()
+                        )),
+                        action(crate::i18n::t("versions.restore"), move || {
+                            let Some(scope) = weak.upgrade() else {
+                                return;
+                            };
+                            let token = token(auth);
+                            let path = format!("/documents/{id}/restore/{version_id}");
+                            let _ = scope.spawn(async move {
+                                match state::api_post::<serde_json::Value, _>(
+                                    &path,
+                                    &serde_json::json!({}),
+                                    &token,
+                                )
+                                .await
                                 {
-                                    let vid = v.id.clone();
-                                    let did = restore_id.clone();
-                                    let t = restore_token.clone();
-                                    let bus = toast_bus;
-                                    let tick = refresh_tick;
-                                    rsx! {
-                                        button {
-                                            class: "btn btn-outline btn-sm",
-                                            aria_label: crate::i18n::t("versions.restore_version").replace("{n}", &v.version_number.to_string()),
-                                            onclick: move |_| {
-                                                let vid = vid.clone();
-                                                let did = did.clone();
-                                                let t = t.clone();
-                                                let bus = bus;
-                                                let mut tick = tick;
-                                                wasm_bindgen_futures::spawn_local(async move {
-                                                    match api_post::<serde_json::Value, _>(
-                                                        &format!("/documents/{did}/restore/{vid}"),
-                                                        &serde_json::json!({}),
-                                                        &t,
-                                                    ).await {
-                                                        Ok(_) => {
-                                                            push_toast(bus, ToastKind::Success, crate::i18n::t("versions.restored"));
-                                                            let cur = *tick.read();
-                                                            tick.set(cur + 1);
-                                                        }
-                                                        Err(e) => push_toast(bus, ToastKind::Error, crate::i18n::t("versions.restore_failed").replace("{err}", &e.to_string())),
-                                                    }
-                                                });
-                                            },
-                                            "{restore_label}"
+                                    Ok(_) => {
+                                        if let Some(window) = web_sys::window() {
+                                            let _ = window.location().reload();
                                         }
                                     }
+                                    Err(error) => set(feedback, error),
                                 }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+                            });
+                        }),
+                    ))
+                },
+            )),
+        ))
+    })
 }

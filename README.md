@@ -113,7 +113,7 @@ A full-featured, open-source office suite built entirely in Rust. Contrix Office
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
 | Backend | [Salvo](https://salvo.rs) | High-performance Rust web framework |
-| Frontend | [Dioxus](https://dioxuslabs.com) | Full Rust UI framework (Web/Desktop/Mobile) |
+| Frontend | [Glory](https://glory.rs) + [Sapid](https://github.com/sapid-ui/sapid) | Semantic Rust widgets and WebAssembly browser host |
 | Database | [SQLx](https://github.com/launchbadge/sqlx) + SQLite/PostgreSQL | Async database with compile-time safety |
 | Auth | JWT + Argon2 | Stateless authentication + secure hashing |
 | Real-time | WebSocket + CRDT | Low-latency collaboration |
@@ -129,7 +129,7 @@ office/
 ├── crates/
 │   ├── core/                   # Shared types, models, DTOs, config
 │   ├── server/                 # Salvo backend (REST API + WebSocket)
-│   ├── frontend/               # Dioxus web frontend
+│   ├── frontend/               # Glory + Sapid web frontend
 │   ├── doc-engine/             # Document models (Writer, Calc, Slides, Whiteboard)
 │   ├── collab/                 # Real-time collaboration engine (CRDT/OT)
 │   └── export/                 # Export/import (HTML, Markdown, CSV, etc.)
@@ -144,25 +144,28 @@ office/
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.83+ (edition 2024)
-- SQLite 3 (bundled with sqlx) or PostgreSQL 15+
+- [Rust](https://rustup.rs/) 1.94+ (edition 2024)
+- SQLite 3 (bundled with Diesel)
+- Glory checkout at `D:/Works/glory-rs/glory` and Sapid at `D:/Works/glory-rs/sapid`
+- `wasm32-unknown-unknown` and wasm-bindgen-cli matching the version in `Cargo.lock`
 
 ### Quick Start
 
-```bash
+```powershell
 # Clone the repository
 git clone https://github.com/contrix-org/office.git
 cd office
 
-# Run the backend server (uses SQLite by default)
-cargo run -p contrix-server
-
-# In another terminal, run the frontend dev server
-cd crates/frontend
-dx serve --platform web
+# Build the Glory + Sapid browser app, then start the backend
+rustup target add wasm32-unknown-unknown
+pwsh ./scripts/dev.ps1
 ```
 
-The backend will start at `http://localhost:3000` and the frontend at `http://localhost:8080`.
+Open `http://localhost:3000`. The server serves the API and browser app from the same origin.
+Compiler output, temporary files and generated browser assets stay under `D:/BuildCache/office-glory`.
+To build separately, run `pwsh ./scripts/build-frontend.ps1`, then
+`pwsh ./scripts/dev.ps1 -SkipFrontendBuild` from the repository root.
+The scripts set Cargo's registry cache, target directory and compiler temporaries on D:.
 
 ### Configuration
 
@@ -352,13 +355,20 @@ The backend follows a layered architecture:
 3. **Middleware** — Cross-cutting concerns (JWT auth, logging, CORS)
 4. **State** — Shared application state (database pool, config, collab manager)
 
-### Frontend (Dioxus)
+### Frontend (Glory + Sapid)
 
-The frontend is a single-page application with:
+The frontend uses handwritten Glory widgets, Cage/Bond state and Sapid controls. Native links
+preserve document URLs and browser history. Each page owns its tasks and listeners.
 
 1. **Pages** — Route-level components (Home, Login, Dashboard, Writer, Calc, Slides, etc.)
 2. **Components** — Reusable UI components (Navbar, Sidebar, Toolbar, FileList, Modal)
 3. **State** — Application state management and API client
+
+This branch uses the current local semantic APIs. Calc exposes selection modes,
+range inputs and Fill actions for gestures the host does not expose. Writer's
+rich editor supports bold, italic, code and links; other native formatting is
+preserved, with separate controls for tables, lists, images and code blocks.
+Complex slide objects can also be adjusted through the presentation JSON panel.
 
 ### Collaboration Engine
 
@@ -403,6 +413,6 @@ You may choose either license at your option.
 ## Acknowledgments
 
 - [Salvo](https://salvo.rs) — Fast and flexible Rust web framework
-- [Dioxus](https://dioxuslabs.com) — Cross-platform UI framework for Rust
+- [Glory](https://glory.rs) + [Sapid](https://github.com/sapid-ui/sapid) — Cross-platform UI framework for Rust
 - [SQLx](https://github.com/launchbadge/sqlx) — Async SQL toolkit for Rust
 - Inspired by [Collabora Online](https://www.collaboraoffice.com/) and [ONLYOFFICE](https://www.onlyoffice.com/)

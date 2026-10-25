@@ -20,6 +20,7 @@ static DICTIONARIES: Lazy<HashMap<&'static str, HashMap<String, String>>> = Lazy
 static CURRENT: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(detect_initial_locale()));
 
 fn detect_initial_locale() -> String {
+    #[cfg(target_arch = "wasm32")]
     if let Some(window) = web_sys::window() {
         if let Ok(Some(storage)) = window.local_storage()
             && let Ok(Some(v)) = storage.get_item("locale")
@@ -48,6 +49,7 @@ pub fn set_locale(loc: &str) {
     if let Ok(mut s) = CURRENT.lock() {
         *s = normalized.to_string();
     }
+    #[cfg(target_arch = "wasm32")]
     if let Some(window) = web_sys::window()
         && let Ok(Some(storage)) = window.local_storage()
     {

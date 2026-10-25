@@ -48,7 +48,7 @@
 
 ### 仍待处理：安全与可靠性
 
-- [ ] **P2 — CSP 仍允许 `unsafe-inline` 与 `unsafe-eval`。** 这会明显削弱 XSS 防护。需要确认 Dioxus 产物约束后改用 nonce/hash，逐步移除两项放行，并补浏览器端 CSP 回归测试。
+- [ ] **P2 — CSP 仍允许 `unsafe-inline` 与 `unsafe-eval`。** 这会明显削弱 XSS 防护。需要确认 Glory + Sapid 产物约束后改用 nonce/hash，逐步移除两项放行，并补浏览器端 CSP 回归测试。
 
 ### 仍待处理：死代码、未完成或未接入
 

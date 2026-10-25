@@ -1,5 +1,5 @@
 use base64::Engine;
-use dioxus::prelude::*;
+use glory::prelude::*;
 use qrcode::{QrCode, render::svg};
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,7 @@ struct TotpCodeRequest {
     code: String,
 }
 
-fn qr_data_uri(value: &str) -> Result<String, String> {
+fn qr_data_uri(value: &str) -> std::result::Result<String, String> {
     let svg = QrCode::new(value.as_bytes())
         .map_err(|error| format!("Could not generate QR code: {error}"))?
         .render::<svg::Color>()
@@ -64,280 +64,164 @@ fn normalize_second_factor_code(value: &str) -> String {
         .collect()
 }
 
-#[component]
-pub fn TotpSecurity(token: String) -> Element {
-    let token_for_status = token.clone();
-    let mut refresh = use_signal(|| 0_u32);
-    let status = use_resource(move || {
-        let token = token_for_status.clone();
-        let _refresh = *refresh.read();
-        async move { api_get::<TotpStatus>("/totp/status", &token).await }
-    });
-
-    let mut current_password = use_signal(String::new);
-    let mut setup = use_signal(|| None::<TotpSetupData>);
-    let mut verification_code = use_signal(String::new);
-    let mut disable_code = use_signal(String::new);
-    let mut confirm_disable = use_signal(|| false);
-    let mut busy = use_signal(|| false);
-    let mut feedback = use_signal(String::new);
-    let mut feedback_is_error = use_signal(|| false);
-
-    let title = crate::i18n::t("profile.two_factor");
-    let loading = crate::i18n::t("common.loading");
-
-    rsx! {
-        section { class: "profile-section totp-section",
-            h2 { "{title}" }
-            match status.read().as_ref() {
-                None => rsx! { p { class: "totp-description", "{loading}" } },
-                Some(Err(error)) => rsx! {
-                    p { class: "profile-status status-error",
-                        {crate::i18n::t("profile.totp_status_failed").replace("{err}", error)}
-                    }
-                },
-                Some(Ok(totp_status)) if totp_status.enabled => rsx! {
-                    div { class: "totp-state-row",
-                        span { class: "badge badge-success", {crate::i18n::t("profile.totp_enabled")} }
-                        p { class: "totp-description", {crate::i18n::t("profile.totp_enabled_hint")} }
-                    }
-                    if *confirm_disable.read() {
-                        div { class: "totp-action-panel",
-                            label { r#for: "totp-disable-code", {crate::i18n::t("profile.totp_disable_code")} }
-                            input {
-                                id: "totp-disable-code",
-                                class: "form-input",
-                                inputmode: "text",
-                                autocomplete: "one-time-code",
-                                maxlength: 32,
-                                value: "{disable_code}",
-                                oninput: move |event| disable_code.set(normalize_second_factor_code(&event.value())),
-                            }
-                            div { class: "totp-actions",
-                                button {
-                                    class: "btn btn-danger",
-                                    disabled: *busy.read() || disable_code.read().is_empty(),
-                                    onclick: {
-                                        let token = token.clone();
-                                        move |_| {
-                                            let token = token.clone();
-                                            let code = disable_code.read().clone();
-                                            busy.set(true);
-                                            feedback.set(String::new());
-                                            wasm_bindgen_futures::spawn_local(async move {
-                                                let body = TotpCodeRequest { code };
-                                                match api_post::<serde_json::Value, _>("/totp/disable", &body, &token).await {
-                                                    Ok(_) => {
-                                                        disable_code.set(String::new());
-                                                        confirm_disable.set(false);
-                                                        feedback_is_error.set(false);
-                                                        feedback.set(crate::i18n::t("profile.totp_disabled"));
-                                                        refresh += 1;
-                                                    }
-                                                    Err(error) => {
-                                                        feedback_is_error.set(true);
-                                                        feedback.set(crate::i18n::t("profile.totp_action_failed").replace("{err}", &error));
-                                                    }
-                                                }
-                                                busy.set(false);
-                                            });
-                                        }
-                                    },
-                                    {crate::i18n::t("profile.totp_confirm_disable")}
-                                }
-                                button {
-                                    class: "btn btn-secondary",
-                                    disabled: *busy.read(),
-                                    onclick: move |_| {
-                                        disable_code.set(String::new());
-                                        confirm_disable.set(false);
-                                        feedback.set(String::new());
-                                    },
-                                    {crate::i18n::t("common.cancel")}
-                                }
-                            }
-                        }
-                    } else {
-                        button {
-                            class: "btn btn-danger",
-                            onclick: move |_| {
-                                feedback.set(String::new());
-                                confirm_disable.set(true);
-                            },
-                            {crate::i18n::t("profile.totp_disable")}
-                        }
-                    }
-                },
-                Some(Ok(_)) => {
-                    if let Some(setup_data) = setup.read().as_ref() {
-                        let qr_image = qr_data_uri(&setup_data.qr_url);
-                        rsx! {
-                            p { class: "totp-description", {crate::i18n::t("profile.totp_scan_hint")} }
-                            div { class: "totp-setup-grid",
-                                div { class: "totp-qr-wrap",
-                                    match qr_image {
-                                        Ok(source) => rsx! {
-                                            img {
-                                                class: "totp-qr",
-                                                src: "{source}",
-                                                width: "192",
-                                                height: "192",
-                                                alt: {crate::i18n::t("profile.totp_qr_alt")},
-                                            }
-                                        },
-                                        Err(error) => rsx! { p { class: "status-error", "{error}" } },
-                                    }
-                                }
-                                div { class: "totp-secret-wrap",
-                                    strong { {crate::i18n::t("profile.totp_manual_secret")} }
-                                    code { class: "totp-secret", "{setup_data.secret}" }
-                                }
-                            }
-                            div { class: "totp-backup-panel",
-                                strong { {crate::i18n::t("profile.totp_backup_codes")} }
-                                p { class: "totp-description", {crate::i18n::t("profile.totp_backup_warning")} }
-                                ul { class: "totp-backup-codes",
-                                    for code in &setup_data.backup_codes {
-                                        li { code { "{code}" } }
-                                    }
-                                }
-                                button {
-                                    class: "btn btn-secondary",
-                                    onclick: {
-                                        let codes = setup_data.backup_codes.clone();
-                                        move |_| {
-                                            match download_text_file("contrix-backup-codes.txt", &backup_codes_file(&codes)) {
-                                                Ok(_) => {
-                                                    feedback_is_error.set(false);
-                                                    feedback.set(crate::i18n::t("profile.totp_codes_downloaded"));
-                                                }
-                                                Err(error) => {
-                                                    feedback_is_error.set(true);
-                                                    feedback.set(crate::i18n::t("profile.totp_action_failed").replace("{err}", &error));
-                                                }
-                                            }
-                                        }
-                                    },
-                                    {crate::i18n::t("profile.totp_download_codes")}
-                                }
-                            }
-                            div { class: "totp-action-panel",
-                                label { r#for: "totp-verification-code", {crate::i18n::t("profile.totp_verification_code")} }
-                                input {
-                                    id: "totp-verification-code",
-                                    class: "form-input",
-                                    inputmode: "numeric",
-                                    autocomplete: "one-time-code",
-                                    maxlength: 6,
-                                    value: "{verification_code}",
-                                    oninput: move |event| verification_code.set(normalize_totp_code(&event.value())),
-                                }
-                                div { class: "totp-actions",
-                                    button {
-                                        class: "btn btn-primary",
-                                        disabled: *busy.read() || verification_code.read().len() != 6,
-                                        onclick: {
-                                            let token = token.clone();
-                                            move |_| {
-                                                let token = token.clone();
-                                                let code = verification_code.read().clone();
-                                                busy.set(true);
-                                                feedback.set(String::new());
-                                                wasm_bindgen_futures::spawn_local(async move {
-                                                    let body = TotpCodeRequest { code };
-                                                    match api_post::<serde_json::Value, _>("/totp/verify", &body, &token).await {
-                                                        Ok(_) => {
-                                                            verification_code.set(String::new());
-                                                            setup.set(None);
-                                                            current_password.set(String::new());
-                                                            feedback_is_error.set(false);
-                                                            feedback.set(crate::i18n::t("profile.totp_enabled_success"));
-                                                            refresh += 1;
-                                                        }
-                                                        Err(error) => {
-                                                            feedback_is_error.set(true);
-                                                            feedback.set(crate::i18n::t("profile.totp_action_failed").replace("{err}", &error));
-                                                        }
-                                                    }
-                                                    busy.set(false);
-                                                });
-                                            }
-                                        },
-                                        {crate::i18n::t("profile.totp_verify_enable")}
-                                    }
-                                    button {
-                                        class: "btn btn-secondary",
-                                        disabled: *busy.read(),
-                                        onclick: move |_| {
-                                            verification_code.set(String::new());
-                                            setup.set(None);
-                                            current_password.set(String::new());
-                                            feedback.set(String::new());
-                                        },
-                                        {crate::i18n::t("common.cancel")}
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        rsx! {
-                            p { class: "totp-description", {crate::i18n::t("profile.totp_disabled_hint")} }
-                            div { class: "totp-action-panel",
-                                label { r#for: "totp-current-password", {crate::i18n::t("profile.current_password")} }
-                                input {
-                                    id: "totp-current-password",
-                                    class: "form-input",
-                                    r#type: "password",
-                                    autocomplete: "current-password",
-                                    value: "{current_password}",
-                                    oninput: move |event| current_password.set(event.value()),
-                                }
-                                button {
-                                    class: "btn btn-primary",
-                                    disabled: *busy.read() || current_password.read().is_empty(),
-                                    onclick: {
-                                        let token = token.clone();
-                                        move |_| {
-                                            let token = token.clone();
-                                            let password = current_password.read().clone();
-                                            busy.set(true);
-                                            feedback.set(String::new());
-                                            wasm_bindgen_futures::spawn_local(async move {
-                                                let body = TotpSetupRequest { current_password: password };
-                                                match api_post::<TotpSetupData, _>("/totp/setup", &body, &token).await {
-                                                    Ok(data) => {
-                                                        setup.set(Some(data));
-                                                        current_password.set(String::new());
-                                                        feedback_is_error.set(false);
-                                                        feedback.set(crate::i18n::t("profile.totp_save_codes"));
-                                                    }
-                                                    Err(error) => {
-                                                        feedback_is_error.set(true);
-                                                        feedback.set(crate::i18n::t("profile.totp_action_failed").replace("{err}", &error));
-                                                    }
-                                                }
-                                                busy.set(false);
-                                            });
-                                        }
-                                    },
-                                    {crate::i18n::t("profile.totp_begin_setup")}
-                                }
-                            }
-                        }
-                    }
-                },
-            }
-            if !feedback.read().is_empty() {
-                p {
-                    class: if *feedback_is_error.read() { "profile-status status-error" } else { "profile-status status-success" },
-                    role: "status",
-                    "{feedback}"
-                }
-            }
+#[allow(non_snake_case)]
+pub fn TotpSecurity(scope: Scope, auth_token: String) -> impl Widget {
+    use crate::components::ui::*;
+    let enabled = scope.cage(false);
+    let setup = scope.cage(None::<TotpSetupData>);
+    let password = scope.cage(String::new());
+    let code = scope.cage(String::new());
+    let feedback = scope.cage(String::new());
+    let busy = scope.cage(false);
+    let initial_token = auth_token.clone();
+    let _ = scope.spawn(async move {
+        match api_get::<TotpStatus>("/totp/status", &initial_token).await {
+            Ok(value) => set(enabled, value.enabled),
+            Err(error) => set(feedback, error),
         }
-    }
+    });
+    let setup_weak = scope.downgrade();
+    let setup_token = auth_token.clone();
+    let verify_weak = scope.downgrade();
+    let verify_token = auth_token.clone();
+    let disable_weak = scope.downgrade();
+    let qr = scope.bond(move || {
+        setup
+            .get()
+            .and_then(|data| qr_data_uri(&data.qr_url).ok())
+            .unwrap_or_default()
+    });
+    col().class("totp-security").fill((
+        heading(crate::i18n::t("profile.two_factor")),
+        text().content(scope.bond(move || {
+            if enabled.get() {
+                crate::i18n::t("profile.totp_enabled")
+            } else {
+                crate::i18n::t("profile.totp_disabled")
+            }
+        })),
+        field(
+            crate::i18n::t("profile.current_password"),
+            password,
+            Purpose::Password,
+        ),
+        sapid::button()
+            .theme(theme())
+            .label(crate::i18n::t("profile.totp_begin_setup"))
+            .enabled(scope.bond(move || !enabled.get() && setup.get().is_none()))
+            .loading(busy)
+            .on_press(move || {
+                let Some(scope) = setup_weak.upgrade() else {
+                    return;
+                };
+                let auth_token = setup_token.clone();
+                let body = TotpSetupRequest {
+                    current_password: password.get(),
+                };
+                set(busy, true);
+                let _ = scope.spawn(async move {
+                    match api_post::<TotpSetupData, _>("/totp/setup", &body, &auth_token).await {
+                        Ok(data) => {
+                            set(setup, Some(data));
+                            set(password, String::new());
+                            set(feedback, crate::i18n::t("profile.totp_save_codes"));
+                        }
+                        Err(error) => set(feedback, error),
+                    }
+                    set(busy, false);
+                });
+            }),
+        when(scope.bond(move || setup.get().is_some()), move || {
+            col().fill((
+                image().source(qr).alt("Authenticator QR code"),
+                text().content_fn(move || {
+                    setup
+                        .get()
+                        .map(|data| {
+                            format!("Secret: {}\n{}", data.secret, data.backup_codes.join("\n"))
+                        })
+                        .unwrap_or_default()
+                }),
+                action(crate::i18n::t("profile.totp_backup_codes"), move || {
+                    if let Some(data) = setup.get() {
+                        let _ = download_text_file(
+                            "contrix-backup-codes.txt",
+                            &backup_codes_file(&data.backup_codes),
+                        );
+                    }
+                }),
+            ))
+        }),
+        sapid::text_field()
+            .theme(theme())
+            .name(crate::i18n::t("auth.totp_code"))
+            .value(code)
+            .on_value_change(move |value| set(code, normalize_second_factor_code(&value))),
+        sapid::button()
+            .theme(theme())
+            .label(crate::i18n::t("profile.totp_verify_enable"))
+            .enabled(
+                scope.bond(move || {
+                    setup.get().is_some() && normalize_totp_code(&code.get()).len() == 6
+                }),
+            )
+            .loading(busy)
+            .on_press(move || {
+                if normalize_totp_code(&code.get()).len() != 6 {
+                    set(feedback, "Enter a six-digit code".into());
+                    return;
+                }
+                let Some(scope) = verify_weak.upgrade() else {
+                    return;
+                };
+                let auth_token = verify_token.clone();
+                let body = TotpCodeRequest {
+                    code: normalize_totp_code(&code.get()),
+                };
+                set(busy, true);
+                let _ = scope.spawn(async move {
+                    match api_post::<serde_json::Value, _>("/totp/verify", &body, &auth_token).await
+                    {
+                        Ok(_) => {
+                            set(enabled, true);
+                            set(setup, None);
+                            set(code, String::new());
+                            set(feedback, crate::i18n::t("profile.totp_enabled_success"));
+                        }
+                        Err(error) => set(feedback, error),
+                    }
+                    set(busy, false);
+                });
+            }),
+        sapid::button()
+            .theme(theme())
+            .label(crate::i18n::t("profile.totp_confirm_disable"))
+            .enabled(scope.bond(move || enabled.get() && !code.get().is_empty()))
+            .loading(busy)
+            .on_press(move || {
+                let Some(scope) = disable_weak.upgrade() else {
+                    return;
+                };
+                let auth_token = auth_token.clone();
+                let body = TotpCodeRequest { code: code.get() };
+                set(busy, true);
+                let _ = scope.spawn(async move {
+                    match api_post::<serde_json::Value, _>("/totp/disable", &body, &auth_token)
+                        .await
+                    {
+                        Ok(_) => {
+                            set(enabled, false);
+                            set(code, String::new());
+                            set(feedback, crate::i18n::t("profile.totp_disabled"));
+                        }
+                        Err(error) => set(feedback, error),
+                    }
+                    set(busy, false);
+                });
+            }),
+        status(feedback),
+    ))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

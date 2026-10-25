@@ -2,7 +2,7 @@
 
 > Last updated: 2026-03-19
 > Status: 165 API endpoints, 40 handler files, 9 migrations, 37+ tables
-> Stack: Rust (Salvo + Diesel + Dioxus), SQLite, WebSocket
+> Stack: Rust (Salvo + Diesel + Glory + Sapid), SQLite, WebSocket
 
 ---
 
@@ -18,7 +18,7 @@
 - Backend CRDT/OT + broadcast fully working
 - Frontend has zero WebSocket client code
 - Multiple users cannot actually co-edit
-- **Action:** Implement WS client in Dioxus, render remote cursors, apply incoming ops
+- **Action:** Implement WS client in Glory + Sapid, render remote cursors, apply incoming ops
 
 ### 3. Collaboration Operation Persistence
 - Ops only live in memory (tokio broadcast channel)
@@ -129,7 +129,7 @@
 ### 25. Keyboard Shortcuts
 - No global shortcut system in frontend
 - Essential: `Ctrl+S` save, `Ctrl+Z` undo, `Ctrl+B` bold, etc.
-- **Action:** Add keyboard event listener in Dioxus with command dispatch
+- **Action:** Add keyboard event listener in Glory + Sapid with command dispatch
 
 ### 26. Autosave
 - Writer page has `TODO: parse content, count words/chars, autosave`
@@ -154,7 +154,7 @@
 - **Action:** Client-side encryption with key management (complex, consider phased)
 
 ### 30. Mobile Responsive UI
-- Dioxus renders desktop-only layout
+- Glory + Sapid renders desktop-only layout
 - No responsive breakpoints
 - **Action:** Add media queries, collapsible sidebar, touch-friendly toolbar
 

@@ -1,9 +1,9 @@
-use dioxus::prelude::*;
+use crate::{
+    components::ui::*,
+    state::{self, AuthState},
+};
+use glory::prelude::*;
 use serde::Deserialize;
-
-use crate::components::{Toast, ToastKind, push_toast};
-use crate::state::{AuthState, api_post};
-
 #[derive(Deserialize, Clone, PartialEq)]
 pub struct CommentItem {
     #[serde(default)]
@@ -20,352 +20,161 @@ pub struct CommentItem {
     pub created_at: String,
     #[serde(default)]
     pub is_resolved: bool,
-    /// Parent comment id for threaded replies (None for top-level comments).
     #[serde(default)]
     pub parent_id: Option<String>,
 }
-
-#[derive(serde::Serialize)]
-struct CreateComment {
-    content: String,
-    /// When replying, the id of the comment being replied to.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parent_id: Option<String>,
-}
-
-#[derive(Props, Clone, PartialEq)]
-pub struct CommentsPaneProps {
-    pub doc_id: String,
-    pub open: Signal<bool>,
-}
-
-fn render_with_mentions(content: &str) -> Element {
-    let mut out: Vec<(bool, String)> = Vec::new();
-    let mut current = String::new();
-    let mut in_mention = false;
-    for ch in content.chars() {
-        if !in_mention && ch == '@' {
-            if !current.is_empty() {
-                out.push((false, std::mem::take(&mut current)));
-            }
-            in_mention = true;
-            current.push(ch);
-        } else if in_mention && (ch.is_alphanumeric() || ch == '_') {
-            current.push(ch);
-        } else if in_mention {
-            out.push((true, std::mem::take(&mut current)));
-            in_mention = false;
-            current.push(ch);
-        } else {
-            current.push(ch);
-        }
-    }
-    if !current.is_empty() {
-        out.push((in_mention, current));
-    }
-
-    rsx! {
-        p {
-            for (i, (is_mention, text)) in out.into_iter().enumerate() {
-                if is_mention {
-                    span { key: "{i}", class: "mention", "{text}" }
-                } else {
-                    span { key: "{i}", "{text}" }
-                }
-            }
-        }
-    }
-}
-
-fn mention_prefix(s: &str) -> Option<String> {
-    let at = s.rfind('@')?;
-    let before_ok = at == 0
-        || s[..at]
+fn mention_prefix(value: &str) -> Option<String> {
+    let at = value.rfind('@')?;
+    if at > 0
+        && value[..at]
             .chars()
             .next_back()
-            .map(|c| !c.is_alphanumeric() && c != '_')
-            .unwrap_or(true);
-    if !before_ok {
+            .is_some_and(|character| character.is_alphanumeric() || character == '_')
+    {
         return None;
     }
-    let tail = &s[at + 1..];
-    if tail.chars().any(|c| !c.is_alphanumeric() && c != '_') {
-        return None;
+    let tail = &value[at + 1..];
+    if tail
+        .chars()
+        .all(|character| character.is_alphanumeric() || character == '_')
+    {
+        Some(tail.into())
+    } else {
+        None
     }
-    Some(tail.to_string())
 }
-
-#[component]
-pub fn CommentsPane(props: CommentsPaneProps) -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let auth = use_context::<Signal<AuthState>>();
-    let toast_bus = use_context::<Signal<Vec<Toast>>>();
-    let token = auth.read().token.clone().unwrap_or_default();
-    let doc_id_for_fetch = props.doc_id.clone();
-    let token_for_fetch = token.clone();
-    let refresh_tick = use_signal(|| 0u32);
-
-    let comments = use_resource(move || {
-        let _ = refresh_tick.read();
-        let id = doc_id_for_fetch.clone();
-        let t = token_for_fetch.clone();
-        async move {
-            crate::state::api_get::<Vec<CommentItem>>(&format!("/documents/{id}/comments"), &t)
-                .await
+fn refresh(
+    scope: &Scope,
+    auth: Cage<AuthState>,
+    id: String,
+    items: Cage<Vec<CommentItem>>,
+    feedback: Cage<String>,
+) {
+    let token = token(auth);
+    let _ = scope.spawn(async move {
+        match state::api_get::<Vec<CommentItem>>(&format!("/documents/{id}/comments"), &token).await
+        {
+            Ok(value) => set(items, value),
+            Err(error) => set(feedback, error),
         }
     });
-
-    let mut draft = use_signal(String::new);
-    let mut suggestions = use_signal(Vec::<String>::new);
-    let mut selected_idx = use_signal(|| 0usize);
-    let mut reply_to = use_signal(|| None::<String>);
-    let mut open_sig = props.open;
-    if !*open_sig.read() {
-        return rsx! { Fragment {} };
-    }
-
-    let post_token = token.clone();
-    let post_id = props.doc_id.clone();
-    let post = move |_| {
-        let content = draft.read().clone();
-        if content.is_empty() {
-            return;
+}
+#[allow(non_snake_case)]
+pub fn CommentsPane(
+    scope: Scope,
+    auth: Cage<AuthState>,
+    doc_id: String,
+    open: Cage<bool>,
+) -> impl Widget {
+    let items = scope.cage(Vec::<CommentItem>::new());
+    let draft = scope.cage(String::new());
+    let reply = scope.cage(None::<String>);
+    let feedback = scope.cage(String::new());
+    refresh(&scope, auth, doc_id.clone(), items, feedback);
+    let weak = scope.downgrade();
+    let suggestions = scope.bond(move || {
+        let Some(prefix) = mention_prefix(&draft.get()) else {
+            return Vec::new();
+        };
+        let mut names = items
+            .get()
+            .into_iter()
+            .map(|item| item.username)
+            .collect::<Vec<_>>();
+        if let Some(user) = auth.get().user {
+            names.push(user.username);
         }
-        let id = post_id.clone();
-        let t = post_token.clone();
-        let bus = toast_bus;
-        let mut tick = refresh_tick;
-        let mut local_draft = draft;
-        let mut local_sugg = suggestions;
-        let mut local_reply = reply_to;
-        let parent = reply_to.read().clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            match api_post::<serde_json::Value, _>(
-                &format!("/documents/{id}/comments"),
-                &CreateComment {
-                    content: content.clone(),
-                    parent_id: parent,
+        names.sort();
+        names.dedup();
+        names
+            .into_iter()
+            .filter(|name| name.starts_with(&prefix))
+            .take(8)
+            .collect::<Vec<_>>()
+    });
+    when(open, move || {
+        let weak = weak.clone();
+        let id = doc_id.clone();
+        col().class("comments-pane").fill((
+            row().fill((
+                heading(crate::i18n::t("comments.title")),
+                action("Close", move || set(open, false)),
+            )),
+            col().fill(each(
+                items,
+                |item| item.id.clone(),
+                move |item, _| {
+                    let comment = item.get();
+                    let parent = comment.id.clone();
+                    col().class("comment-item").fill((
+                        label(format!(
+                            "{} · {}",
+                            comment.display_name.unwrap_or(comment.username),
+                            comment.created_at
+                        )),
+                        label(comment.content),
+                        action("Reply", move || set(reply, Some(parent.clone()))),
+                    ))
                 },
-                &t,
-            )
-            .await
-            {
-                Ok(_) => {
-                    push_toast(bus, ToastKind::Success, crate::i18n::t("comments.added"));
-                    local_draft.set(String::new());
-                    local_sugg.write().clear();
-                    local_reply.set(None);
-                    let cur = *tick.read();
-                    tick.set(cur + 1);
-                }
-                Err(e) => push_toast(
-                    bus,
-                    ToastKind::Error,
-                    crate::i18n::t("comments.add_failed").replace("{err}", &e.to_string()),
-                ),
-            }
-        });
-    };
-
-    // Mention candidates: everyone who has commented on this document, plus
-    // the current user.
-    let pool: Vec<String> = {
-        let mut v: Vec<String> = Vec::new();
-        if let Some(u) = auth.read().user.as_ref() {
-            v.push(u.username.clone());
-        }
-        if let Some(Ok(items)) = comments.read().as_ref() {
-            for c in items {
-                if !c.username.is_empty() && !v.iter().any(|x| x == &c.username) {
-                    v.push(c.username.clone());
-                }
-            }
-        }
-        v
-    };
-
-    let mut insert_mention = move |name: String| {
-        let mut v = draft.read().clone();
-        if let Some(idx) = v.rfind('@') {
-            v.truncate(idx);
-            v.push('@');
-            v.push_str(&name);
-            v.push(' ');
-            draft.set(v);
-        }
-        suggestions.write().clear();
-        selected_idx.set(0);
-    };
-
-    let title_label = crate::i18n::t("comments.title");
-    let close_label = crate::i18n::t("comments.close");
-    let loading_label = crate::i18n::t("comments.loading");
-    let empty_label = crate::i18n::t("comments.empty");
-    let placeholder_label = crate::i18n::t("comments.placeholder");
-    let new_comment_label = crate::i18n::t("comments.new_comment");
-    let post_label = crate::i18n::t("comments.post");
-    rsx! {
-        aside { class: "comments-pane",
-            header { class: "comments-pane-header",
-                strong { "{title_label}" }
-                button {
-                    class: "btn-icon",
-                    aria_label: "{close_label}",
-                    onclick: move |_| open_sig.set(false),
-                    "\u{2715}"
-                }
-            }
-            div { class: "comments-list",
-                match comments.read().as_ref() {
-                    None => rsx! { p { class: "muted", "{loading_label}" } },
-                    Some(Err(e)) => rsx! { p { class: "muted", {crate::i18n::t("comments.failed").replace("{err}", &e.to_string())} } },
-                    Some(Ok(items)) if items.is_empty() => rsx! { p { class: "muted", "{empty_label}" } },
-                    Some(Ok(items)) => {
-                        // Order as threads: each top-level comment followed by its replies.
-                        let top: Vec<CommentItem> =
-                            items.iter().filter(|c| c.parent_id.is_none()).cloned().collect();
-                        let reply_label = crate::i18n::t("comments.reply");
-                        rsx! {
-                            for c in top {
-                                {
-                                    let replies: Vec<CommentItem> = items
-                                        .iter()
-                                        .filter(|r| r.parent_id.as_deref() == Some(c.id.as_str()))
-                                        .cloned()
-                                        .collect();
-                                    let parent_id = c.id.clone();
-                                    let reply_label = reply_label.clone();
-                                    rsx! {
-                                        div { class: "comment-item", key: "{c.id}",
-                                            div { class: "comment-meta",
-                                                strong {
-                                                    { c.display_name.clone().unwrap_or_else(|| c.username.clone()) }
-                                                }
-                                                span { class: "muted", " \u{00b7} {c.created_at}" }
-                                            }
-                                            {render_with_mentions(&c.content)}
-                                            button {
-                                                class: "btn-link comment-reply-btn",
-                                                onclick: move |_| reply_to.set(Some(parent_id.clone())),
-                                                "{reply_label}"
-                                            }
-                                            for r in replies {
-                                                div { class: "comment-item comment-reply", key: "{r.id}",
-                                                    div { class: "comment-meta",
-                                                        strong {
-                                                            { r.display_name.clone().unwrap_or_else(|| r.username.clone()) }
-                                                        }
-                                                        span { class: "muted", " \u{00b7} {r.created_at}" }
-                                                    }
-                                                    {render_with_mentions(&r.content)}
-                                                }
-                                            }
-                                        }
-                                    }
+            )),
+            text().content_fn(move || {
+                reply
+                    .get()
+                    .map(|id| format!("Reply to {id}"))
+                    .unwrap_or_default()
+            }),
+            sapid::text_field()
+                .theme(theme())
+                .multiline(true)
+                .name(crate::i18n::t("comments.placeholder"))
+                .value(draft)
+                .on_value_change(move |value| set(draft, value)),
+            row().fill(each(
+                suggestions,
+                |name| name.clone(),
+                move |name, _| {
+                    action(format!("@{}", name.get()), move || {
+                        let current = draft.get();
+                        if let Some(at) = current.rfind('@') {
+                            set(draft, format!("{}@{} ", &current[..at], name.get()));
+                        }
+                    })
+                },
+            )),
+            row().fill((
+                action("Cancel reply", move || set(reply, None)),
+                action(crate::i18n::t("comments.new_comment"), move || {
+                    if draft.get().trim().is_empty() {
+                        return;
+                    }
+                    let Some(scope) = weak.upgrade() else {
+                        return;
+                    };
+                    let token = token(auth);
+                    let id = id.clone();
+                    let body = serde_json::json!({"content":draft.get(),"parent_id":reply.get()});
+                    let weak = scope.downgrade();
+                    let _ = scope.spawn(async move {
+                        match state::api_post::<serde_json::Value, _>(
+                            &format!("/documents/{id}/comments"),
+                            &body,
+                            &token,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                set(draft, String::new());
+                                set(reply, None);
+                                if let Some(scope) = weak.upgrade() {
+                                    refresh(&scope, auth, id, items, feedback);
                                 }
                             }
+                            Err(error) => set(feedback, error),
                         }
-                    }
-                }
-            }
-            div { class: "comments-compose",
-                if reply_to.read().is_some() {
-                    div { class: "comment-replying-indicator",
-                        span { class: "muted", {crate::i18n::t("comments.replying")} }
-                        button {
-                            class: "btn-link",
-                            r#type: "button",
-                            onclick: move |_| reply_to.set(None),
-                            {crate::i18n::t("comments.cancel_reply")}
-                        }
-                    }
-                }
-                if !suggestions.read().is_empty() {
-                    div { class: "mention-suggestions", role: "listbox",
-                        for (i, s) in suggestions.read().iter().cloned().enumerate() {
-                            button {
-                                key: "{s}",
-                                class: if i == *selected_idx.read() { "mention-suggestion active" } else { "mention-suggestion" },
-                                r#type: "button",
-                                role: "option",
-                                onmousedown: move |e| e.prevent_default(),
-                                onclick: {
-                                    let name = s.clone();
-                                    move |_| insert_mention(name.clone())
-                                },
-                                "@{s}"
-                            }
-                        }
-                    }
-                }
-                textarea {
-                    class: "form-input",
-                    rows: 3,
-                    placeholder: "{placeholder_label}",
-                    aria_label: "{new_comment_label}",
-                    value: "{draft}",
-                    oninput: {
-                        let pool = pool.clone();
-                        move |e: FormEvent| {
-                            let v = e.value();
-                            draft.set(v.clone());
-                            if let Some(prefix) = mention_prefix(&v) {
-                                let p = prefix.to_lowercase();
-                                let matches: Vec<String> = pool
-                                    .iter()
-                                    .filter(|u| u.to_lowercase().starts_with(&p))
-                                    .cloned()
-                                    .collect();
-                                suggestions.set(matches);
-                                selected_idx.set(0);
-                            } else {
-                                suggestions.write().clear();
-                                selected_idx.set(0);
-                            }
-                        }
-                    },
-                    onkeydown: move |e: KeyboardEvent| {
-                        let has_sugg = !suggestions.read().is_empty();
-                        if !has_sugg {
-                            return;
-                        }
-                        match e.key() {
-                            Key::ArrowDown => {
-                                e.prevent_default();
-                                let len = suggestions.read().len();
-                                let cur = *selected_idx.read();
-                                selected_idx.set((cur + 1) % len);
-                            }
-                            Key::ArrowUp => {
-                                e.prevent_default();
-                                let len = suggestions.read().len();
-                                let cur = *selected_idx.read();
-                                selected_idx.set((cur + len - 1) % len);
-                            }
-                            Key::Enter => {
-                                e.prevent_default();
-                                let idx = *selected_idx.read();
-                                let name = suggestions.read().get(idx).cloned();
-                                if let Some(n) = name {
-                                    insert_mention(n);
-                                }
-                            }
-                            Key::Escape => {
-                                e.prevent_default();
-                                suggestions.write().clear();
-                                selected_idx.set(0);
-                            }
-                            _ => {}
-                        }
-                    },
-                }
-                button {
-                    class: "btn btn-primary btn-sm",
-                    aria_label: "{post_label}",
-                    onclick: post,
-                    "{post_label}"
-                }
-            }
-        }
-    }
+                    });
+                }),
+            )),
+            status(feedback),
+        ))
+    })
 }

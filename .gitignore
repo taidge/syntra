@@ -1,4 +1,5 @@
 /target
+/.dependencies
 /data
 *.db
 *.db-shm

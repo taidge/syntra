@@ -5,7 +5,8 @@ pub async fn spa_fallback(req: &mut Request, res: &mut Response) {
     let path = req.uri().path().to_string();
 
     // Try to serve static files first (skip directories)
-    let static_path = format!("static{}", path);
+    let static_root = std::env::var("CONTRIX_STATIC_DIR").unwrap_or_else(|_| "static".into());
+    let static_path = format!("{static_root}{path}");
     let static_p = std::path::Path::new(&static_path);
     if static_p.exists()
         && !static_p.is_dir()
@@ -49,7 +50,7 @@ pub async fn spa_fallback(req: &mut Request, res: &mut Response) {
     }
 
     // SPA fallback: serve index.html for all non-file routes
-    match tokio::fs::read("static/index.html").await {
+    match tokio::fs::read(std::path::Path::new(&static_root).join("index.html")).await {
         Ok(content) => {
             res.headers_mut()
                 .insert("content-type", "text/html; charset=utf-8".parse().unwrap());

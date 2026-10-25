@@ -202,6 +202,58 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
+    // Salvo's default form limit is 64 KiB. Apply the configured file budget
+    // before the first form read, with a bounded allowance for multipart headers.
+    let multipart_limit =
+        usize::try_from(max_upload_bytes(state.config.storage.max_upload_size_mb))
+            .unwrap_or(usize::MAX)
+            .saturating_add(64 * 1024);
+    if req
+        .headers()
+        .get("content-length")
+        .and_then(|length| length.to_str().ok())
+        .and_then(|length| length.parse::<u64>().ok())
+        .is_some_and(|length| length > multipart_limit as u64)
+    {
+        res.status_code(StatusCode::PAYLOAD_TOO_LARGE);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::QuotaExceeded(format!(
+                "Upload exceeds configured limit of {} MB",
+                state.config.storage.max_upload_size_mb
+            ))
+            .to_response(),
+        )));
+        return;
+    }
+    req.set_secure_max_size(multipart_limit);
+    if let Err(error) = req.form_data().await {
+        let mut too_large = matches!(error, salvo::http::ParseError::PayloadTooLarge);
+        // FilePart may wrap the stream limit inside a multipart error.
+        let mut cause = std::error::Error::source(&error);
+        while let Some(error) = cause {
+            if error.is::<http_body_util::LengthLimitError>() {
+                too_large = true;
+                break;
+            }
+            cause = error.source();
+        }
+        let error = if too_large {
+            AppError::QuotaExceeded(format!(
+                "Upload exceeds configured limit of {} MB",
+                state.config.storage.max_upload_size_mb
+            ))
+        } else {
+            AppError::Validation(format!("Invalid multipart upload: {error}"))
+        };
+        res.status_code(if too_large {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::BAD_REQUEST
+        });
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
+        return;
+    }
+
     let parent_id_param: Option<String> = req.form("parent_id").await;
     let room_id_param: Option<String> = req.form("room_id").await;
 

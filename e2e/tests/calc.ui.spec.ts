@@ -1,15 +1,17 @@
-// Calc page UI tests.
+// Calc semantic-control UI tests.
+// Modifier-click, double-click and drag-fill are represented by explicit
+// selection controls and Fill actions in the semantic Glory host.
 //
 // These tests assume a contrix-server is already running at http://localhost:3000
-// (it serves both the JSON API and the Dioxus single-page app). Start it with
+// (it serves both the JSON API and the Glory + Sapid single-page app). Start it with
 // `cargo run -p contrix-server` from the workspace root before invoking
 // `npx playwright test calc.ui`. The playwright.config.ts `webServer` block
 // will reuse the existing server when one is detected.
 
 import { test, expect, Page, APIRequestContext } from '@playwright/test';
 
-const API_BASE = 'http://localhost:3000/api/v1';
-const APP_BASE = 'http://localhost:3000';
+const APP_BASE = (process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
+const API_BASE = `${APP_BASE}/api/v1`;
 
 // Must match `AUTH_STORAGE_KEY` in crates/frontend/src/state.rs.
 const AUTH_STORAGE_KEY = 'contrix.auth';
@@ -17,6 +19,7 @@ const AUTH_STORAGE_KEY = 'contrix.auth';
 interface CalcFixture {
     id: string;
     token: string;
+    user: Record<string, unknown>;
 }
 
 async function createCalcDoc(request: APIRequestContext): Promise<CalcFixture> {
@@ -40,29 +43,23 @@ async function createCalcDoc(request: APIRequestContext): Promise<CalcFixture> {
     });
     expect(doc.ok()).toBeTruthy();
     const docBody = await doc.json();
-    return { id: docBody.data.id, token };
+    return { id: docBody.data.id, token, user: regBody.data.user };
 }
 
-async function gotoCalc(page: Page, id: string, token: string) {
-    // Pre-seed auth state so the Dioxus app finds the token in localStorage
+async function gotoCalc(page: Page, id: string, token: string, user: Record<string, unknown>) {
+    // Pre-seed auth state so the Glory + Sapid app finds the token in localStorage
     // before its first render and skips the redirect to /login.
     await page.addInitScript(
-        ({ key, tok }) => {
+        ({ key, tok, user }) => {
             localStorage.setItem(
                 key,
                 JSON.stringify({
                     token: tok,
-                    user: {
-                        id: '00000000-0000-0000-0000-000000000000',
-                        username: 'u',
-                        email: 'u@u',
-                        display_name: null,
-                        role: 'editor',
-                    },
+                    user,
                 }),
             );
         },
-        { key: AUTH_STORAGE_KEY, tok: token },
+        { key: AUTH_STORAGE_KEY, tok: token, user },
     );
     await page.goto(`${APP_BASE}/calc/${id}`);
     // Wait for the spreadsheet to actually render before any interaction.
@@ -71,7 +68,7 @@ async function gotoCalc(page: Page, id: string, token: string) {
 
 /** Locate a body cell by zero-based (rowIdx, colIdx). */
 function cellAt(page: Page, row: number, col: number) {
-    return page.locator('.sheet-grid tbody tr').nth(row).locator('.cell').nth(col);
+    return page.locator('.sheet-grid tbody tr').nth(row).locator('.cell').nth(col).locator('.cell-button');
 }
 
 test.describe('Calc page UI @ui', () => {
@@ -82,7 +79,7 @@ test.describe('Calc page UI @ui', () => {
         const fixture = await createCalcDoc(request);
         docId = fixture.id;
         token = fixture.token;
-        await gotoCalc(page, docId, token);
+        await gotoCalc(page, docId, token, fixture.user);
     });
 
     test('renders an empty spreadsheet grid', async ({ page }) => {
@@ -109,18 +106,19 @@ test.describe('Calc page UI @ui', () => {
         await expect(page.locator('.status-bar')).toContainText('Cell: D3');
     });
 
-    test('double-click focuses the formula bar', async ({ page }) => {
-        await cellAt(page, 1, 1).dblclick();
+    test('selecting a cell allows its formula editor to receive focus', async ({ page }) => {
+        await cellAt(page, 1, 1).click();
+        await page.getByRole('textbox', { name: 'Formula', exact: true }).focus();
 
         await expect
             .poll(async () => await page.evaluate(() => document.activeElement?.id ?? ''))
             .toBe('calc-formula-input');
     });
 
-    test('typing with a cell selected routes to the formula bar', async ({ page }) => {
+    test('formula editing commits the selected cell and advances on Enter', async ({ page }) => {
         await cellAt(page, 0, 0).click();
 
-        await page.keyboard.press('5');
+        await page.getByRole('textbox', { name: 'Formula', exact: true }).fill('5');
 
         const formula = page.locator('#calc-formula-input');
         await expect(formula).toHaveValue('5');
@@ -133,18 +131,25 @@ test.describe('Calc page UI @ui', () => {
         await expect(page.locator('.status-bar')).toContainText('Cell: A2');
     });
 
-    test('fill handle is visible on the active cell', async ({ page }) => {
+    test('Fill down extends the anchor value through a selected range', async ({ page }) => {
         await cellAt(page, 0, 0).click();
+        await page.getByRole('textbox', { name: 'Formula', exact: true }).fill('7');
+        await page.getByRole('button', { name: 'Apply formula', exact: true }).click();
+        await page.getByRole('textbox', { name: 'Selection range', exact: true }).fill('A1:A3');
+        await page.getByRole('button', { name: 'Select range', exact: true }).click();
+        await page.getByRole('button', { name: 'Fill down', exact: true }).click();
 
-        const handle = page.locator('.cell.active .autofill-handle');
-        await expect(handle).toBeVisible();
+        await expect(cellAt(page, 0, 0)).toHaveText('7');
+        await expect(cellAt(page, 1, 0)).toHaveText('7');
+        await expect(cellAt(page, 2, 0)).toHaveText('7');
     });
 
-    test('Ctrl-click adds a non-contiguous cell to the selection', async ({ page }) => {
+    test('Add cells to selection retains a non-contiguous selection', async ({ page }) => {
         await cellAt(page, 0, 0).click();
-        await cellAt(page, 2, 2).click({ modifiers: ['Control'] });
+        await page.getByRole('checkbox', { name: 'Add cells to selection', exact: true }).check();
+        await cellAt(page, 2, 2).click();
 
-        // C3 became the active cell after the Ctrl-click; A1 stays in the
+        // C3 became the active cell while additive selection was enabled; A1 stays in the
         // extra-selection set. The visual contract is that both cells render
         // as part of the selection (active or selected).
         await expect(page.locator('.status-bar')).toContainText('Cell: C3');
@@ -153,10 +158,11 @@ test.describe('Calc page UI @ui', () => {
         expect(await highlighted.count()).toBeGreaterThanOrEqual(2);
     });
 
-    test('Shift-click extends selection from anchor to clicked cell', async ({ page }) => {
+    test('Extend selection highlights the rectangle from the anchor', async ({ page }) => {
         await cellAt(page, 0, 0).click();
         // (row=2, col=1) → B3. Selection rect is A1..B3 → 3 rows × 2 cols = 6 cells.
-        await cellAt(page, 2, 1).click({ modifiers: ['Shift'] });
+        await page.getByRole('checkbox', { name: 'Extend selection', exact: true }).check();
+        await cellAt(page, 2, 1).click();
 
         const highlighted = page.locator('.cell.active, .cell.selected');
         expect(await highlighted.count()).toBeGreaterThanOrEqual(6);
@@ -172,7 +178,8 @@ test.describe('Calc page UI @ui', () => {
     });
 
     test('Escape clears editing state', async ({ page }) => {
-        await cellAt(page, 0, 0).dblclick();
+        await cellAt(page, 0, 0).click();
+        await page.getByRole('textbox', { name: 'Formula', exact: true }).focus();
         await page.keyboard.type('xyz');
         await page.keyboard.press('Escape');
 
@@ -192,10 +199,42 @@ test.describe('Calc page UI @ui', () => {
     });
 
     test('clicking f(x) when formula already starts with = leaves value unchanged', async ({ page }) => {
-        await cellAt(page, 0, 0).dblclick();
+        await cellAt(page, 0, 0).click();
+        await page.getByRole('textbox', { name: 'Formula', exact: true }).focus();
         await page.keyboard.type('=SUM(A1:A3)');
         await page.locator('.formula-icon').click();
 
         await expect(page.locator('#calc-formula-input')).toHaveValue('=SUM(A1:A3)');
+    });
+
+    test('saves values, formatting and merged ranges and restores them on reload', async ({ page, request }) => {
+        await cellAt(page, 0, 0).click();
+        await page.getByRole('textbox', { name: 'Formula', exact: true }).fill('42');
+        await page.getByRole('button', { name: 'Apply formula', exact: true }).click();
+        await page.getByRole('button', { name: 'Bold', exact: true }).click();
+        await page.getByRole('textbox', { name: 'Selection range', exact: true }).fill('A1:B2');
+        await page.getByRole('button', { name: 'Select range', exact: true }).click();
+        await page.getByRole('button', { name: 'Merge cells', exact: true }).click();
+
+        await expect(page.locator('.cell.active')).toHaveAttribute('rowspan', '2');
+        await expect(page.locator('.cell.active')).toHaveAttribute('colspan', '2');
+        await expect.poll(async () => {
+            const response = await request.get(`${API_BASE}/documents/${docId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const body = await response.json();
+            const sheet = body.data?.content?.sheets?.[0];
+            return {
+                value: sheet?.cells?.[0]?.[1]?.value?.value,
+                bold: sheet?.cells?.[0]?.[1]?.format?.bold,
+                merged: sheet?.merged_cells?.length,
+            };
+        }, { timeout: 15000 }).toEqual({ value: 42, bold: true, merged: 1 });
+
+        await page.reload();
+        await page.locator('.sheet-grid').waitFor({ state: 'visible' });
+        await expect(cellAt(page, 0, 0)).toHaveText('42');
+        await expect(page.locator('.cell.active')).toHaveClass(/cell-bold/);
+        await expect(page.locator('.cell.active')).toHaveAttribute('colspan', '2');
     });
 });

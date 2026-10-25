@@ -1,193 +1,10 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use dioxus::prelude::*;
-use gloo_timers::callback::Timeout;
+use super::document_editor::{EditorSession, editor_header};
+use crate::state::AuthState;
+use glory::prelude::*;
 use serde::Deserialize;
-use wasm_bindgen::JsCast;
-use wasm_bindgen::closure::Closure;
-use web_sys::WebSocket;
-
-use crate::Route;
-use crate::collab_client::{
-    CollabHandle, CollabMessage, ConnectionState, RemoteCursor, connect_with_reconnect,
-};
-use crate::components::comments_pane::CommentsPane;
-use crate::components::context_menu::{ContextMenu, MenuEntry};
-use crate::components::find_dialog::FindDialog;
-use crate::components::menubar::Menubar;
-use crate::components::navbar::Navbar;
-use crate::components::sidebar::Sidebar;
-use crate::components::toast::{Toast, ToastKind, push_toast};
-use crate::components::version_history::VersionHistory;
-use crate::state::{AuthState, api_get, api_put, export_document};
-
-fn window_find(query: &str, backward: bool) -> bool {
-    if query.is_empty() {
-        return false;
-    }
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return false,
-    };
-    let func = match js_sys::Reflect::get(&window, &"find".into()) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let func: js_sys::Function = match func.dyn_into() {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let args = js_sys::Array::new();
-    args.push(&query.into());
-    args.push(&wasm_bindgen::JsValue::FALSE);
-    args.push(&wasm_bindgen::JsValue::from_bool(backward));
-    args.push(&wasm_bindgen::JsValue::TRUE);
-    let this: wasm_bindgen::JsValue = window.into();
-    match func.apply(&this, &args) {
-        Ok(v) => v.as_bool().unwrap_or(false),
-        Err(_) => false,
-    }
-}
-
-#[derive(Deserialize)]
-struct CursorPosLite {
-    user_id: serde_json::Value,
-    #[serde(default)]
-    username: Option<String>,
-    #[serde(default)]
-    color: Option<String>,
-    #[serde(default)]
-    position: Option<serde_json::Value>,
-}
-
-fn cursor_user_id(v: &serde_json::Value) -> Option<String> {
-    v.as_str().map(|s| s.to_string())
-}
-
-fn cursor_offset(v: &serde_json::Value) -> Option<u32> {
-    if let Some(n) = v.as_u64() {
-        return Some(n as u32);
-    }
-    if let Some(obj) = v.as_object()
-        && let Some(o) = obj.get("offset").and_then(|x| x.as_u64())
-    {
-        return Some(o as u32);
-    }
-    None
-}
-
-fn caret_offset_in_body() -> Option<u32> {
-    let window = web_sys::window()?;
-    let document = window.document()?;
-    let sel = document.get_selection().ok().flatten()?;
-    if sel.range_count() == 0 {
-        return None;
-    }
-    let body = document.get_element_by_id(WRITER_BODY_ID)?;
-    let range = sel.get_range_at(0).ok()?;
-    let pre = document.create_range().ok()?;
-    pre.select_node_contents(&body).ok()?;
-    let end_container = range.end_container().ok()?;
-    let end_offset = range.end_offset().ok()?;
-    pre.set_end(&end_container, end_offset).ok()?;
-    let s = pre.to_string().as_string().unwrap_or_default();
-    Some(s.chars().count() as u32)
-}
-
-fn char_offset_to_pixel(offset: u32) -> Option<(f64, f64)> {
-    let window = web_sys::window()?;
-    let document = window.document()?;
-    let body_el = document.get_element_by_id(WRITER_BODY_ID)?;
-    let body_rect = body_el.get_bounding_client_rect();
-    let body_node: &web_sys::Node = body_el.as_ref();
-    let walker = document
-        .create_tree_walker_with_what_to_show(body_node, 0x4)
-        .ok()?;
-    let mut remaining = offset as usize;
-    let mut last_text: Option<web_sys::Node> = None;
-    let mut last_len: usize = 0;
-    loop {
-        let node = walker.next_node().ok().flatten();
-        match node {
-            None => break,
-            Some(n) => {
-                let text = n.text_content().unwrap_or_default();
-                let len = text.chars().count();
-                last_text = Some(n.clone());
-                last_len = len;
-                if remaining <= len {
-                    let range = document.create_range().ok()?;
-                    let byte_off = text
-                        .char_indices()
-                        .nth(remaining)
-                        .map(|(i, _)| i)
-                        .unwrap_or(text.len()) as u32;
-                    range.set_start(&n, byte_off).ok()?;
-                    range.set_end(&n, byte_off).ok()?;
-                    let rect = range.get_bounding_client_rect();
-                    return Some((rect.left() - body_rect.left(), rect.top() - body_rect.top()));
-                }
-                remaining -= len;
-            }
-        }
-    }
-    if let Some(n) = last_text {
-        let text = n.text_content().unwrap_or_default();
-        let range = document.create_range().ok()?;
-        let byte_off = text
-            .char_indices()
-            .nth(last_len)
-            .map(|(i, _)| i)
-            .unwrap_or(text.len()) as u32;
-        range.set_start(&n, byte_off).ok()?;
-        range.set_end(&n, byte_off).ok()?;
-        let rect = range.get_bounding_client_rect();
-        return Some((rect.left() - body_rect.left(), rect.top() - body_rect.top()));
-    }
-    Some((0.0, 0.0))
-}
-
-const WRITER_BODY_ID: &str = "writer-body";
-
-fn exec_cmd(name: &str, value: Option<&str>) {
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        if let Some(el) = doc.get_element_by_id(WRITER_BODY_ID)
-            && let Some(html_el) = el.dyn_ref::<web_sys::HtmlElement>()
-        {
-            let _ = html_el.focus();
-        }
-        if let Ok(html_doc) = doc.dyn_into::<web_sys::HtmlDocument>() {
-            let val = value.unwrap_or("");
-            let _ = html_doc.exec_command_with_show_ui_and_value(name, false, val);
-        }
-    }
-}
-
-fn editor_text() -> String {
-    web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id(WRITER_BODY_ID))
-        .and_then(|el| el.dyn_ref::<web_sys::HtmlElement>().map(|h| h.inner_text()))
-        .unwrap_or_default()
-}
-
-fn plain_text_to_html(text: &str) -> String {
-    text.split('\n')
-        .map(|line| {
-            let escaped = line
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
-            if escaped.is_empty() {
-                "<div><br></div>".to_string()
-            } else {
-                format!("<div>{escaped}</div>")
-            }
-        })
-        .collect()
-}
-
+use serde_json::{Value, json};
+use std::rc::Rc;
+#[cfg(test)]
 fn writer_replace_from_operation(payload: &serde_json::Value) -> Option<(String, String)> {
     let user_id = payload.get("user_id")?.as_str()?.to_string();
     let op_type = payload.get("op_type")?;
@@ -202,21 +19,6 @@ fn writer_replace_from_operation(payload: &serde_json::Value) -> Option<(String,
     Some((user_id, text))
 }
 
-fn apply_writer_text_to_dom(text: &str) {
-    if let Some(body) = web_sys::window()
-        .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id(WRITER_BODY_ID))
-    {
-        body.set_inner_html(&plain_text_to_html(text));
-    }
-}
-
-#[derive(Clone, Deserialize)]
-struct DocumentResponse {
-    name: String,
-    content: serde_json::Value,
-}
-
 #[derive(Deserialize)]
 struct WriterDocLite {
     #[serde(default)]
@@ -229,7 +31,7 @@ fn extract_run_text(runs: &[serde_json::Value]) -> String {
         .collect::<String>()
 }
 
-fn writer_content_to_plain(content: &serde_json::Value) -> String {
+pub(super) fn writer_content_to_plain(content: &serde_json::Value) -> String {
     let doc: WriterDocLite = match serde_json::from_value(content.clone()) {
         Ok(d) => d,
         Err(_) => return String::new(),
@@ -260,7 +62,10 @@ fn plain_writer_run(text: &str) -> serde_json::Value {
 }
 
 /// Splice the changed character range while retaining formatting on unaffected runs.
-fn replace_writer_runs(runs: &[serde_json::Value], text: &str) -> Vec<serde_json::Value> {
+pub(super) fn replace_writer_runs(
+    runs: &[serde_json::Value],
+    text: &str,
+) -> Vec<serde_json::Value> {
     let old = extract_run_text(runs).chars().collect::<Vec<_>>();
     let new = text.chars().collect::<Vec<_>>();
     let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
@@ -302,7 +107,7 @@ fn replace_writer_runs(runs: &[serde_json::Value], text: &str) -> Vec<serde_json
     result
 }
 
-fn writer_content_with_text(base: &serde_json::Value, text: &str) -> serde_json::Value {
+pub(super) fn writer_content_with_text(base: &serde_json::Value, text: &str) -> serde_json::Value {
     // A metadata-only save must never rewrite rich blocks or their stable IDs.
     if writer_content_to_plain(base) == text {
         return base.clone();
@@ -380,1409 +185,6 @@ fn update_professional_field(
     content
 }
 
-fn attach_pending_revisions(base: serde_json::Value, changes: &[ChangeItem]) -> serde_json::Value {
-    let revisions = changes
-        .iter()
-        .map(|change| {
-            serde_json::json!({
-                "id": change.dom_id.parse::<uuid::Uuid>().unwrap_or_else(|_| uuid::Uuid::new_v4()),
-                "author": change.author,
-                "timestamp": chrono::Utc::now(),
-                "block_index": 0,
-                "kind": if change.kind == "ins" { "Insert" } else { "Delete" },
-                "text": change.text,
-            })
-        })
-        .collect::<Vec<_>>();
-    update_professional_field(&base, "revisions", serde_json::Value::Array(revisions))
-}
-
-#[derive(Clone, PartialEq)]
-struct ChangeItem {
-    kind: String,
-    text: String,
-    author: String,
-    dom_id: String,
-}
-
-fn insert_tracked_text(text: &str, color: &str, author: &str) {
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return,
-    };
-    let document = match window.document() {
-        Some(d) => d,
-        None => return,
-    };
-    let sel = match document.get_selection().ok().flatten() {
-        Some(s) => s,
-        None => return,
-    };
-    if sel.range_count() == 0 {
-        return;
-    }
-    let range = match sel.get_range_at(0).ok() {
-        Some(r) => r,
-        None => return,
-    };
-    let _ = range.delete_contents();
-    let span = match document.create_element("ins") {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let _ = span.set_attribute("class", "tracked-ins");
-    let _ = span.set_attribute("data-author", author);
-    let _ = span.set_attribute(
-        "style",
-        &format!("background-color: {color}22; color: {color}; text-decoration: underline;"),
-    );
-    span.set_text_content(Some(text));
-    if range.insert_node(&span).is_err() {
-        return;
-    }
-    let span_node: &web_sys::Node = span.as_ref();
-    let _ = range.set_start_after(span_node);
-    let _ = range.set_end_after(span_node);
-    let _ = sel.remove_all_ranges();
-    let _ = sel.add_range(&range);
-}
-
-fn wrap_selection_as_deleted(author: &str) -> bool {
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return false,
-    };
-    let document = match window.document() {
-        Some(d) => d,
-        None => return false,
-    };
-    let sel = match document.get_selection().ok().flatten() {
-        Some(s) => s,
-        None => return false,
-    };
-    if sel.range_count() == 0 {
-        return false;
-    }
-    if sel.is_collapsed() {
-        return false;
-    }
-    let range = match sel.get_range_at(0).ok() {
-        Some(r) => r,
-        None => return false,
-    };
-    let text = range.to_string().as_string().unwrap_or_default();
-    if text.is_empty() {
-        return false;
-    }
-    let _ = range.delete_contents();
-    let del = match document.create_element("del") {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
-    let _ = del.set_attribute("class", "tracked-del");
-    let _ = del.set_attribute("data-author", author);
-    let _ = del.set_attribute("style", "text-decoration: line-through; opacity: 0.7;");
-    del.set_text_content(Some(&text));
-    if range.insert_node(&del).is_err() {
-        return false;
-    }
-    let del_node: &web_sys::Node = del.as_ref();
-    let _ = range.set_start_after(del_node);
-    let _ = range.set_end_after(del_node);
-    let _ = sel.remove_all_ranges();
-    let _ = sel.add_range(&range);
-    true
-}
-
-fn list_pending_changes() -> Vec<ChangeItem> {
-    let document = match web_sys::window().and_then(|w| w.document()) {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
-    let body = match document.get_element_by_id(WRITER_BODY_ID) {
-        Some(b) => b,
-        None => return Vec::new(),
-    };
-    let nodes = match body.query_selector_all(".tracked-ins, .tracked-del") {
-        Ok(n) => n,
-        Err(_) => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for i in 0..nodes.length() {
-        let Some(node) = nodes.item(i) else { continue };
-        let Some(el) = node.dyn_ref::<web_sys::Element>() else {
-            continue;
-        };
-        let tag = el.tag_name().to_lowercase();
-        let kind = if tag == "ins" { "ins" } else { "del" };
-        let text = el.text_content().unwrap_or_default();
-        let author = el.get_attribute("data-author").unwrap_or_default();
-        let id = el.get_attribute("data-change-id").unwrap_or_else(|| {
-            let new_id = uuid::Uuid::new_v4().to_string();
-            let _ = el.set_attribute("data-change-id", &new_id);
-            new_id
-        });
-        out.push(ChangeItem {
-            kind: kind.to_string(),
-            text,
-            author,
-            dom_id: id,
-        });
-    }
-    out
-}
-
-fn accept_change(dom_id: &str) {
-    let document = match web_sys::window().and_then(|w| w.document()) {
-        Some(d) => d,
-        None => return,
-    };
-    let body = match document.get_element_by_id(WRITER_BODY_ID) {
-        Some(b) => b,
-        None => return,
-    };
-    let selector = format!("[data-change-id=\"{dom_id}\"]");
-    let Ok(Some(el)) = body.query_selector(&selector) else {
-        return;
-    };
-    let tag = el.tag_name().to_lowercase();
-    let parent = match el.parent_node() {
-        Some(p) => p,
-        None => return,
-    };
-    let el_node: &web_sys::Node = el.as_ref();
-    if tag == "ins" {
-        let text = el.text_content().unwrap_or_default();
-        let text_node = document.create_text_node(&text);
-        let text_node_ref: &web_sys::Node = text_node.as_ref();
-        let _ = parent.replace_child(text_node_ref, el_node);
-    } else {
-        let _ = parent.remove_child(el_node);
-    }
-}
-
-fn reject_change(dom_id: &str) {
-    let document = match web_sys::window().and_then(|w| w.document()) {
-        Some(d) => d,
-        None => return,
-    };
-    let body = match document.get_element_by_id(WRITER_BODY_ID) {
-        Some(b) => b,
-        None => return,
-    };
-    let selector = format!("[data-change-id=\"{dom_id}\"]");
-    let Ok(Some(el)) = body.query_selector(&selector) else {
-        return;
-    };
-    let tag = el.tag_name().to_lowercase();
-    let parent = match el.parent_node() {
-        Some(p) => p,
-        None => return,
-    };
-    let el_node: &web_sys::Node = el.as_ref();
-    if tag == "ins" {
-        let _ = parent.remove_child(el_node);
-    } else {
-        let text = el.text_content().unwrap_or_default();
-        let text_node = document.create_text_node(&text);
-        let text_node_ref: &web_sys::Node = text_node.as_ref();
-        let _ = parent.replace_child(text_node_ref, el_node);
-    }
-}
-
-fn accept_all_changes() {
-    for ch in list_pending_changes() {
-        accept_change(&ch.dom_id);
-    }
-}
-
-fn reject_all_changes() {
-    for ch in list_pending_changes() {
-        reject_change(&ch.dom_id);
-    }
-}
-
-/// Rough page estimate for the status bar: ~3000 characters per A4 page.
-fn estimate_page_count(char_count: u32) -> u32 {
-    (char_count / 3000) + 1
-}
-
-/// Rich-text document editor (word processor).
-#[component]
-pub fn Writer(id: String) -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let mut doc_title = use_signal(|| crate::i18n::t("editor.writer.untitled"));
-    let mut word_count = use_signal(|| 0u32);
-    let mut char_count = use_signal(|| 0u32);
-    let mut page_count = use_signal(|| 1u32);
-    let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
-    let mut show_sidebar = use_signal(|| true);
-    let mut doc_body_text = use_signal(String::new);
-    let mut initial_html = use_signal(String::new);
-    let mut document_content = use_signal(|| serde_json::json!({}));
-    let mut loaded = use_signal(|| false);
-
-    let mut find_open = use_signal(|| false);
-    let mut find_query = use_signal(String::new);
-    let mut find_info = use_signal(String::new);
-
-    let mut ctx_menu = use_signal(|| None::<(f64, f64, Vec<MenuEntry>)>);
-    let mut comments_open = use_signal(|| false);
-    let mut versions_open = use_signal(|| false);
-    let mut tracking_on = use_signal(|| false);
-    let mut track_pane_open = use_signal(|| false);
-    let mut changes_tick = use_signal(|| 0u32);
-
-    let auth = use_context::<Signal<AuthState>>();
-    let toast_bus = use_context::<Signal<Vec<Toast>>>();
-    let nav = use_navigator();
-    let presence = use_signal(Vec::<RemoteCursor>::new);
-    let mut ws_handle = use_signal(|| None::<CollabHandle>);
-    let mut conn_state = use_signal(|| ConnectionState::Connecting);
-
-    let id_for_resource = id.clone();
-    let doc_resource = use_resource(move || {
-        let id = id_for_resource.clone();
-        let token = auth.read().token.clone().unwrap_or_default();
-        async move { api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await }
-    });
-
-    use_effect(move || {
-        if *loaded.read() {
-            return;
-        }
-        if let Some(Ok(doc)) = doc_resource.read().as_ref() {
-            doc_title.set(doc.name.clone());
-            let text = writer_content_to_plain(&doc.content);
-            let wc = text.split_whitespace().count() as u32;
-            let cc = text.chars().count() as u32;
-            let html = plain_text_to_html(&text);
-            document_content.set(doc.content.clone());
-            initial_html.set(html);
-            doc_body_text.set(text);
-            word_count.set(wc);
-            char_count.set(cc);
-            page_count.set(estimate_page_count(cc));
-            loaded.set(true);
-        }
-    });
-
-    let doc_id_for_effect = id.clone();
-    let local_user_id = auth
-        .read()
-        .user
-        .as_ref()
-        .map(|u| u.id.to_string())
-        .unwrap_or_default();
-    let local_user_id_for_effect = local_user_id.clone();
-    use_effect(move || {
-        let token = auth.read().token.clone().unwrap_or_default();
-        let doc_id = doc_id_for_effect.clone();
-        let self_id = local_user_id_for_effect.clone();
-        let mut presence_for_msg = presence;
-        let on_message = move |msg: CollabMessage| match msg {
-            CollabMessage::UserJoined {
-                user_id,
-                username,
-                color,
-            } => {
-                let mut list = presence_for_msg.write();
-                if !list.iter().any(|c| c.user_id == user_id) {
-                    list.push(RemoteCursor {
-                        user_id,
-                        username,
-                        color,
-                        position: None,
-                    });
-                }
-            }
-            CollabMessage::UserLeft { user_id } => {
-                let mut list = presence_for_msg.write();
-                list.retain(|c| c.user_id != user_id);
-            }
-            CollabMessage::CursorUpdate(payload) => {
-                if let Ok(parsed) = serde_json::from_value::<CursorPosLite>(payload) {
-                    let Some(uid) = cursor_user_id(&parsed.user_id) else {
-                        return;
-                    };
-                    if uid == self_id {
-                        return;
-                    }
-                    let off = parsed.position.as_ref().and_then(cursor_offset);
-                    let mut list = presence_for_msg.write();
-                    if let Some(existing) = list.iter_mut().find(|c| c.user_id == uid) {
-                        if off.is_some() {
-                            existing.position = off;
-                        }
-                        if let Some(u) = parsed.username
-                            && existing.username.is_empty()
-                        {
-                            existing.username = u;
-                        }
-                        if let Some(c) = parsed.color
-                            && existing.color.is_empty()
-                        {
-                            existing.color = c;
-                        }
-                    } else {
-                        list.push(RemoteCursor {
-                            user_id: uid,
-                            username: parsed.username.unwrap_or_default(),
-                            color: parsed.color.unwrap_or_else(|| "#888".into()),
-                            position: off,
-                        });
-                    }
-                }
-            }
-            CollabMessage::Operation(payload) => {
-                let Some((author_id, text)) = writer_replace_from_operation(&payload) else {
-                    return;
-                };
-                if author_id == self_id {
-                    return;
-                }
-                let wc = text.split_whitespace().count() as u32;
-                let cc = text.chars().count() as u32;
-                apply_writer_text_to_dom(&text);
-                initial_html.set(plain_text_to_html(&text));
-                doc_body_text.set(text);
-                let next =
-                    writer_content_with_text(&document_content.read(), &doc_body_text.read());
-                document_content.set(next);
-                word_count.set(wc);
-                char_count.set(cc);
-                page_count.set(estimate_page_count(cc));
-                saved_status.set(crate::i18n::t("common.saved"));
-            }
-            _ => {}
-        };
-        let on_state = move |s: ConnectionState| {
-            conn_state.set(s);
-        };
-        let handle = connect_with_reconnect(doc_id, token, on_message, on_state);
-        ws_handle.set(Some(handle));
-    });
-
-    let ws_for_selection = ws_handle;
-    let user_id_for_selection = local_user_id.clone();
-    use_effect(move || {
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let Some(document) = window.document() else {
-            return;
-        };
-        let last_sent: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
-        let perf = window.performance();
-        let self_id = user_id_for_selection.clone();
-        let ws_signal = ws_for_selection;
-        let cb = Closure::<dyn FnMut()>::new(move || {
-            let Some(handle) = ws_signal.read().clone() else {
-                return;
-            };
-            let Some(ws) = handle.current_ws() else {
-                return;
-            };
-            if ws.ready_state() != WebSocket::OPEN {
-                return;
-            }
-            let now = perf.as_ref().map(|p| p.now()).unwrap_or(0.0);
-            {
-                let mut last = last_sent.borrow_mut();
-                if now - *last < 200.0 {
-                    return;
-                }
-                *last = now;
-            }
-            let Some(off) = caret_offset_in_body() else {
-                return;
-            };
-            let payload = serde_json::json!({
-                "type": "CursorUpdate",
-                "user_id": self_id,
-                "username": "",
-                "color": "#888",
-                "position": { "path": [], "offset": off },
-                "selection": null,
-                "last_active": chrono::Utc::now().to_rfc3339(),
-            });
-            if let Ok(s) = serde_json::to_string(&payload) {
-                let _ = ws.send_with_str(&s);
-            }
-        });
-        document.set_onselectionchange(Some(cb.as_ref().unchecked_ref()));
-        cb.forget();
-    });
-
-    use_drop(move || {
-        if let Some(handle) = ws_handle.write().take() {
-            handle.close();
-        }
-    });
-
-    let username_for_tracking = auth
-        .read()
-        .user
-        .as_ref()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "you".to_string());
-    use_effect(move || {
-        if !*loaded.read() {
-            return;
-        }
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        let Some(document) = window.document() else {
-            return;
-        };
-        let Some(body) = document.get_element_by_id(WRITER_BODY_ID) else {
-            return;
-        };
-        if body.get_attribute("data-track-bound").is_some() {
-            return;
-        }
-        let _ = body.set_attribute("data-track-bound", "1");
-        let author = username_for_tracking.clone();
-        let tracking_on_inner = tracking_on;
-        let mut tick_inner = changes_tick;
-        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |evt: web_sys::Event| {
-            if !*tracking_on_inner.read() {
-                return;
-            }
-            let input_type = js_sys::Reflect::get(&evt, &"inputType".into())
-                .ok()
-                .and_then(|v| v.as_string())
-                .unwrap_or_default();
-            if input_type == "insertText" || input_type == "insertCompositionText" {
-                let data = js_sys::Reflect::get(&evt, &"data".into())
-                    .ok()
-                    .and_then(|v| v.as_string())
-                    .unwrap_or_default();
-                if data.is_empty() {
-                    return;
-                }
-                evt.prevent_default();
-                insert_tracked_text(&data, "#2563eb", &author);
-                let v = *tick_inner.read();
-                tick_inner.set(v.wrapping_add(1));
-            } else if input_type.starts_with("delete") && wrap_selection_as_deleted(&author) {
-                evt.prevent_default();
-                let v = *tick_inner.read();
-                tick_inner.set(v.wrapping_add(1));
-            }
-        });
-        let _ = body.add_event_listener_with_callback("beforeinput", cb.as_ref().unchecked_ref());
-        cb.forget();
-    });
-
-    let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
-
-    let perform_save = {
-        let id = id.clone();
-        move |body: serde_json::Value, mut status: Signal<String>, token: String| {
-            let id = id.clone();
-            status.set(crate::i18n::t("common.saving"));
-            wasm_bindgen_futures::spawn_local(async move {
-                let req = serde_json::json!({ "content": body });
-                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token)
-                    .await
-                {
-                    Ok(_) => status.set(crate::i18n::t("common.saved")),
-                    Err(e) => status
-                        .set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
-                }
-            });
-        }
-    };
-
-    let schedule_save = {
-        let save_timer = save_timer.clone();
-        let perform_save = perform_save.clone();
-        move || {
-            if !*loaded.read() {
-                return;
-            }
-            saved_status.set(crate::i18n::t("common.unsaved"));
-            let body = writer_content_with_text(&document_content.read(), &doc_body_text.read());
-            let body = attach_pending_revisions(body, &list_pending_changes());
-            document_content.set(body.clone());
-            let token = auth.read().token.clone().unwrap_or_default();
-            let status = saved_status;
-            let perform_save = perform_save.clone();
-            let new_timer = Timeout::new(1500, move || {
-                perform_save(body, status, token);
-            });
-            *save_timer.borrow_mut() = Some(new_timer);
-        }
-    };
-
-    let flush_save = {
-        let save_timer = save_timer.clone();
-        let perform_save = perform_save.clone();
-        move || {
-            if !*loaded.read() {
-                return;
-            }
-            save_timer.borrow_mut().take();
-            let body = writer_content_with_text(&document_content.read(), &doc_body_text.read());
-            let body = attach_pending_revisions(body, &list_pending_changes());
-            document_content.set(body.clone());
-            let token = auth.read().token.clone().unwrap_or_default();
-            perform_save(body, saved_status, token);
-        }
-    };
-
-    rsx! {
-        Navbar {}
-        {
-            let state = *conn_state.read();
-            match state {
-                ConnectionState::Reconnecting(n) => {
-                    let msg = crate::i18n::t("ws.reconnecting").replace("{n}", &n.to_string());
-                    rsx! {
-                        div { class: "ws-banner ws-reconnecting", "{msg}" }
-                    }
-                },
-                ConnectionState::Failed => {
-                    let msg = crate::i18n::t("ws.failed");
-                    rsx! {
-                        div { class: "ws-banner ws-failed", "{msg}" }
-                    }
-                },
-                _ => rsx! {},
-            }
-        }
-        div {
-            class: "editor-container",
-            tabindex: "0",
-            onkeydown: {
-                let mut flush_save = flush_save.clone();
-                let mut schedule_save = schedule_save.clone();
-                move |evt: KeyboardEvent| {
-                    let modifiers = evt.modifiers();
-                    if !modifiers.contains(Modifiers::CONTROL) {
-                        return;
-                    }
-                    if let Key::Character(ref ch) = evt.key() {
-                        match ch.as_str() {
-                            "f" => {
-                                evt.prevent_default();
-                                find_open.set(true);
-                            }
-                            "s" => { evt.prevent_default(); flush_save(); }
-                            "b" => {
-                                evt.prevent_default();
-                                exec_cmd("bold", None);
-                                doc_body_text.set(editor_text());
-                                schedule_save();
-                            }
-                            "i" => {
-                                evt.prevent_default();
-                                exec_cmd("italic", None);
-                                doc_body_text.set(editor_text());
-                                schedule_save();
-                            }
-                            "u" => {
-                                evt.prevent_default();
-                                exec_cmd("underline", None);
-                                doc_body_text.set(editor_text());
-                                schedule_save();
-                            }
-                            "z" if !modifiers.contains(Modifiers::SHIFT) => {
-                                evt.prevent_default();
-                                exec_cmd("undo", None);
-                                doc_body_text.set(editor_text());
-                                schedule_save();
-                            }
-                            "z" if modifiers.contains(Modifiers::SHIFT) => {
-                                evt.prevent_default();
-                                exec_cmd("redo", None);
-                                doc_body_text.set(editor_text());
-                                schedule_save();
-                            }
-                            "y" => {
-                                evt.prevent_default();
-                                exec_cmd("redo", None);
-                                doc_body_text.set(editor_text());
-                                schedule_save();
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            },
-            // Menubar
-            {
-                let mut flush_for_menu = flush_save.clone();
-                let mut schedule_for_menu = schedule_save.clone();
-                let id_for_menu = id.clone();
-                let bus_for_menu = toast_bus;
-                let nav_for_menu = nav;
-                let mut find_open_menu = find_open;
-                let mut show_sidebar_menu = show_sidebar;
-                rsx! {
-                    Menubar {
-                        document_type: "writer".to_string(),
-                        on_command: move |cmd: String| {
-                            let bus = bus_for_menu;
-                            match cmd.as_str() {
-                                "save" => flush_for_menu(),
-                                "undo" => { exec_cmd("undo", None); schedule_for_menu(); }
-                                "redo" => { exec_cmd("redo", None); schedule_for_menu(); }
-                                "cut" => exec_cmd("cut", None),
-                                "copy" => exec_cmd("copy", None),
-                                "paste" => exec_cmd("paste", None),
-                                "find" => { find_open_menu.set(true); }
-                                "back" => { nav_for_menu.push(Route::Dashboard {}); }
-                                "toggle-sidebar" => {
-                                    let cur = *show_sidebar_menu.read();
-                                    show_sidebar_menu.set(!cur);
-                                }
-                                "toggle-comments" => {
-                                    let cur = *comments_open.read();
-                                    comments_open.set(!cur);
-                                }
-                                "version-history" => {
-                                    let cur = *versions_open.read();
-                                    versions_open.set(!cur);
-                                }
-                                "track-changes" => {
-                                    let cur = *track_pane_open.read();
-                                    track_pane_open.set(!cur);
-                                    let v = *changes_tick.read();
-                                    changes_tick.set(v.wrapping_add(1));
-                                }
-                                "toggle-theme" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Some(el) = window.document().and_then(|d| d.document_element()) {
-                                            let cur = el.get_attribute("data-theme").unwrap_or_default();
-                                            let next = if cur == "dark" { "light" } else { "dark" };
-                                            let _ = el.set_attribute("data-theme", next);
-                                            if let Ok(Some(storage)) = window.local_storage() {
-                                                let _ = storage.set_item("theme", next);
-                                            }
-                                        }
-                                }
-                                "format-bold" => { exec_cmd("bold", None); schedule_for_menu(); }
-                                "format-italic" => { exec_cmd("italic", None); schedule_for_menu(); }
-                                "format-underline" => { exec_cmd("underline", None); schedule_for_menu(); }
-                                "insert-page-break" => {
-                                    exec_cmd("insertText", Some("\u{000c}"));
-                                    doc_body_text.set(editor_text());
-                                    schedule_for_menu();
-                                }
-                                "insert-header" | "insert-footer" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Ok(Some(value)) = window.prompt_with_message(
-                                            if cmd == "insert-header" { "Header text" } else { "Footer text" }
-                                        )
-                                    {
-                                        let field = if cmd == "insert-header" { "header" } else { "footer" };
-                                        let current = document_content.read().clone();
-                                        document_content.set(update_professional_field(
-                                            &current,
-                                            field,
-                                            serde_json::Value::String(value),
-                                        ));
-                                        if field == "footer" {
-                                            let current = document_content.read().clone();
-                                            document_content.set(update_professional_field(
-                                                &current,
-                                                "page_numbers",
-                                                serde_json::Value::Bool(true),
-                                            ));
-                                        }
-                                        schedule_for_menu();
-                                    }
-                                }
-                                "insert-toc" => {
-                                    let current = document_content.read().clone();
-                                    document_content.set(update_professional_field(
-                                        &current,
-                                        "table_of_contents",
-                                        serde_json::Value::Bool(true),
-                                    ));
-                                    schedule_for_menu();
-                                }
-                                "insert-section-break" => {
-                                    let mut sections = document_content
-                                        .read()
-                                        .pointer("/professional/sections")
-                                        .and_then(|value| value.as_array())
-                                        .cloned()
-                                        .unwrap_or_default();
-                                    let page_settings = document_content
-                                        .read()
-                                        .get("page_settings")
-                                        .cloned()
-                                        .unwrap_or_else(|| serde_json::json!({
-                                            "width_mm": 210.0, "height_mm": 297.0,
-                                            "margin_top": 25.4, "margin_right": 25.4,
-                                            "margin_bottom": 25.4, "margin_left": 25.4,
-                                            "orientation": "Portrait"
-                                        }));
-                                    sections.push(serde_json::json!({
-                                        "start_block": doc_body_text.read().lines().count(),
-                                        "page_settings": page_settings,
-                                        "header": null,
-                                        "footer": null
-                                    }));
-                                    let current = document_content.read().clone();
-                                    document_content.set(update_professional_field(
-                                        &current,
-                                        "sections",
-                                        serde_json::Value::Array(sections),
-                                    ));
-                                    exec_cmd("insertText", Some("\u{000c}"));
-                                    doc_body_text.set(editor_text());
-                                    schedule_for_menu();
-                                }
-                                "insert-footnote" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Ok(Some(value)) = window.prompt_with_message("Footnote text")
-                                        && !value.trim().is_empty()
-                                    {
-                                        let mut notes = document_content
-                                            .read()
-                                            .pointer("/professional/footnotes")
-                                            .and_then(|value| value.as_array())
-                                            .cloned()
-                                            .unwrap_or_default();
-                                        notes.push(serde_json::json!({
-                                            "id": notes.len() + 1,
-                                            "reference_block": doc_body_text.read().lines().count().saturating_sub(1),
-                                            "text": value
-                                        }));
-                                        let current = document_content.read().clone();
-                                        document_content.set(update_professional_field(
-                                            &current,
-                                            "footnotes",
-                                            serde_json::Value::Array(notes),
-                                        ));
-                                        schedule_for_menu();
-                                    }
-                                }
-                                "insert-citation" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Ok(Some(title)) = window.prompt_with_message("Citation title")
-                                        && !title.trim().is_empty()
-                                    {
-                                        let mut bibliography = document_content
-                                            .read()
-                                            .pointer("/professional/bibliography")
-                                            .and_then(|value| value.as_array())
-                                            .cloned()
-                                            .unwrap_or_default();
-                                        bibliography.push(serde_json::json!({
-                                            "id": uuid::Uuid::new_v4().to_string(),
-                                            "author": "Unknown",
-                                            "title": title,
-                                            "year": null,
-                                            "url": null
-                                        }));
-                                        let current = document_content.read().clone();
-                                        document_content.set(update_professional_field(
-                                            &current,
-                                            "bibliography",
-                                            serde_json::Value::Array(bibliography),
-                                        ));
-                                        schedule_for_menu();
-                                    }
-                                }
-                                "insert-merge-field" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Ok(Some(name)) = window.prompt_with_message("Mail merge field name")
-                                        && !name.trim().is_empty()
-                                    {
-                                        let mut fields = document_content
-                                            .read()
-                                            .pointer("/professional/mail_merge_fields")
-                                            .and_then(|value| value.as_array())
-                                            .cloned()
-                                            .unwrap_or_default();
-                                        fields.push(serde_json::json!({
-                                            "name": name,
-                                            "block_index": doc_body_text.read().lines().count().saturating_sub(1),
-                                            "default_value": null
-                                        }));
-                                        let current = document_content.read().clone();
-                                        document_content.set(update_professional_field(
-                                            &current,
-                                            "mail_merge_fields",
-                                            serde_json::Value::Array(fields),
-                                        ));
-                                        schedule_for_menu();
-                                    }
-                                }
-                                "print" => {
-                                    if let Some(w) = web_sys::window() { let _ = w.print(); }
-                                }
-                                "export-pdf" | "export-docx" | "export-html" => {
-                                    let format = match cmd.as_str() {
-                                        "export-pdf" => "pdf",
-                                        "export-docx" => "docx",
-                                        _ => "html",
-                                    };
-                                    let id = id_for_menu.clone();
-                                    let token = auth.read().token.clone().unwrap_or_default();
-                                    let bus2 = bus;
-                                    let fmt_owned = format.to_string();
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        match export_document(&id, &fmt_owned, &token).await {
-                                            Ok(_) => push_toast(bus2, ToastKind::Success, crate::i18n::t("editor.export_succeeded").replace("{fmt}", &fmt_owned.to_uppercase())),
-                                            Err(e) => push_toast(bus2, ToastKind::Error, crate::i18n::t("editor.export_failed").replace("{err}", &e.to_string())),
-                                        }
-                                    });
-                                }
-                                other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
-                            }
-                        },
-                    }
-                }
-            }
-
-            // Document title bar
-            div { class: "doc-title-bar",
-                input {
-                    class: "doc-title-input",
-                    value: "{doc_title}",
-                    oninput: {
-                        let mut schedule_save = schedule_save.clone();
-                        move |e: FormEvent| {
-                            doc_title.set(e.value());
-                            schedule_save();
-                        }
-                    },
-                    placeholder: crate::i18n::t("editor.writer.untitled"),
-                }
-                span { class: "save-status", "{saved_status}" }
-                if !presence.read().is_empty() {
-                    div {
-                        class: "presence-list",
-                        style: "display: inline-flex; gap: 4px; margin-left: 12px; align-items: center;",
-                        for cursor in presence.read().iter() {
-                            span {
-                                key: "{cursor.user_id}",
-                                class: "presence-pill",
-                                title: "{cursor.username}",
-                                style: "background: {cursor.color}; color: #fff; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 600; line-height: 1;",
-                                {cursor.username.chars().take(2).collect::<String>().to_uppercase()}
-                            }
-                        }
-                    }
-                }
-                button {
-                    class: "btn btn-outline btn-sm",
-                    onclick: move |_| {
-                        let current = *show_sidebar.read();
-                        show_sidebar.set(!current);
-                    },
-                    {if *show_sidebar.read() { crate::i18n::t("editor.hide_sidebar") } else { crate::i18n::t("editor.show_sidebar") }}
-                }
-            }
-
-            // Toolbar
-            {
-                let run = {
-                    let mut schedule_save = schedule_save.clone();
-                    move |name: &'static str, value: Option<String>| {
-                        exec_cmd(name, value.as_deref());
-                        doc_body_text.set(editor_text());
-                        schedule_save();
-                    }
-                };
-                let run_b = run.clone(); let run_i = run.clone(); let run_u = run.clone();
-                let run_s = run.clone(); let run_jl = run.clone(); let run_jc = run.clone();
-                let run_jr = run.clone(); let run_jf = run.clone(); let run_ul = run.clone();
-                let run_ol = run.clone(); let run_in = run.clone(); let run_out = run.clone();
-                let run_font = run.clone(); let run_size = run.clone();
-                let run_fore = run.clone(); let run_hi = run.clone();
-                let bold_title = crate::i18n::t("editor.bold");
-                let italic_title = crate::i18n::t("editor.italic");
-                let underline_title = crate::i18n::t("editor.underline");
-                let strike_title = crate::i18n::t("editor.strikethrough");
-                let bul_title = crate::i18n::t("editor.bulleted_list");
-                let num_title = crate::i18n::t("editor.numbered_list");
-                let indent_title = crate::i18n::t("editor.indent");
-                let outdent_title = crate::i18n::t("editor.outdent");
-                let alignl_title = crate::i18n::t("editor.align_left");
-                let alignc_title = crate::i18n::t("editor.align_center");
-                let alignr_title = crate::i18n::t("editor.align_right");
-                let justify_title = crate::i18n::t("editor.justify");
-                let tc_title = crate::i18n::t("editor.track_changes");
-                let changes_title = crate::i18n::t("editor.changes");
-                let font_title = crate::i18n::t("editor.writer.font_family");
-                let size_title = crate::i18n::t("editor.writer.font_size");
-                let textcol_title = crate::i18n::t("editor.text_color");
-                let hlcol_title = crate::i18n::t("editor.highlight_color");
-                rsx! {
-                    div { class: "toolbar",
-                        div { class: "toolbar-group",
-                            select {
-                                class: "toolbar-select font-family",
-                                title: "{font_title}",
-                                aria_label: "{font_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onchange: move |e: FormEvent| { let mut r = run_font.clone(); r("fontName", Some(e.value())); },
-                                option { value: "Arial", "Arial" }
-                                option { value: "Times New Roman", "Times New Roman" }
-                                option { value: "Courier New", "Courier New" }
-                                option { value: "Georgia", "Georgia" }
-                                option { value: "Verdana", "Verdana" }
-                                option { value: "Helvetica", "Helvetica" }
-                            }
-                            select {
-                                class: "toolbar-select font-size",
-                                title: "{size_title}",
-                                aria_label: "{size_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onchange: move |e: FormEvent| { let mut r = run_size.clone(); r("fontSize", Some(e.value())); },
-                                option { value: "2", "10pt" }
-                                option { value: "3", selected: true, "12pt" }
-                                option { value: "4", "14pt" }
-                                option { value: "5", "18pt" }
-                                option { value: "6", "24pt" }
-                                option { value: "7", "36pt" }
-                            }
-                        }
-                        div { class: "toolbar-separator" }
-                        div { class: "toolbar-group",
-                            button {
-                                class: "toolbar-btn", title: "{bold_title}",
-                                aria_label: "{bold_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_b.clone(); r("bold", None); },
-                                "B"
-                            }
-                            button {
-                                class: "toolbar-btn italic", title: "{italic_title}",
-                                aria_label: "{italic_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_i.clone(); r("italic", None); },
-                                "I"
-                            }
-                            button {
-                                class: "toolbar-btn underline", title: "{underline_title}",
-                                aria_label: "{underline_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_u.clone(); r("underline", None); },
-                                "U"
-                            }
-                            button {
-                                class: "toolbar-btn strikethrough", title: "{strike_title}",
-                                aria_label: "{strike_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_s.clone(); r("strikeThrough", None); },
-                                "S"
-                            }
-                        }
-                        div { class: "toolbar-separator" }
-                        div { class: "toolbar-group",
-                            button {
-                                class: "toolbar-btn", title: "{bul_title}",
-                                aria_label: "{bul_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_ul.clone(); r("insertUnorderedList", None); },
-                                "* List"
-                            }
-                            button {
-                                class: "toolbar-btn", title: "{num_title}",
-                                aria_label: "{num_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_ol.clone(); r("insertOrderedList", None); },
-                                "1. List"
-                            }
-                            button {
-                                class: "toolbar-btn", title: "{indent_title}",
-                                aria_label: "{indent_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_in.clone(); r("indent", None); },
-                                ">>"
-                            }
-                            button {
-                                class: "toolbar-btn", title: "{outdent_title}",
-                                aria_label: "{outdent_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_out.clone(); r("outdent", None); },
-                                "<<"
-                            }
-                        }
-                        div { class: "toolbar-separator" }
-                        div { class: "toolbar-group",
-                            button {
-                                class: "toolbar-btn", title: "{alignl_title}",
-                                aria_label: "{alignl_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_jl.clone(); r("justifyLeft", None); },
-                                "L"
-                            }
-                            button {
-                                class: "toolbar-btn", title: "{alignc_title}",
-                                aria_label: "{alignc_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_jc.clone(); r("justifyCenter", None); },
-                                "C"
-                            }
-                            button {
-                                class: "toolbar-btn", title: "{alignr_title}",
-                                aria_label: "{alignr_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_jr.clone(); r("justifyRight", None); },
-                                "R"
-                            }
-                            button {
-                                class: "toolbar-btn", title: "{justify_title}",
-                                aria_label: "{justify_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| { let mut r = run_jf.clone(); r("justifyFull", None); },
-                                "J"
-                            }
-                        }
-                        div { class: "toolbar-separator" }
-                        div { class: "toolbar-group",
-                            input {
-                                r#type: "color", class: "toolbar-color", title: "{textcol_title}", value: "#000000",
-                                aria_label: "{textcol_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                oninput: move |e: FormEvent| { let mut r = run_fore.clone(); r("foreColor", Some(e.value())); },
-                            }
-                            input {
-                                r#type: "color", class: "toolbar-color", title: "{hlcol_title}", value: "#ffff00",
-                                aria_label: "{hlcol_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                oninput: move |e: FormEvent| {
-                                    let val = e.value();
-                                    let mut r = run_hi.clone();
-                                    r("hiliteColor", Some(val.clone()));
-                                    r("backColor", Some(val));
-                                },
-                            }
-                        }
-                        div { class: "toolbar-separator" }
-                        div { class: "toolbar-group",
-                            button {
-                                class: if *tracking_on.read() { "toolbar-btn active" } else { "toolbar-btn" },
-                                title: "{tc_title}",
-                                aria_label: "{tc_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| {
-                                    let cur = *tracking_on.read();
-                                    tracking_on.set(!cur);
-                                },
-                                "TC"
-                            }
-                            button {
-                                class: "toolbar-btn",
-                                title: "{changes_title}",
-                                aria_label: "{changes_title}",
-                                onmousedown: move |evt: MouseEvent| { evt.prevent_default(); },
-                                onclick: move |_| {
-                                    let cur = *track_pane_open.read();
-                                    track_pane_open.set(!cur);
-                                    let v = *changes_tick.read();
-                                    changes_tick.set(v.wrapping_add(1));
-                                },
-                                "{changes_title}"
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Main editor area
-            div { class: "editor-main",
-                if *show_sidebar.read() {
-                    Sidebar {}
-                }
-
-                div {
-                    class: "editor-canvas writer-canvas",
-                    oncontextmenu: move |evt: MouseEvent| {
-                        evt.prevent_default();
-                        let coords = evt.client_coordinates();
-                        ctx_menu.set(Some((
-                            coords.x,
-                            coords.y,
-                            vec![
-                                MenuEntry::new(crate::i18n::t("ctx.cut"), "cut"),
-                                MenuEntry::new(crate::i18n::t("ctx.copy"), "copy"),
-                                MenuEntry::new(crate::i18n::t("ctx.paste"), "paste"),
-                                MenuEntry::new(crate::i18n::t("ctx.delete"), "delete"),
-                                MenuEntry::new(crate::i18n::t("ctx.insert_link"), "insert-link"),
-                            ],
-                        )));
-                    },
-                    match doc_resource.read().as_ref() {
-                        None => rsx! { div { class: "editor-loading", {crate::i18n::t("editor.loading_document")} } },
-                        Some(Err(e)) => rsx! { div { class: "editor-error", {crate::i18n::t("editor.failed_load").replace("{err}", &e.to_string())} } },
-                        Some(Ok(_)) => rsx! {
-                            div { class: "page",
-                                div {
-                                    id: WRITER_BODY_ID,
-                                    contenteditable: "true",
-                                    spellcheck: "true",
-                                    class: "writer-content",
-                                    dangerous_inner_html: "{initial_html}",
-                                    oninput: {
-                                        let mut schedule_save = schedule_save.clone();
-                                        let self_id = local_user_id.clone();
-                                        move |_evt: FormEvent| {
-                                            let text = editor_text();
-                                            let previous = doc_body_text.read().clone();
-                                            let wc = text.split_whitespace().count() as u32;
-                                            let cc = text.chars().count() as u32;
-                                            word_count.set(wc);
-                                            char_count.set(cc);
-                                            page_count.set(estimate_page_count(cc));
-                                            if previous != text {
-                                                if let Some(handle) = ws_handle.read().as_ref() {
-                                                    let _ = handle.send_operation(
-                                                        &self_id,
-                                                        serde_json::json!({
-                                                            "type": "Replace",
-                                                            "path": ["body_text"],
-                                                            "old_value": previous,
-                                                            "new_value": text.clone(),
-                                                        }),
-                                                    );
-                                                }
-                                                doc_body_text.set(text);
-                                            }
-                                            schedule_save();
-                                            if *track_pane_open.read() {
-                                                let v = *changes_tick.read();
-                                                changes_tick.set(v.wrapping_add(1));
-                                            }
-                                        }
-                                    },
-                                }
-                                div { class: "remote-cursors-layer",
-                                    for cursor in presence.read().iter() {
-                                        if let Some(pos) = cursor.position {
-                                            if let Some((x, y)) = char_offset_to_pixel(pos) {
-                                                {
-                                                    let cx = x + 72.0;
-                                                    let cy = y + 96.0;
-                                                    rsx! {
-                                                        div {
-                                                            key: "{cursor.user_id}",
-                                                            class: "remote-cursor",
-                                                            style: "left: {cx}px; top: {cy}px; background: {cursor.color};",
-                                                            title: "{cursor.username}",
-                                                            div { class: "remote-cursor-flag",
-                                                                style: "background: {cursor.color};",
-                                                                "{cursor.username}"
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                    }
-                }
-            }
-
-            // Status bar
-            {
-                let page_str = crate::i18n::t("editor.writer.pages")
-                    .replace("{n}", &page_count.read().to_string());
-                let words_str = crate::i18n::t("editor.writer.words").replace("{n}", &word_count.read().to_string());
-                let chars_str = crate::i18n::t("editor.writer.characters").replace("{n}", &char_count.read().to_string());
-                let id_str = crate::i18n::t("editor.writer.document_id").replace("{id}", &id);
-                rsx! {
-                    div { class: "status-bar",
-                        span { "{page_str}" }
-                        span { "{words_str}" }
-                        span { "{chars_str}" }
-                        span { "{id_str}" }
-                    }
-                }
-            }
-
-            FindDialog {
-                open: find_open,
-                match_info: find_info.read().clone(),
-                on_search: move |q: String| {
-                    find_query.set(q.clone());
-                    if q.is_empty() {
-                        find_info.set(String::new());
-                    } else {
-                        let ok = window_find(&q, false);
-                        find_info.set(if ok { crate::i18n::t("editor.writer.match_label") } else { crate::i18n::t("editor.writer.no_matches") });
-                    }
-                },
-                on_next: move |_| {
-                    let q = find_query.read().clone();
-                    if q.is_empty() { return; }
-                    let ok = window_find(&q, false);
-                    find_info.set(if ok { crate::i18n::t("editor.writer.match_label") } else { crate::i18n::t("editor.writer.no_matches") });
-                },
-                on_prev: move |_| {
-                    let q = find_query.read().clone();
-                    if q.is_empty() { return; }
-                    let ok = window_find(&q, true);
-                    find_info.set(if ok { crate::i18n::t("editor.writer.match_label") } else { crate::i18n::t("editor.writer.no_matches") });
-                },
-                on_replace: {
-                    let mut schedule_save = schedule_save.clone();
-                    let bus = toast_bus;
-                    move |(find, replace): (String, String)| {
-                        if find.is_empty() { return; }
-                        if window_find(&find, false) {
-                            exec_cmd("insertText", Some(&replace));
-                            doc_body_text.set(editor_text());
-                            schedule_save();
-                            push_toast(bus, ToastKind::Success, crate::i18n::t("editor.writer.replaced"));
-                        } else {
-                            find_info.set(crate::i18n::t("editor.writer.no_matches"));
-                        }
-                    }
-                },
-                on_replace_all: {
-                    let mut schedule_save = schedule_save.clone();
-                    let bus = toast_bus;
-                    move |(find, replace): (String, String)| {
-                        if find.is_empty() { return; }
-                        let mut count = 0u32;
-                        while window_find(&find, false) {
-                            exec_cmd("insertText", Some(&replace));
-                            count += 1;
-                            if count > 1000 { break; }
-                        }
-                        if count > 0 {
-                            doc_body_text.set(editor_text());
-                            schedule_save();
-                        }
-                        push_toast(bus, ToastKind::Success, crate::i18n::t("editor.writer.replaced_n").replace("{n}", &count.to_string()));
-                    }
-                },
-            }
-
-            CommentsPane { doc_id: id.clone(), open: comments_open }
-            VersionHistory { doc_id: id.clone(), open: versions_open }
-            crate::components::ai_assist::AiAssist { doc_id: id.clone() }
-            ContextMenu {
-                state: ctx_menu,
-                on_command: {
-                    let bus = toast_bus;
-                    move |cmd: String| {
-                        match cmd.as_str() {
-                            "cut" => exec_cmd("cut", None),
-                            "copy" => exec_cmd("copy", None),
-                            "paste" => exec_cmd("paste", None),
-                            "delete" => exec_cmd("delete", None),
-                            "insert-link" => {
-                                if let Some(window) = web_sys::window()
-                                    && let Ok(Some(url)) = window.prompt_with_message(&crate::i18n::t("editor.writer.link_prompt"))
-                                        && !url.is_empty() {
-                                            exec_cmd("createLink", Some(&url));
-                                        }
-                            }
-                            other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
-                        }
-                    }
-                },
-            }
-
-            {
-                let _ = changes_tick.read();
-                if *track_pane_open.read() {
-                    let changes = list_pending_changes();
-                    let track_title = crate::i18n::t("track.title");
-                    let track_close = crate::i18n::t("track.close");
-                    let track_accept_all = crate::i18n::t("track.accept_all");
-                    let track_reject_all = crate::i18n::t("track.reject_all");
-                    let track_empty = crate::i18n::t("track.empty");
-                    let track_accept = crate::i18n::t("track.accept");
-                    let track_reject = crate::i18n::t("track.reject");
-                    rsx! {
-                        aside { class: "track-changes-pane",
-                            header { class: "track-changes-header",
-                                strong { "{track_title}" }
-                                button {
-                                    class: "btn-icon",
-                                    aria_label: "{track_close}",
-                                    onclick: move |_| track_pane_open.set(false),
-                                    "\u{2715}"
-                                }
-                            }
-                            div { class: "track-changes-actions",
-                                button {
-                                    class: "btn btn-sm",
-                                    onclick: move |_| {
-                                        accept_all_changes();
-                                        let v = *changes_tick.read();
-                                        changes_tick.set(v.wrapping_add(1));
-                                    },
-                                    "{track_accept_all}"
-                                }
-                                button {
-                                    class: "btn btn-sm",
-                                    onclick: move |_| {
-                                        reject_all_changes();
-                                        let v = *changes_tick.read();
-                                        changes_tick.set(v.wrapping_add(1));
-                                    },
-                                    "{track_reject_all}"
-                                }
-                            }
-                            div { class: "track-changes-list",
-                                if changes.is_empty() {
-                                    p { class: "muted", "{track_empty}" }
-                                }
-                                for ch in changes.iter().cloned() {
-                                    {
-                                        let accept_id = ch.dom_id.clone();
-                                        let reject_id = ch.dom_id.clone();
-                                        let track_accept = track_accept.clone();
-                                        let track_reject = track_reject.clone();
-                                        rsx! {
-                                            div { key: "{ch.dom_id}", class: "track-changes-item",
-                                                span { class: "track-changes-kind", "{ch.kind}" }
-                                                span { class: "track-changes-text", "{ch.text}" }
-                                                span { class: "muted", "{ch.author}" }
-                                                div { class: "track-changes-buttons",
-                                                    button {
-                                                        class: "btn-sm",
-                                                        aria_label: "{track_accept}",
-                                                        onclick: move |_| {
-                                                            accept_change(&accept_id);
-                                                            let v = *changes_tick.read();
-                                                            changes_tick.set(v.wrapping_add(1));
-                                                        },
-                                                        "\u{2713}"
-                                                    }
-                                                    button {
-                                                        class: "btn-sm",
-                                                        aria_label: "{track_reject}",
-                                                        onclick: move |_| {
-                                                            reject_change(&reject_id);
-                                                            let v = *changes_tick.read();
-                                                            changes_tick.set(v.wrapping_add(1));
-                                                        },
-                                                        "\u{2715}"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    rsx! {}
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod collaboration_tests {
     use super::*;
@@ -1858,4 +260,652 @@ mod collaboration_tests {
             ))
         );
     }
+}
+
+/// The finite editor displays paragraph/heading runs; native tables, lists,
+/// images and layout metadata remain in the canonical document on every edit.
+fn writer_to_rich(content: &Value) -> std::result::Result<Rc<sapid::RichDocument>, String> {
+    let blocks =
+        content["body"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|block| {
+                let runs = block["runs"].as_array()?;
+                let kind = if block["type"] == "Heading" {
+                    sapid::RichBlockKind::Heading(
+                        block["level"].as_u64().unwrap_or(1).clamp(1, 6) as u8
+                    )
+                } else {
+                    sapid::RichBlockKind::Paragraph
+                };
+                Some(sapid::RichBlock {
+                    kind,
+                    runs: runs
+                        .iter()
+                        .map(|run| sapid::RichRun {
+                            text: run["text"].as_str().unwrap_or_default().into(),
+                            marks: sapid::RichMarks {
+                                bold: run["bold"].as_bool().unwrap_or(false),
+                                italic: run["italic"].as_bool().unwrap_or(false),
+                                code: run["font_family"].as_str() == Some("monospace"),
+                                link: run["link"]
+                                    .as_str()
+                                    .filter(|url| {
+                                        url.starts_with("https:")
+                                            || url.starts_with("http:")
+                                            || url.starts_with("mailto:")
+                                    })
+                                    .map(str::to_owned),
+                            },
+                        })
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+    let blocks = if blocks.is_empty() {
+        sapid::RichDocument::default().blocks
+    } else {
+        blocks
+    };
+    sapid::RichDocument::new(blocks)
+        .map(Rc::new)
+        .map_err(|error| error.to_string())
+}
+
+fn native_rich_runs(original: Option<&Vec<Value>>, rich: &[sapid::RichRun]) -> Value {
+    let plain = rich.iter().map(|run| run.text.as_str()).collect::<String>();
+    let previous = original.cloned().unwrap_or_default();
+    let preserved = replace_writer_runs(&previous, &plain);
+    let mut result = Vec::new();
+    let mut old_offset = 0;
+    for native in preserved {
+        let text = native["text"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .collect::<Vec<_>>();
+        let end = old_offset + text.len();
+        let mut rich_offset = 0;
+        for run in rich {
+            let run_end = rich_offset + run.text.chars().count();
+            let from = old_offset.max(rich_offset);
+            let to = end.min(run_end);
+            if from < to {
+                let mut value = native.clone();
+                value["text"] = json!(
+                    text[from - old_offset..to - old_offset]
+                        .iter()
+                        .collect::<String>()
+                );
+                value["bold"] = json!(run.marks.bold);
+                value["italic"] = json!(run.marks.italic);
+                // Unsafe/unsupported links were excluded from the host model;
+                // do not erase an untouched native value during a text edit.
+                let old_link = native["link"].as_str().unwrap_or_default();
+                if run.marks.link.is_some()
+                    || old_link.is_empty()
+                    || old_link.starts_with("http:")
+                    || old_link.starts_with("https:")
+                    || old_link.starts_with("mailto:")
+                {
+                    value["link"] = json!(run.marks.link);
+                }
+                if run.marks.code {
+                    value["font_family"] = json!("monospace");
+                }
+                result.push(value);
+            }
+            rich_offset = run_end;
+        }
+        old_offset = end;
+    }
+    if result.is_empty() {
+        result.push(plain_writer_run(""));
+    }
+    json!(result)
+}
+
+fn writer_from_rich(base: &Value, document: &sapid::RichDocument) -> Value {
+    let mut result = base.clone();
+    let originals = base["body"].as_array().cloned().unwrap_or_default();
+    let mut edited = document.blocks.iter();
+    let convert = |block: &sapid::RichBlock, original: Option<&Value>| {
+        let mut value = original.cloned().unwrap_or_else(|| json!({"type":"Paragraph","id":uuid::Uuid::new_v4(),
+            "alignment":"Left","indent_level":0,"spacing":{"before":0.0,"after":8.0,"line_height":1.15}}));
+        let old_runs = original.and_then(|value| value["runs"].as_array());
+        value["type"] = json!(match block.kind {
+            sapid::RichBlockKind::Heading(_) => "Heading",
+            _ => "Paragraph",
+        });
+        if let sapid::RichBlockKind::Heading(level) = block.kind {
+            value["level"] = json!(level);
+        } else {
+            if value.get("alignment").is_none() {
+                value["alignment"] = json!("Left");
+            }
+            if value.get("indent_level").is_none() {
+                value["indent_level"] = json!(0);
+            }
+            if value.get("spacing").is_none() {
+                value["spacing"] = json!({"before":0.0,"after":8.0,"line_height":1.15});
+            }
+        }
+        value["runs"] = native_rich_runs(old_runs, &block.runs);
+        value
+    };
+    let mut body = Vec::new();
+    for original in &originals {
+        if original.get("runs").is_none() {
+            body.push(original.clone());
+        } else if let Some(next) = edited.next() {
+            body.push(convert(next, Some(original)));
+        }
+    }
+    body.extend(edited.map(|block| convert(block, None)));
+    result["body"] = Value::Array(body);
+    result
+}
+
+#[allow(non_snake_case)]
+pub fn Writer(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
+    widget(move |scope| {
+        let session = EditorSession::new(scope, auth, id.clone(), "writer");
+        let comments = scope.cage(false);
+        let versions = scope.cage(false);
+        let settings = scope.cage(false);
+        let search = scope.cage(String::new());
+        let replacement = scope.cage(String::new());
+        let link_url = scope.cage(String::new());
+        let tracking = scope.cage(false);
+        let content = session.content;
+        let rich = scope.cage(Rc::new(sapid::RichDocument::default()));
+        let rich_ok = scope.cage(true);
+        let controller = scope.cage(None::<sapid::EditorController>);
+        scope.effect(move || {
+            let source = content.get();
+            match writer_to_rich(&source) {
+                Ok(document) => {
+                    rich_ok.revise(|value| *value = true);
+                    if rich.get() != document {
+                        rich.revise(|value| *value = document);
+                    }
+                }
+                Err(_) => rich_ok.revise(|value| *value = false),
+            }
+        });
+        let change = session.clone();
+        let editor = sapid::rich_text_editor().theme(crate::components::ui::theme()).name("Document body").class("writer-body").document(rich).style(rich_ok.map(|visible| Style::new().display(if *visible { Display::Block } else { Display::None })))
+            .controller_ref(controller).enabled(session.loaded).on_document_change(move |document| {
+                let base = change.content.get(); let mut next = writer_from_rich(&base, &document);
+                if tracking.get() && writer_content_to_plain(&base) != document.plain_text() {
+                    let user = auth.get().user.map(|user| user.username).unwrap_or_default();
+                    let mut revisions = base.pointer("/professional/revisions").and_then(Value::as_array).cloned().unwrap_or_default();
+                    revisions.push(json!({"id":uuid::Uuid::new_v4(),"author":user,"timestamp":chrono::Utc::now(),
+                        "block_index":0,"kind":"Insert","text":document.plain_text()}));
+                    next = update_professional_field(&next, "revisions", json!(revisions));
+                }
+                rich.revise(|value| *value = document); change.edit(next);
+            });
+        let fallback_session = session.clone();
+        let fallback = sapid::textarea()
+            .theme(crate::components::ui::theme())
+            .name("Document body (large document)")
+            .rows(28)
+            .style(rich_ok.map(|visible| {
+                Style::new().display(if *visible {
+                    Display::None
+                } else {
+                    Display::Block
+                })
+            }))
+            .value(content.map(writer_content_to_plain))
+            .on_value_change(move |value| {
+                fallback_session.edit(writer_content_with_text(
+                    &fallback_session.content.get(),
+                    &value,
+                ));
+            });
+        let replace = session.clone();
+        let add_link = session.clone();
+        let settings_session = session.clone();
+        let settings_widget = when(settings, move || writer_settings(settings_session.clone()));
+        let print = sapid::button()
+            .theme(crate::components::ui::theme())
+            .label("Print")
+            .on_press(|| {
+                #[cfg(target_arch = "wasm32")]
+                if let Some(window) = web_sys::window() {
+                    let _ = window.print();
+                }
+            });
+        let count = content.map(|value| {
+            let text = writer_content_to_plain(value);
+            format!(
+                "{} words · {} characters · ~{} pages",
+                text.split_whitespace().count(),
+                text.chars().count(),
+                (text.chars().count() / 3000).max(1)
+            )
+        });
+        col()
+            .class("writer-app editor-shell")
+            .fill((
+                editor_header(
+                    &session,
+                    "Writer",
+                    &["docx", "pdf", "html", "markdown", "odt", "txt"],
+                ),
+                row().class("editor-toolbar").fill((
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label("Comments")
+                        .on_press(move || comments.revise(|value| *value = !*value)),
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label("Versions")
+                        .on_press(move || versions.revise(|value| *value = !*value)),
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label("Page & document settings")
+                        .on_press(move || settings.revise(|value| *value = !*value)),
+                    sapid::checkbox()
+                        .theme(crate::components::ui::theme())
+                        .label("Track changes")
+                        .checked(tracking)
+                        .on_checked_change(move |value| {
+                            tracking.revise(|current| *current = value)
+                        }),
+                    print,
+                )),
+                row().class("editor-toolbar").fill((
+                    sapid::text_field()
+                        .theme(crate::components::ui::theme())
+                        .name("Find")
+                        .value(search)
+                        .on_value_change(move |value| search.revise(|current| *current = value)),
+                    sapid::text_field()
+                        .theme(crate::components::ui::theme())
+                        .name("Replace with")
+                        .value(replacement)
+                        .on_value_change(move |value| {
+                            replacement.revise(|current| *current = value)
+                        }),
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label("Replace all")
+                        .on_press(move || {
+                            let query = search.get();
+                            if !query.is_empty() {
+                                let base = replace.content.get();
+                                let text = writer_content_to_plain(&base)
+                                    .replace(&query, &replacement.get());
+                                replace.edit(writer_content_with_text(&base, &text));
+                            }
+                        }),
+                    sapid::text_field()
+                        .theme(crate::components::ui::theme())
+                        .name("Link URL")
+                        .value(link_url)
+                        .on_value_change(move |value| link_url.revise(|current| *current = value)),
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label("Link selection")
+                        .on_press(move || {
+                            if let Some(controller) = controller.get()
+                                && let Err(error) =
+                                    controller.format(sapid::RichFormat::Link(Some(link_url.get())))
+                            {
+                                add_link.status.revise(|value| *value = error.to_string());
+                            }
+                        }),
+                )),
+                col().fill((
+                    writer_insert_controls(session.clone()),
+                    editor,
+                    fallback,
+                    writer_native_blocks(session.clone()),
+                )),
+                text().class("editor-statusbar").content(count),
+                settings_widget,
+                crate::components::comments_pane::CommentsPane(
+                    scope.clone(),
+                    auth,
+                    id.clone(),
+                    comments,
+                ),
+                crate::components::version_history::VersionHistory(
+                    scope.clone(),
+                    auth,
+                    id.clone(),
+                    versions,
+                ),
+                crate::components::ai_assist::AiAssist(scope.clone(), auth, id.clone()),
+            ))
+            .show_in(scope)
+    })
+}
+
+fn writer_settings(session: EditorSession) -> impl Widget {
+    widget(move |scope| {
+        let content = session.content;
+        let header = content.map(|value| {
+            value
+                .pointer("/professional/header")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        });
+        let footer = content.map(|value| {
+            value
+                .pointer("/professional/footer")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        });
+        let header_edit = session.clone();
+        let footer_edit = session.clone();
+        let portrait = session.clone();
+        let landscape = session.clone();
+        let revisions = scope.cage(String::new());
+        let revision_session = session.clone();
+        let clear = session.clone();
+        col()
+            .class("writer-settings")
+            .fill((
+                sapid::title(2)
+                    .theme(crate::components::ui::theme())
+                    .content("Page & document settings"),
+                sapid::text_field()
+                    .theme(crate::components::ui::theme())
+                    .name("Header")
+                    .value(header)
+                    .on_value_change(move |value| {
+                        header_edit.edit(update_professional_field(
+                            &header_edit.content.get(),
+                            "header",
+                            json!(value),
+                        ))
+                    }),
+                sapid::text_field()
+                    .theme(crate::components::ui::theme())
+                    .name("Footer")
+                    .value(footer)
+                    .on_value_change(move |value| {
+                        footer_edit.edit(update_professional_field(
+                            &footer_edit.content.get(),
+                            "footer",
+                            json!(value),
+                        ))
+                    }),
+                row().fill((
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label("Portrait")
+                        .on_press(move || {
+                            let mut value = portrait.content.get();
+                            value["page_settings"]["orientation"] = json!("Portrait");
+                            value["page_settings"]["width_mm"] = json!(210);
+                            value["page_settings"]["height_mm"] = json!(297);
+                            portrait.edit(value);
+                        }),
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label("Landscape")
+                        .on_press(move || {
+                            let mut value = landscape.content.get();
+                            value["page_settings"]["orientation"] = json!("Landscape");
+                            value["page_settings"]["width_mm"] = json!(297);
+                            value["page_settings"]["height_mm"] = json!(210);
+                            landscape.edit(value);
+                        }),
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label("Accept all tracked changes")
+                        .on_press(move || {
+                            clear.edit(update_professional_field(
+                                &clear.content.get(),
+                                "revisions",
+                                json!([]),
+                            ))
+                        }),
+                )),
+                text().content(content.map(|value| {
+                    format!(
+                        "Pending tracked changes: {}",
+                        value
+                            .pointer("/professional/revisions")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len)
+                    )
+                })),
+                sapid::textarea()
+                    .theme(crate::components::ui::theme())
+                    .name("Professional metadata JSON")
+                    .rows(8)
+                    .value(revisions)
+                    .on_value_change(move |value| revisions.revise(|current| *current = value)),
+                sapid::button()
+                    .theme(crate::components::ui::theme())
+                    .label("Apply metadata JSON")
+                    .on_press(
+                        move || match serde_json::from_str::<Value>(&revisions.get()) {
+                            Ok(value) if value.is_object() => {
+                                let mut next = revision_session.content.get();
+                                next["professional"] = value;
+                                revision_session.edit(next);
+                            }
+                            Ok(_) => revision_session
+                                .status
+                                .revise(|value| *value = "Metadata must be a JSON object".into()),
+                            Err(error) => revision_session
+                                .status
+                                .revise(|value| *value = error.to_string()),
+                        },
+                    ),
+            ))
+            .show_in(scope)
+    })
+}
+
+fn native_block_text(block: &Value) -> String {
+    if let Some(runs) = block["runs"].as_array() {
+        return extract_run_text(runs);
+    }
+    match block["type"].as_str().unwrap_or_default() {
+        "CodeBlock" => block["code"].as_str().unwrap_or_default().into(),
+        "List" => block["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|item| {
+                item["runs"]
+                    .as_array()
+                    .map(|runs| extract_run_text(runs))
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "Blockquote" => writer_content_to_plain(&json!({"body":block["blocks"]})),
+        _ => String::new(),
+    }
+}
+fn replace_native_block_text(block: &mut Value, text: &str) {
+    match block["type"].as_str().unwrap_or_default() {
+        "CodeBlock" => block["code"] = json!(text),
+        "List" => {
+            let previous = block["items"].as_array().cloned().unwrap_or_default();
+            block["items"] = json!(
+                text.split('\n')
+                    .enumerate()
+                    .map(|(index, line)| {
+                        let mut value = previous
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| json!({"runs":[],"children":[]}));
+                        value["runs"] = json!(replace_writer_runs(
+                            value["runs"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+                            line
+                        ));
+                        value
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        "Blockquote" => {
+            let next = writer_content_with_text(&json!({"body":block["blocks"]}), text);
+            block["blocks"] = next["body"].clone();
+        }
+        _ => {
+            block["runs"] = json!(replace_writer_runs(
+                block["runs"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+                text
+            ));
+        }
+    }
+}
+fn writer_native_blocks(session: EditorSession) -> impl Widget {
+    widget(move |scope| {
+        let content = session.content;
+        let render_session = session.clone();
+        let items = content.map(|value| {
+            value["body"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter(|(_, block)| block.get("runs").is_none())
+                .map(|(index, block)| (index, block.clone()))
+                .collect::<Vec<_>>()
+        });
+        each(items,|item|item.1["id"].as_str().map(str::to_owned).unwrap_or_else(||format!("block-{}",item.0)),move|item,_|{
+            let session=render_session.clone();
+            widget(move|scope|{
+                let initial=item.get();let kind=initial.1["type"].as_str().unwrap_or_default().to_string();
+                let remove=session.clone();let up=session.clone();let down=session.clone();
+                let mut children:Vec<Box<dyn Widget>>=Vec::new();
+                children.push(Box::new(row().fill((text().content(kind.clone()),
+                    sapid::button().theme(crate::components::ui::theme()).label("Remove block").on_press(move||{let index=item.get().0;let mut value=remove.content.get();if let Some(blocks)=value["body"].as_array_mut() && index<blocks.len(){blocks.remove(index);}remove.edit(value);}),
+                    sapid::button().theme(crate::components::ui::theme()).label("Move block up").on_press(move||{let index=item.get().0;let mut value=up.content.get();if let Some(blocks)=value["body"].as_array_mut() && index>0&&index<blocks.len(){blocks.swap(index,index-1);}up.edit(value);}),
+                    sapid::button().theme(crate::components::ui::theme()).label("Move block down").on_press(move||{let index=item.get().0;let mut value=down.content.get();if let Some(blocks)=value["body"].as_array_mut() && index+1<blocks.len(){blocks.swap(index,index+1);}down.edit(value);})
+                ))));
+                match kind.as_str(){
+                    "CodeBlock"|"List"|"Blockquote"=>{
+                        let edit=session.clone();children.push(Box::new(sapid::textarea().theme(crate::components::ui::theme()).name(format!("{kind} text")).rows(6).value(item.map(|item|native_block_text(&item.1))).on_value_change(move|text|{let index=item.get().0;let mut value=edit.content.get();replace_native_block_text(&mut value["body"][index],&text);edit.edit(value);})));
+                    }
+                    "Image"=>{
+                        let url=session.clone();let alt=session.clone();
+                        children.push(Box::new(image().source(item.map(|item|item.1["url"].as_str().unwrap_or_default().to_string())).alt(item.map(|item|item.1["alt_text"].as_str().unwrap_or("Document image").to_string()))));
+                        children.push(Box::new(sapid::text_field().theme(crate::components::ui::theme()).name("Image URL").value(item.map(|item|item.1["url"].as_str().unwrap_or_default().to_string())).on_commit(move|text|{let index=item.get().0;let mut value=url.content.get();value["body"][index]["url"]=json!(text);url.edit(value);})));
+                        children.push(Box::new(sapid::text_field().theme(crate::components::ui::theme()).name("Image description").value(item.map(|item|item.1["alt_text"].as_str().unwrap_or_default().to_string())).on_value_change(move|text|{let index=item.get().0;let mut value=alt.content.get();value["body"][index]["alt_text"]=json!(text);alt.edit(value);})));
+                    }
+                    "Table"=>{
+                        for (row,source) in initial.1["rows"].as_array().into_iter().flatten().enumerate(){
+                            let mut cells:Vec<Box<dyn Widget>>=Vec::new();
+                            for (column,_) in source["cells"].as_array().into_iter().flatten().enumerate(){
+                                let edit=session.clone();
+                                cells.push(Box::new(sapid::textarea().theme(crate::components::ui::theme()).name(format!("Table row {} column {}",row+1,column+1)).rows(3)
+                                    .value(item.map(move|item|writer_content_to_plain(&json!({"body":item.1["rows"][row]["cells"][column]["blocks"]}))))
+                                    .on_value_change(move|text|{let index=item.get().0;let mut value=edit.content.get();let cell=&mut value["body"][index]["rows"][row]["cells"][column];let updated=writer_content_with_text(&json!({"body":cell["blocks"]}),&text);cell["blocks"]=updated["body"].clone();edit.edit(value);})));
+                            }
+                            children.push(Box::new(row_widget(cells)));
+                        }
+                    }
+                    _=>{}
+                }
+                col().class("writer-native-block").fill(children).show_in(scope)
+            })
+        }).show_in(scope)
+    })
+}
+fn row_widget(children: Vec<Box<dyn Widget>>) -> impl Widget {
+    row().fill(children)
+}
+
+#[cfg(test)]
+mod glory_model_tests {
+    use super::*;
+    #[test]
+    fn rich_run_splits_preserve_native_styles_and_unknown_blocks() {
+        let mut doc = contrix_doc_engine::WriterDocument::new("Report".into());
+        doc.add_paragraph("Alpha βeta");
+        let mut base = serde_json::to_value(doc).unwrap();
+        base["body"][0]["runs"][0]["underline"] = json!(true);
+        base["body"][0]["runs"][0]["color"] = json!("#123456");
+        base["body"][0]["runs"][0]["font_size"] = json!(22.0);
+        base["body"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"Table","id":uuid::Uuid::new_v4(),"rows":[],"column_widths":[]}));
+        let rich = sapid::RichDocument::new(vec![sapid::RichBlock {
+            kind: sapid::RichBlockKind::Paragraph,
+            runs: vec![
+                sapid::RichRun {
+                    text: "Alpha ".into(),
+                    marks: sapid::RichMarks {
+                        bold: true,
+                        ..Default::default()
+                    },
+                },
+                sapid::RichRun {
+                    text: "βeta!".into(),
+                    marks: Default::default(),
+                },
+            ],
+        }])
+        .unwrap();
+        let saved = writer_from_rich(&base, &rich);
+        assert_eq!(saved["body"][1], base["body"][1]);
+        assert_eq!(saved["body"][0]["id"], base["body"][0]["id"]);
+        for run in saved["body"][0]["runs"].as_array().unwrap() {
+            assert_eq!(run["underline"], true);
+            assert_eq!(run["color"], "#123456");
+            assert_eq!(run["font_size"], 22.0);
+        }
+        assert_eq!(saved["body"][0]["runs"][0]["bold"], true);
+        assert_eq!(writer_content_to_plain(&saved), "Alpha βeta!");
+        serde_json::from_value::<contrix_doc_engine::WriterDocument>(saved).unwrap();
+    }
+    #[test]
+    fn large_documents_refuse_rich_conversion_without_truncation() {
+        let mut doc = contrix_doc_engine::WriterDocument::new("Large".into());
+        doc.add_paragraph(&"x".repeat(70_000));
+        let base = serde_json::to_value(doc).unwrap();
+        assert!(writer_to_rich(&base).is_err());
+        let edited =
+            writer_content_with_text(&base, &format!("{}!", writer_content_to_plain(&base)));
+        assert_eq!(writer_content_to_plain(&edited).len(), 70_001);
+    }
+}
+
+fn append_writer_block(session: &EditorSession, block: Value) {
+    let mut content = session.content.get();
+    if let Some(body) = content["body"].as_array_mut() {
+        body.push(block);
+        session.edit(content);
+    }
+}
+fn writer_insert_controls(session: EditorSession) -> impl Widget {
+    let table = session.clone();
+    let list = session.clone();
+    let code = session.clone();
+    let image = session.clone();
+    let page = session.clone();
+    row().class("editor-toolbar").fill((
+        sapid::button().theme(crate::components::ui::theme()).label("Insert table").on_press(move||{
+            let paragraph=||json!({"type":"Paragraph","id":uuid::Uuid::new_v4(),"runs":[plain_writer_run("")],"alignment":"Left","indent_level":0,"spacing":{"before":0.,"after":8.,"line_height":1.15}});
+            append_writer_block(&table,json!({"type":"Table","id":uuid::Uuid::new_v4(),"column_widths":[240.,240.],"rows":(0..2).map(|_|json!({"cells":(0..2).map(|_|json!({"blocks":[paragraph()],"col_span":1,"row_span":1,"background_color":null})).collect::<Vec<_>>()})).collect::<Vec<_>>()}));
+        }),
+        sapid::button().theme(crate::components::ui::theme()).label("Insert list").on_press(move||append_writer_block(&list,json!({"type":"List","id":uuid::Uuid::new_v4(),"ordered":false,"items":[{"runs":[plain_writer_run("List item")],"children":[]}]}))),
+        sapid::button().theme(crate::components::ui::theme()).label("Insert code block").on_press(move||append_writer_block(&code,json!({"type":"CodeBlock","id":uuid::Uuid::new_v4(),"language":null,"code":""}))),
+        sapid::button().theme(crate::components::ui::theme()).label("Insert image").on_press(move||{
+            #[cfg(target_arch="wasm32")]
+            if let Some(url)=web_sys::window().and_then(|window|window.prompt_with_message("Image URL").ok().flatten()).filter(|url|!url.trim().is_empty()){
+                append_writer_block(&image,json!({"type":"Image","id":uuid::Uuid::new_v4(),"url":url,"alt_text":"Document image","width":null,"height":null,"alignment":"Left"}));
+            }
+            #[cfg(not(target_arch="wasm32"))]
+            let _=&image;
+        }),
+        sapid::button().theme(crate::components::ui::theme()).label("Insert page break").on_press(move||append_writer_block(&page,json!({"type":"PageBreak"}))),
+    ))
 }

@@ -4,14 +4,14 @@
 
 **Full Rust Stack:**
 - **Backend**: Salvo web framework + SQLx (PostgreSQL/SQLite) + Redis
-- **Frontend**: Dioxus (Web/Desktop via WASM + SSR)
+- **Frontend**: Glory + Sapid (semantic Rust widgets and WebAssembly browser host)
 - **Real-time**: WebSocket-based collaboration via Salvo
 - **File Processing**: Pure Rust document parsers/generators
 - **Search**: SQLite-backed document name/content search
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Dioxus Frontend                    │
+│                   Glory + Sapid Frontend                    │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ │
 │  │  Writer   │ │  Calc    │ │  Slides  │ │  Files │ │
 │  │(Documents)│ │(Sheets)  │ │(Present) │ │Manager │ │
@@ -53,7 +53,7 @@ office/
 │       └── release.yml     # Release builds
 ├── crates/
 │   ├── server/             # Salvo backend server
-│   ├── frontend/           # Dioxus frontend application
+│   ├── frontend/           # Glory + Sapid frontend application
 │   ├── core/               # Shared types, models, DTOs
 │   ├── doc-engine/         # Document processing engine
 │   ├── collab/             # Real-time collaboration (CRDT)
@@ -318,7 +318,7 @@ PUT    /api/v1/admin/settings
 | Component | Technology | Reason |
 |-----------|-----------|--------|
 | Web Framework | Salvo | High-performance Rust web framework with built-in WebSocket |
-| Frontend | Dioxus | Full Rust frontend with SSR, WASM, and desktop support |
+| Frontend | Glory + Sapid | Full Rust frontend with SSR, WASM, and desktop support |
 | Database | SQLx + SQLite/PostgreSQL | Compile-time checked SQL, async |
 | Auth | JWT + Argon2 | Industry standard token auth + secure hashing |
 | Real-time | WebSocket + CRDT | Low-latency collaboration |
@@ -338,7 +338,7 @@ PUT    /api/v1/admin/settings
 cargo run -p contrix-server
 
 # Frontend (dev server with hot reload)
-dx serve --platform web
+pwsh ./scripts/dev.ps1
 
 # Full stack
 docker-compose up

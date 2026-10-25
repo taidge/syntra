@@ -4,10 +4,18 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Dioxus-based frontend for Contrix Office"
+description = "Glory and Sapid WebAssembly frontend for Contrix Office"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+ssr = ["glory/ssr"]
 
 [dependencies]
-dioxus = { workspace = true }
+glory = { workspace = true }
+sapid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
@@ -20,6 +28,9 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 base64 = { workspace = true }
 once_cell = "1"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+glory = { workspace = true, features = ["web", "hydrate"] }
 
 [dev-dependencies]
 contrix-doc-engine = { path = "../doc-engine" }
@@ -37,6 +48,7 @@ features = [
     "HtmlImageElement",
     "CanvasRenderingContext2d",
     "File",
+    "FilePropertyBag",
     "FormData",
     "HtmlInputElement",
     "Request",
@@ -66,6 +78,8 @@ features = [
     "Url",
     "CustomEvent",
     "Location",
+    "History",
+    "PopStateEvent",
     "EventTarget",
     "console",
 ]

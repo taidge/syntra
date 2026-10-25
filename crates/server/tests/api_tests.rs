@@ -1690,7 +1690,9 @@ async fn test_file_upload_and_download() {
         .register("user1", "user1@test.com", "password123")
         .await;
 
-    let file_content = b"Hello, this is a test file!";
+    // Exceed Salvo's default 64 KiB form limit while staying within the
+    // application's configured upload budget.
+    let file_content = vec![b'x'; 128 * 1024];
     let part = reqwest::multipart::Part::bytes(file_content.to_vec())
         .file_name("test.txt")
         .mime_str("text/plain")
@@ -1725,7 +1727,44 @@ async fn test_file_upload_and_download() {
 
     assert_eq!(download_resp.status(), 200);
     let downloaded = download_resp.bytes().await.unwrap();
-    assert_eq!(downloaded.as_ref(), file_content);
+    assert_eq!(downloaded.as_ref(), file_content.as_slice());
+}
+
+#[tokio::test]
+async fn test_file_upload_enforces_configured_limit() {
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("uploader", "uploader@test.com", "password123")
+        .await;
+    // Exercise both the per-file budget and the larger multipart body cap.
+    for size in [10 * 1024 * 1024 + 1, 11 * 1024 * 1024] {
+        let part = reqwest::multipart::Part::bytes(vec![0; size])
+            .file_name("oversized.bin")
+            .mime_str("application/octet-stream")
+            .unwrap();
+        let response = server
+            .client
+            .post(server.url("/api/v1/files/upload"))
+            .headers(server.auth_header(&token))
+            .multipart(reqwest::multipart::Form::new().part("file", part))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(status, 413, "size={size}, body={body}");
+        assert_eq!(body["success"], false);
+        assert_eq!(body["error"]["code"], 413);
+    }
+    let response = server
+        .client
+        .get(server.url("/api/v1/files"))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["data"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

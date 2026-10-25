@@ -25,6 +25,7 @@ jobs:
             artifact: contrix-server
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -33,13 +34,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: contrix-server-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+          path: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/${{ matrix.artifact }}
 
   create-release:
     needs: build-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: actions/download-artifact@v4
       - uses: softprops/action-gh-release@v2
         with:

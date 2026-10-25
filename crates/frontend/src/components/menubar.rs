@@ -1,4 +1,5 @@
-use dioxus::prelude::*;
+use crate::components::ui::theme;
+use glory::prelude::*;
 
 #[derive(Clone, PartialEq)]
 struct MenuItem {
@@ -179,91 +180,43 @@ fn help_items() -> Vec<MenuItem> {
     ]
 }
 
-#[derive(Props, Clone, PartialEq)]
-pub struct MenubarProps {
-    pub document_type: String,
-    pub on_command: EventHandler<String>,
-}
-
-#[component]
-pub fn Menubar(props: MenubarProps) -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let mut open = use_signal(|| None::<String>);
-
-    let document_type = props.document_type.clone();
-    let menus: Vec<(&'static str, &'static str, Vec<MenuItem>)> = vec![
-        ("File", "menubar.file", file_items(&document_type)),
-        ("Edit", "menubar.edit", edit_items()),
-        ("View", "menubar.view", view_items(&document_type)),
-        ("Insert", "menubar.insert", insert_items(&document_type)),
-        ("Format", "menubar.format", format_items(&document_type)),
-        ("Tools", "menubar.tools", tools_items(&document_type)),
-        ("Help", "menubar.help", help_items()),
+#[allow(non_snake_case)]
+pub fn Menubar(
+    _scope: Scope,
+    document_type: String,
+    on_command: impl Fn(String) + 'static,
+) -> impl Widget {
+    let command = std::rc::Rc::new(on_command);
+    let menus = vec![
+        ("file", "menubar.file", file_items(&document_type)),
+        ("edit", "menubar.edit", edit_items()),
+        ("view", "menubar.view", view_items(&document_type)),
+        ("insert", "menubar.insert", insert_items(&document_type)),
+        ("format", "menubar.format", format_items(&document_type)),
+        ("tools", "menubar.tools", tools_items(&document_type)),
+        ("help", "menubar.help", help_items()),
     ];
-
-    rsx! {
-        div {
-            class: "menubar",
-            onclick: move |e: MouseEvent| {
-                e.stop_propagation();
-            },
-            for (name, label_key, items) in menus.into_iter() {
-                {
-                    let name_owned = name.to_string();
-                    let display_label = crate::i18n::t(label_key);
-                    let name_for_click = name.to_string();
-                    let is_open = open.read().as_deref() == Some(name);
-                    rsx! {
-                        div {
-                            class: "menubar-menu",
-                            style: "position: relative; display: inline-block;",
-                            button {
-                                class: if is_open { "menubar-item active" } else { "menubar-item" },
-                                onclick: move |e: MouseEvent| {
-                                    e.stop_propagation();
-                                    let cur = open.read().clone();
-                                    if cur.as_deref() == Some(name_for_click.as_str()) {
-                                        open.set(None);
-                                    } else {
-                                        open.set(Some(name_for_click.clone()));
-                                    }
-                                },
-                                "{display_label}"
-                            }
-                            if is_open {
-                                div { class: "menubar-dropdown",
-                                    for (idx, item) in items.iter().enumerate() {
-                                        {
-                                            let cmd = item.cmd.to_string();
-                                            let label = crate::i18n::t(item.label_key);
-                                            let shortcut = item.shortcut;
-                                            let sep = item.separator_after;
-                                            let on_cmd = props.on_command;
-                                            rsx! {
-                                                button {
-                                                    key: "{name_owned}-{idx}",
-                                                    onclick: move |e: MouseEvent| {
-                                                        e.stop_propagation();
-                                                        on_cmd.call(cmd.clone());
-                                                        open.set(None);
-                                                    },
-                                                    span { "{label}" }
-                                                    if !shortcut.is_empty() {
-                                                        span { class: "menubar-shortcut", "{shortcut}" }
-                                                    }
-                                                }
-                                                if sep {
-                                                    div { class: "menubar-sep" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+    let widgets = menus
+        .into_iter()
+        .map(|(key, label, items)| {
+            let mut menu = sapid::menu(format!("office-{key}"))
+                .theme(theme())
+                .label(crate::i18n::t(label));
+            for (index, item) in items.into_iter().enumerate() {
+                let command = command.clone();
+                let cmd = item.cmd;
+                let label = format!("{} {}", crate::i18n::t(item.label_key), item.shortcut);
+                menu = menu.item(
+                    sapid::menu_item(format!("{key}-{index}"))
+                        .label(label)
+                        .on_activate(move || command(cmd.to_string())),
+                );
+                if item.separator_after {
+                    menu = menu.separator(format!("{key}-separator-{index}"));
                 }
             }
-        }
-    }
+            menu
+        })
+        .collect::<Vec<_>>();
+    row().class("menubar").fill(widgets)
 }

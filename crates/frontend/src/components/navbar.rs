@@ -1,121 +1,60 @@
-use dioxus::prelude::*;
-
-use crate::Route;
-use crate::components::notification_center::NotificationCenter;
-use crate::state::{self, AuthState};
+use crate::{components::ui::*, state::AuthState};
+use glory::prelude::*;
 
 fn current_theme() -> String {
     web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.document_element())
-        .and_then(|el| el.get_attribute("data-theme"))
-        .unwrap_or_default()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item("theme").ok().flatten())
+        .unwrap_or_else(|| "light".into())
 }
-
-fn set_theme(value: &str) {
+pub fn set_theme(value: &str) {
     if let Some(window) = web_sys::window() {
-        if let Some(el) = window.document().and_then(|d| d.document_element()) {
-            let _ = el.set_attribute("data-theme", value);
-        }
         if let Ok(Some(storage)) = window.local_storage() {
             let _ = storage.set_item("theme", value);
         }
+        if let Some(root) = window
+            .document()
+            .and_then(|document| document.document_element())
+        {
+            let _ = root.set_attribute("data-theme", value);
+        }
+        let _ = window.location().reload();
     }
 }
-
-/// Top navigation bar displayed on all authenticated pages.
-#[component]
-pub fn Navbar() -> Element {
-    let mut auth = use_context::<Signal<AuthState>>();
-    let nav = use_navigator();
-    let mut theme = use_signal(current_theme);
-    let mut locale = use_context::<Signal<String>>();
-
-    let user_initial = {
-        let state = auth.read();
-        state
-            .user
-            .as_ref()
-            .and_then(|u| u.username.chars().next())
-            .unwrap_or('U')
-            .to_uppercase()
-            .to_string()
-    };
-
-    let other_locale: &'static str = if *locale.read() == "zh" { "en" } else { "zh" };
-    let lang_label: &'static str = if *locale.read() == "zh" { "EN" } else { "中" };
-    let theme_label = crate::i18n::t("nav.theme_toggle");
-    let logout_label = crate::i18n::t("nav.logout");
-    let search_placeholder = crate::i18n::t("nav.search_placeholder");
-    let dashboard_label = crate::i18n::t("nav.dashboard");
-    let files_label = crate::i18n::t("nav.files");
-    let admin_label = crate::i18n::t("nav.admin");
-    let profile_label = crate::i18n::t("nav.profile");
-
-    rsx! {
-        nav { class: "navbar",
-            div { class: "navbar-brand",
-                Link { to: Route::Dashboard {}, class: "brand-link",
-                    span { class: "brand-icon", "\u{1F4CB}" }
-                    span { class: "brand-text", "Contrix Office" }
-                }
+#[allow(non_snake_case)]
+pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
+    row().class("navbar").fill((
+        anchor("Contrix Office", "/dashboard"),
+        anchor(crate::i18n::t("nav.dashboard"), "/dashboard"),
+        anchor(crate::i18n::t("nav.files"), "/files"),
+        anchor(crate::i18n::t("profile.title"), "/profile"),
+        when(
+            scope.bond(move || auth.get().user.is_some_and(|user| user.role == "admin")),
+            || anchor("Admin", "/admin"),
+        ),
+        crate::components::notification_center::NotificationCenter(scope.clone(), auth),
+        action("中文 / English", || {
+            let next = if crate::i18n::current_locale() == "zh" {
+                "en"
+            } else {
+                "zh"
+            };
+            crate::i18n::set_locale(next);
+            if let Some(window) = web_sys::window() {
+                let _ = window.location().reload();
             }
-
-            div { class: "navbar-menu",
-                Link { to: Route::Dashboard {}, class: "navbar-item", "{dashboard_label}" }
-                Link { to: Route::FileManager {}, class: "navbar-item", "{files_label}" }
-                Link { to: Route::Admin {}, class: "navbar-item", "{admin_label}" }
-            }
-
-            div { class: "navbar-end",
-                div { class: "navbar-search",
-                    input {
-                        r#type: "search",
-                        placeholder: "{search_placeholder}",
-                        class: "search-input",
-                        onkeydown: move |e: KeyboardEvent| {
-                            if e.key() == Key::Enter {
-                                nav.push(Route::FileManager {});
-                            }
-                        },
-                    }
-                }
-                NotificationCenter {}
-                div { class: "navbar-user",
-                    button {
-                        class: "lang-toggle",
-                        title: "{lang_label}",
-                        aria_label: "Switch language",
-                        onclick: move |_| {
-                            crate::i18n::set_locale(other_locale);
-                            locale.set(other_locale.to_string());
-                        },
-                        "{lang_label}"
-                    }
-                    button {
-                        class: "theme-toggle",
-                        title: "{theme_label}",
-                        aria_label: "{theme_label}",
-                        onclick: move |_| {
-                            let next = if *theme.read() == "dark" { "light" } else { "dark" };
-                            set_theme(next);
-                            theme.set(next.to_string());
-                        },
-                        {if *theme.read() == "dark" { "\u{2600}" } else { "\u{1F319}" }}
-                    }
-                    Link { to: Route::Profile {}, class: "user-avatar", title: "{profile_label}", aria_label: "{profile_label}", "{user_initial}" }
-                    button {
-                        class: "btn btn-outline btn-sm",
-                        aria_label: "{logout_label}",
-                        onclick: move |_| {
-                            state::clear_auth_state();
-                            auth.set(AuthState::default());
-                            nav.push(Route::Login {});
-                        },
-                        "{logout_label}"
-                    }
-                }
-            }
-        }
-    }
+        }),
+        action("Light / Dark", || {
+            set_theme(if current_theme() == "dark" {
+                "light"
+            } else {
+                "dark"
+            });
+        }),
+        action(crate::i18n::t("nav.logout"), move || {
+            crate::state::clear_auth_state();
+            set(auth, AuthState::default());
+            go("/login");
+        }),
+    ))
 }

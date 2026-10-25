@@ -1,149 +1,89 @@
-use dioxus::prelude::*;
+use crate::{
+    components::ui::*,
+    state::{self, AuthResponseData, AuthState, LoginRequest, UserInfo},
+};
+use glory::prelude::*;
 
-use crate::Route;
-use crate::state::{self, AuthResponseData, AuthState, LoginRequest, UserInfo};
-
-/// Login page with email/password form.
-#[component]
-pub fn Login() -> Element {
-    let mut auth = use_context::<Signal<AuthState>>();
-    let nav = use_navigator();
-    let mut email = use_signal(String::new);
-    let mut password = use_signal(String::new);
-    let mut totp_code = use_signal(String::new);
-    let mut error = use_signal(|| None::<String>);
-    let mut loading = use_signal(|| false);
-
-    let handle_submit = move |evt: Event<FormData>| {
-        evt.prevent_default();
-
-        let email_val = email.read().clone();
-        let password_val = password.read().clone();
-        let totp_code_val = totp_code.read().trim().to_string();
-
-        // Basic client-side validation
-        if email_val.is_empty() || password_val.is_empty() {
-            error.set(Some(crate::i18n::t("auth.fill_all_fields")));
-            return;
-        }
-
-        loading.set(true);
-        error.set(None);
-
-        let nav = nav;
-        spawn(async move {
-            let body = LoginRequest {
-                email: email_val,
-                password: password_val,
-                totp_code: (!totp_code_val.is_empty()).then_some(totp_code_val),
-            };
-            match state::api_post::<AuthResponseData, _>("/auth/login", &body, "").await {
-                Ok(resp) => {
-                    let new_state = AuthState {
-                        token: Some(resp.token),
-                        user: Some(UserInfo {
-                            id: resp.user.id,
-                            username: resp.user.username,
-                            email: resp.user.email,
-                            display_name: resp.user.display_name,
-                            role: resp.user.role,
-                        }),
-                    };
-                    state::persist_auth_state(&new_state);
-                    auth.set(new_state);
-                    nav.push(Route::Dashboard {});
-                }
-                Err(msg) => {
-                    error.set(Some(msg));
-                }
-            }
-            loading.set(false);
-        });
-    };
-
-    let _locale = use_context::<Signal<String>>();
-    let title = crate::i18n::t("auth.login_title");
-    let email_label = crate::i18n::t("auth.email");
-    let password_label = crate::i18n::t("auth.password");
-    let sign_in_label = crate::i18n::t("auth.sign_in");
-    let no_account_label = crate::i18n::t("auth.no_account");
-    let register_link_label = crate::i18n::t("auth.register_link");
-
-    rsx! {
-        div { class: "auth-page",
-            div { class: "auth-card",
-                div { class: "auth-header",
-                    h2 { "{title}" }
-                    p { class: "auth-subtitle", {crate::i18n::t("auth.login_subtitle")} }
-                }
-
-                form { onsubmit: handle_submit,
-                    div { class: "form-group",
-                        label { r#for: "email", "{email_label}" }
-                        input {
-                            id: "email",
-                            r#type: "email",
-                            class: "form-input",
-                            placeholder: crate::i18n::t("auth.email_placeholder"),
-                            value: "{email}",
-                            oninput: move |e| email.set(e.value()),
-                        }
-                    }
-
-                    div { class: "form-group",
-                        label { r#for: "password", "{password_label}" }
-                        input {
-                            id: "password",
-                            r#type: "password",
-                            class: "form-input",
-                            placeholder: crate::i18n::t("auth.password_placeholder"),
-                            value: "{password}",
-                            oninput: move |e| password.set(e.value()),
-                        }
-                    }
-
-                    div { class: "form-group",
-                        label { r#for: "totp-code", {crate::i18n::t("auth.totp_code")} }
-                        input {
-                            id: "totp-code",
-                            r#type: "text",
-                            inputmode: "text",
-                            maxlength: "32",
-                            autocomplete: "one-time-code",
-                            class: "form-input",
-                            placeholder: crate::i18n::t("auth.totp_placeholder"),
-                            value: "{totp_code}",
-                            oninput: move |e| {
-                                let filtered: String = e.value()
-                                    .chars()
-                                    .filter(|c| c.is_ascii_hexdigit())
-                                    .take(32)
-                                    .collect();
-                                totp_code.set(filtered);
-                            },
-                        }
-                        small { class: "form-hint", {crate::i18n::t("auth.totp_hint")} }
-                    }
-
-                    if let Some(err) = error() {
-                        div { class: "form-error", "{err}" }
-                    }
-
-                    button {
-                        r#type: "submit",
-                        class: "btn btn-primary btn-block",
-                        disabled: *loading.read(),
-                        if *loading.read() { {crate::i18n::t("auth.signing_in")} } else { "{sign_in_label}" }
-                    }
-                }
-
-                div { class: "auth-footer",
-                    p {
-                        "{no_account_label} "
-                        Link { to: Route::Register {}, "{register_link_label}" }
-                    }
-                }
-            }
-        }
+fn submit(
+    weak: &glory::ui::WeakScope,
+    auth: Cage<AuthState>,
+    email: Cage<String>,
+    password: Cage<String>,
+    code: Cage<String>,
+    error: Cage<String>,
+    loading: Cage<bool>,
+) {
+    if loading.get() {
+        return;
     }
+    if email.get().trim().is_empty() || password.get().is_empty() {
+        set(error, crate::i18n::t("auth.fill_all_fields"));
+        return;
+    }
+    let Some(scope) = weak.upgrade() else {
+        return;
+    };
+    set(loading, true);
+    set(error, String::new());
+    let body = LoginRequest {
+        email: email.get().trim().into(),
+        password: password.get(),
+        totp_code: (!code.get().trim().is_empty()).then(|| code.get().trim().to_string()),
+    };
+    let _ = scope.spawn(async move {
+        match state::api_post::<AuthResponseData, _>("/auth/login", &body, "").await {
+            Ok(response) => {
+                let next = AuthState {
+                    token: Some(response.token),
+                    user: Some(UserInfo {
+                        id: response.user.id,
+                        username: response.user.username,
+                        email: response.user.email,
+                        display_name: response.user.display_name,
+                        role: response.user.role,
+                    }),
+                };
+                state::persist_auth_state(&next);
+                set(auth, next);
+                go("/dashboard");
+            }
+            Err(message) => set(error, message),
+        }
+        set(loading, false);
+    });
+}
+#[allow(non_snake_case)]
+pub fn Login(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
+    let email = scope.cage(String::new());
+    let password = scope.cage(String::new());
+    let code = scope.cage(String::new());
+    let error = scope.cage(String::new());
+    let loading = scope.cage(false);
+    let weak = scope.downgrade();
+    col().class("auth-page").fill(
+        col().class("auth-card").fill((
+            heading(crate::i18n::t("auth.login_title")),
+            sapid::form("login")
+                .theme(theme())
+                .enabled(scope.bond(move || !loading.get()))
+                .on_submit(move |_| submit(&weak, auth, email, password, code, error, loading))
+                .fill((
+                    field(crate::i18n::t("auth.email"), email, Purpose::Email),
+                    field(crate::i18n::t("auth.password"), password, Purpose::Password),
+                    field(crate::i18n::t("auth.totp_code"), code, Purpose::Text),
+                    label(crate::i18n::t("auth.totp_hint")),
+                    status(error),
+                    sapid::submit_button()
+                        .theme(theme())
+                        .label(scope.bond(move || {
+                            crate::i18n::t(if loading.get() {
+                                "auth.signing_in"
+                            } else {
+                                "auth.sign_in"
+                            })
+                        })),
+                )),
+            anchor(crate::i18n::t("auth.register_link"), "/register"),
+        )),
+    )
 }

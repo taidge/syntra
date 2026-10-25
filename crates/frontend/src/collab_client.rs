@@ -87,6 +87,27 @@ struct HandleInner {
     counter: u64,
     version: u64,
     closed: bool,
+    callbacks: Option<SocketCallbacks>,
+    reconnect: Option<Timeout>,
+}
+
+struct SocketCallbacks {
+    _message: Closure<dyn FnMut(MessageEvent)>,
+    _open: Closure<dyn FnMut()>,
+    _close: Closure<dyn FnMut(CloseEvent)>,
+    _error: Closure<dyn FnMut(web_sys::Event)>,
+}
+
+impl Drop for HandleInner {
+    fn drop(&mut self) {
+        if let Some(socket) = self.ws.take() {
+            socket.set_onclose(None);
+            socket.set_onmessage(None);
+            socket.set_onerror(None);
+            socket.set_onopen(None);
+            let _ = socket.close();
+        }
+    }
 }
 
 impl CollabHandle {
@@ -98,6 +119,7 @@ impl CollabHandle {
     pub fn close(&self) {
         let mut inner = self.inner.borrow_mut();
         inner.closed = true;
+        inner.reconnect.take();
         if let Some(socket) = inner.ws.take() {
             socket.set_onclose(None);
             socket.set_onmessage(None);
@@ -105,6 +127,7 @@ impl CollabHandle {
             socket.set_onopen(None);
             let _ = socket.close();
         }
+        inner.callbacks.take();
     }
 
     /// Send a typed collaborative operation using this client's monotonic
@@ -151,6 +174,8 @@ pub fn connect_with_reconnect(
         counter: 0,
         version: 0,
         closed: false,
+        callbacks: None,
+        reconnect: None,
     }));
     let on_message = Rc::new(RefCell::new(on_message));
     let on_state = Rc::new(RefCell::new(on_state));
@@ -194,10 +219,13 @@ fn open_connection(
         }
     };
 
-    {
+    let onmessage = {
         let on_message = on_message.clone();
-        let inner_for_message = inner.clone();
+        let inner_for_message = Rc::downgrade(&inner);
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |evt: MessageEvent| {
+            let Some(inner_for_message) = inner_for_message.upgrade() else {
+                return;
+            };
             if let Some(text) = evt.data().as_string()
                 && let Ok(msg) = serde_json::from_str::<CollabMessage>(&text)
             {
@@ -217,10 +245,10 @@ fn open_connection(
             }
         });
         ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-        onmessage.forget();
-    }
+        onmessage
+    };
 
-    {
+    let onopen = {
         let on_state = on_state.clone();
         let attempt_open = attempt.clone();
         let onopen = Closure::<dyn FnMut()>::new(move || {
@@ -228,17 +256,20 @@ fn open_connection(
             (on_state.borrow_mut())(ConnectionState::Connected);
         });
         ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-        onopen.forget();
-    }
+        onopen
+    };
 
-    {
+    let onclose = {
         let document_id_cl = document_id.clone();
         let token_cl = token.clone();
-        let inner_cl = inner.clone();
+        let inner_cl = Rc::downgrade(&inner);
         let on_message_cl = on_message.clone();
         let on_state_cl = on_state.clone();
         let attempt_cl = attempt.clone();
         let onclose = Closure::<dyn FnMut(CloseEvent)>::new(move |_evt: CloseEvent| {
+            let Some(inner_cl) = inner_cl.upgrade() else {
+                return;
+            };
             schedule_reconnect(
                 document_id_cl.clone(),
                 token_cl.clone(),
@@ -249,20 +280,27 @@ fn open_connection(
             );
         });
         ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
-        onclose.forget();
-    }
+        onclose
+    };
 
-    {
+    let onerror = {
         // Reconnection is driven by onclose (which always follows onerror);
         // here we only surface the failure for debugging.
         let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |_evt: web_sys::Event| {
             web_sys::console::warn_1(&"collab websocket error".into());
         });
         ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-        onerror.forget();
-    }
+        onerror
+    };
 
-    inner.borrow_mut().ws = Some(ws);
+    let mut state = inner.borrow_mut();
+    state.ws = Some(ws);
+    state.callbacks = Some(SocketCallbacks {
+        _message: onmessage,
+        _open: onopen,
+        _close: onclose,
+        _error: onerror,
+    });
 }
 
 fn schedule_reconnect(
@@ -292,11 +330,14 @@ fn schedule_reconnect(
 
     let document_id_cl = document_id;
     let token_cl = token;
-    let inner_cl = inner;
+    let inner_cl = Rc::downgrade(&inner);
     let on_message_cl = on_message;
     let on_state_cl = on_state;
     let attempt_cl = attempt;
     let timeout = Timeout::new(delay, move || {
+        let Some(inner_cl) = inner_cl.upgrade() else {
+            return;
+        };
         open_connection(
             document_id_cl,
             token_cl,
@@ -306,7 +347,7 @@ fn schedule_reconnect(
             attempt_cl,
         );
     });
-    timeout.forget();
+    inner.borrow_mut().reconnect = Some(timeout);
 }
 
 fn reconnect_delay(attempt: u32) -> u32 {
@@ -334,6 +375,8 @@ mod tests {
                 counter: 0,
                 version: 0,
                 closed: false,
+                callbacks: None,
+                reconnect: None,
             })),
         };
         handle.close();

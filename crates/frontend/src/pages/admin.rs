@@ -1,20 +1,17 @@
-use dioxus::prelude::*;
-
-use crate::components::modal::Modal;
-use crate::components::navbar::Navbar;
-use crate::components::{Toast, ToastKind, push_toast};
-use crate::state::{AuthState, api_get, api_post, api_put};
-
-#[derive(Clone, PartialEq, serde::Deserialize)]
-struct AdminStats {
+use crate::{
+    components::{navbar::Navbar, ui::*},
+    state::{self, AuthState},
+};
+use glory::prelude::*;
+#[derive(Clone, serde::Deserialize)]
+struct Stats {
     total_users: u64,
     total_files: u64,
     total_documents: u64,
     total_storage_used: i64,
 }
-
-#[derive(Clone, PartialEq, serde::Deserialize)]
-struct UserSummary {
+#[derive(Clone, serde::Deserialize)]
+struct User {
     id: String,
     username: String,
     email: String,
@@ -22,9 +19,8 @@ struct UserSummary {
     storage_used: i64,
     last_login_at: Option<String>,
 }
-
-#[derive(Clone, PartialEq, serde::Deserialize)]
-struct ActivityEntry {
+#[derive(Clone, serde::Deserialize)]
+struct Activity {
     id: String,
     user_id: String,
     action: String,
@@ -32,641 +28,336 @@ struct ActivityEntry {
     resource_id: String,
     created_at: String,
 }
-
-#[component]
-pub fn Admin() -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let mut active_tab = use_signal(|| "overview".to_string());
-
-    let title = crate::i18n::t("admin.title");
-    let tab_overview = crate::i18n::t("admin.tab.overview");
-    let tab_users = crate::i18n::t("admin.tab.users");
-    let tab_activity = crate::i18n::t("admin.tab.activity");
-    let tab_settings = crate::i18n::t("admin.tab.settings");
-
-    rsx! {
-        Navbar {}
-        div { class: "admin-panel",
-            h1 { "{title}" }
-
-            div { class: "admin-tabs",
-                button {
-                    class: if *active_tab.read() == "overview" { "tab-btn active" } else { "tab-btn" },
-                    onclick: move |_| active_tab.set("overview".to_string()),
-                    "{tab_overview}"
-                }
-                button {
-                    class: if *active_tab.read() == "users" { "tab-btn active" } else { "tab-btn" },
-                    onclick: move |_| active_tab.set("users".to_string()),
-                    "{tab_users}"
-                }
-                button {
-                    class: if *active_tab.read() == "activity" { "tab-btn active" } else { "tab-btn" },
-                    onclick: move |_| active_tab.set("activity".to_string()),
-                    "{tab_activity}"
-                }
-                button {
-                    class: if *active_tab.read() == "settings" { "tab-btn active" } else { "tab-btn" },
-                    onclick: move |_| active_tab.set("settings".to_string()),
-                    "{tab_settings}"
-                }
-            }
-
-            match active_tab.read().as_str() {
-                "overview" => rsx! { AdminOverview {} },
-                "users" => rsx! { AdminUsers {} },
-                "activity" => rsx! { AdminActivity {} },
-                "settings" => rsx! { AdminSettings {} },
-                _ => rsx! { AdminOverview {} },
-            }
-        }
-    }
+#[derive(Clone, serde::Deserialize)]
+struct Setting {
+    key: String,
+    value: String,
 }
-
-#[component]
-fn AdminOverview() -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let auth = use_context::<Signal<AuthState>>();
-
-    let stats = use_resource(move || {
-        let token = auth.read().token.clone().unwrap_or_default();
-        async move { api_get::<AdminStats>("/admin/stats", &token).await }
+fn users_load(
+    scope: &Scope,
+    auth: Cage<AuthState>,
+    users: Cage<Vec<User>>,
+    feedback: Cage<String>,
+) {
+    let token = token(auth);
+    let _ = scope.spawn(async move {
+        match state::api_get::<Vec<User>>("/admin/users", &token).await {
+            Ok(value) => set(users, value),
+            Err(error) => set(feedback, error),
+        }
+    });
+}
+#[allow(non_snake_case)]
+pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
+    let allowed = auth.get().user.is_some_and(|user| user.role == "admin");
+    if !allowed {
+        return Box::new(col().fill((
+            Navbar(scope, auth),
+            heading("Administrator access required"),
+        ))) as Box<dyn Widget>;
+    }
+    let tab = scope.cage("overview".to_string());
+    let stats = scope.cage(None);
+    let users = scope.cage(Vec::<User>::new());
+    let activity = scope.cage(Vec::<Activity>::new());
+    let feedback = scope.cage(String::new());
+    let search = scope.cage(String::new());
+    load::<Stats>(&scope, "/admin/stats".into(), auth, stats);
+    users_load(&scope, auth, users, feedback);
+    let activity_token = token(auth);
+    let _ = scope.spawn(async move {
+        match state::api_get::<Vec<Activity>>("/admin/activity", &activity_token).await {
+            Ok(value) => set(activity, value),
+            Err(error) => set(feedback, error),
+        }
+    });
+    let settings = scope.cage(Vec::<Setting>::new());
+    let settings_token = token(auth);
+    let _ = scope.spawn(async move {
+        match state::api_get::<Vec<Setting>>("/settings", &settings_token).await {
+            Ok(value) => set(settings, value),
+            Err(error) => set(feedback, error),
+        }
+    });
+    let quota = scope.cage("1024".to_string());
+    let upload = scope.cage("50".to_string());
+    let registration = scope.cage("true".to_string());
+    let role = scope.cage("editor".to_string());
+    let seeded = scope.cage(false);
+    scope.effect(move || {
+        if !seeded.get() && !settings.get().is_empty() {
+            for Setting { key, value } in settings.get() {
+                match key.as_str() {
+                    "default_quota_mb" => set(quota, value),
+                    "max_upload_mb" => set(upload, value),
+                    "allow_registration" => set(registration, value),
+                    "default_role" => set(role, value),
+                    _ => {}
+                }
+            }
+            set(seeded, true);
+        }
+    });
+    let username = scope.cage(String::new());
+    let email = scope.cage(String::new());
+    let password = scope.cage(String::new());
+    let selected_role = scope.cage("editor".to_string());
+    let create_weak = scope.downgrade();
+    let users_weak = scope.downgrade();
+    let settings_weak = scope.downgrade();
+    let shown = scope.bond(move || {
+        let search = search.get().to_lowercase();
+        users
+            .get()
+            .into_iter()
+            .filter(|user| {
+                format!("{} {}", user.username, user.email)
+                    .to_lowercase()
+                    .contains(&search)
+            })
+            .collect::<Vec<_>>()
+    });
+    let overview = when(scope.bond(move || tab.get() == "overview"), move || {
+        widget(move |mounted_scope| {
+            let totals = result_text(mounted_scope, stats, |stats| {
+                format!(
+                    "Users: {}\nFiles: {}\nDocuments: {}\nStorage: {} MB",
+                    stats.total_users,
+                    stats.total_files,
+                    stats.total_documents,
+                    stats.total_storage_used / 1_048_576,
+                )
+            });
+            col().class("admin-grid").fill(totals).build(mounted_scope)
+        })
     });
 
-    let (users_val, files_val, docs_val, storage_val) = match &*stats.read() {
-        Some(Ok(s)) => (
-            s.total_users.to_string(),
-            s.total_files.to_string(),
-            s.total_documents.to_string(),
-            format!("{} MB", s.total_storage_used / 1_048_576),
-        ),
-        Some(Err(_)) => (
-            "—".to_string(),
-            "—".to_string(),
-            "—".to_string(),
-            "—".to_string(),
-        ),
-        None => (
-            "…".to_string(),
-            "…".to_string(),
-            "…".to_string(),
-            "…".to_string(),
-        ),
-    };
-
-    // Build simple proportional bars from the live totals.
-    let bars: Vec<(String, u64, f64)> = match &*stats.read() {
-        Some(Ok(s)) => {
-            let entries = [
-                (crate::i18n::t("admin.total_users"), s.total_users),
-                (crate::i18n::t("admin.total_files"), s.total_files),
-                (crate::i18n::t("admin.total_documents"), s.total_documents),
-            ];
-            let max = entries.iter().map(|(_, v)| *v).max().unwrap_or(1).max(1);
-            entries
-                .into_iter()
-                .map(|(label, v)| (label, v, (v as f64 / max as f64) * 100.0))
-                .collect()
-        }
-        _ => Vec::new(),
-    };
-
-    rsx! {
-        div { class: "admin-grid",
-            div { class: "stat-card",
-                div { class: "stat-icon users-icon", "U" }
-                div { class: "stat-info",
-                    h3 { {crate::i18n::t("admin.total_users")} }
-                    p { class: "stat-value", "{users_val}" }
-                }
-            }
-            div { class: "stat-card",
-                div { class: "stat-icon files-icon", "F" }
-                div { class: "stat-info",
-                    h3 { {crate::i18n::t("admin.total_files")} }
-                    p { class: "stat-value", "{files_val}" }
-                }
-            }
-            div { class: "stat-card",
-                div { class: "stat-icon docs-icon", "D" }
-                div { class: "stat-info",
-                    h3 { {crate::i18n::t("admin.total_documents")} }
-                    p { class: "stat-value", "{docs_val}" }
-                }
-            }
-            div { class: "stat-card",
-                div { class: "stat-icon storage-icon", "S" }
-                div { class: "stat-info",
-                    h3 { {crate::i18n::t("admin.storage_used")} }
-                    p { class: "stat-value", "{storage_val}" }
-                }
-            }
-        }
-
-        div { class: "admin-charts",
-            div { class: "chart-card",
-                h3 { {crate::i18n::t("admin.totals_chart")} }
-                if bars.is_empty() {
-                    div { class: "chart-placeholder",
-                        p { {crate::i18n::t("admin.chart_placeholder")} }
+    let user_panel = when(scope.bond(move || tab.get() == "users"), move || {
+        let create_weak = create_weak.clone();
+        let users_weak = users_weak.clone();
+        let rows = each(
+            shown,
+            |user| user.id.clone(),
+            move |item, _| {
+                let user = item.get();
+                let role_weak = users_weak.clone();
+                let disable_weak = users_weak.clone();
+                let role_id = user.id.clone();
+                let disable_id = user.id.clone();
+                let details = label(format!(
+                    "{} · {} · {} · {} bytes · {}",
+                    user.username,
+                    user.email,
+                    user.role,
+                    user.storage_used,
+                    user.last_login_at.unwrap_or_default(),
+                ));
+                let update_role = action("Set role", move || {
+                    let Some(window) = web_sys::window() else {
+                        return;
+                    };
+                    let Ok(Some(role)) = window.prompt_with_message("Role: admin, editor, viewer")
+                    else {
+                        return;
+                    };
+                    if !["admin", "editor", "viewer"].contains(&role.as_str()) {
+                        set(feedback, "Choose admin, editor, or viewer".into());
+                        return;
                     }
-                } else {
-                    div { class: "chart-bars",
-                        for (label, value, pct) in bars {
-                            div { class: "chart-bar-row",
-                                span { class: "chart-bar-label", "{label}" }
-                                div { class: "chart-bar-track",
-                                    div {
-                                        class: "chart-bar-fill",
-                                        style: "width: {pct}%;",
-                                    }
+                    let Some(scope) = role_weak.upgrade() else {
+                        return;
+                    };
+                    let token = token(auth);
+                    let path = format!("/admin/users/{role_id}");
+                    let weak = scope.downgrade();
+                    let _ = scope.spawn(async move {
+                        let body = serde_json::json!({ "role": role });
+                        match state::api_put::<serde_json::Value, _>(&path, &body, &token).await {
+                            Ok(_) => {
+                                if let Some(scope) = weak.upgrade() {
+                                    users_load(&scope, auth, users, feedback);
                                 }
-                                span { class: "chart-bar-value", "{value}" }
                             }
+                            Err(error) => set(feedback, error),
                         }
+                    });
+                });
+                let disable = action("Disable", move || {
+                    let confirmed = web_sys::window().is_some_and(|window| {
+                        window
+                            .confirm_with_message("Disable this account?")
+                            .unwrap_or(false)
+                    });
+                    if !confirmed {
+                        return;
                     }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn AdminUsers() -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let auth = use_context::<Signal<AuthState>>();
-    let toast_bus = use_context::<Signal<Vec<Toast>>>();
-    let refresh = use_signal(|| 0u32);
-    let mut search = use_signal(String::new);
-    let mut role_filter = use_signal(String::new);
-    let mut show_add = use_signal(|| false);
-    let mut new_username = use_signal(String::new);
-    let mut new_email = use_signal(String::new);
-    let mut new_password = use_signal(String::new);
-    let mut add_error = use_signal(|| None::<String>);
-
-    let users = use_resource(move || {
-        let _ = refresh.read();
-        let token = auth.read().token.clone().unwrap_or_default();
-        async move { api_get::<Vec<UserSummary>>("/admin/users", &token).await }
-    });
-
-    // Update a user's role via the admin API.
-    let update_role = move |(user_id, role): (String, String)| {
-        let token = auth.read().token.clone().unwrap_or_default();
-        let bus = toast_bus;
-        let mut refresh = refresh;
-        spawn(async move {
-            let body = serde_json::json!({ "role": role });
-            match api_put::<serde_json::Value, _>(&format!("/admin/users/{user_id}"), &body, &token)
-                .await
-            {
-                Ok(_) => {
-                    push_toast(
-                        bus,
-                        ToastKind::Success,
-                        crate::i18n::t("admin.user_updated"),
-                    );
-                    let cur = *refresh.read();
-                    refresh.set(cur + 1);
-                }
-                Err(e) => push_toast(bus, ToastKind::Error, e),
-            }
-        });
-    };
-
-    // Disable a user account.
-    let disable_user = move |user_id: String| {
-        let token = auth.read().token.clone().unwrap_or_default();
-        let bus = toast_bus;
-        let mut refresh = refresh;
-        spawn(async move {
-            let body = serde_json::json!({});
-            match api_put::<serde_json::Value, _>(
-                &format!("/admin/users/{user_id}/disable"),
-                &body,
-                &token,
-            )
-            .await
-            {
-                Ok(_) => {
-                    push_toast(
-                        bus,
-                        ToastKind::Success,
-                        crate::i18n::t("admin.user_disabled"),
-                    );
-                    let cur = *refresh.read();
-                    refresh.set(cur + 1);
-                }
-                Err(e) => push_toast(bus, ToastKind::Error, e),
-            }
-        });
-    };
-
-    let needle = search().trim().to_lowercase();
-    let role_sel = role_filter();
-
-    rsx! {
-        div { class: "admin-section",
-            div { class: "section-header",
-                h2 { {crate::i18n::t("admin.users_heading")} }
-                button {
-                    class: "btn btn-primary btn-sm",
-                    onclick: move |_| show_add.set(true),
-                    {crate::i18n::t("admin.add_user")}
-                }
-            }
-
-            div { class: "admin-filter-bar",
-                input {
-                    r#type: "search",
-                    class: "form-input",
-                    placeholder: crate::i18n::t("admin.search_users"),
-                    value: "{search}",
-                    oninput: move |e| search.set(e.value()),
-                }
-                select {
-                    class: "form-select",
-                    value: "{role_sel}",
-                    onchange: move |e| role_filter.set(e.value()),
-                    option { value: "", {crate::i18n::t("admin.all_roles")} }
-                    option { value: "admin", {crate::i18n::t("admin.role.admin")} }
-                    option { value: "editor", {crate::i18n::t("admin.role.editor")} }
-                    option { value: "viewer", {crate::i18n::t("admin.role.viewer")} }
-                }
-            }
-
-            table { class: "admin-table",
-                thead {
-                    tr {
-                        th { {crate::i18n::t("admin.col.username")} }
-                        th { {crate::i18n::t("admin.col.email")} }
-                        th { {crate::i18n::t("admin.col.role")} }
-                        th { {crate::i18n::t("admin.col.storage")} }
-                        th { {crate::i18n::t("admin.col.last_login")} }
-                        th { {crate::i18n::t("admin.col.actions")} }
-                    }
-                }
-                tbody {
-                    match &*users.read() {
-                        None => rsx! {
-                            tr {
-                                td { colspan: "6", {crate::i18n::t("admin.loading_users")} }
-                            }
-                        },
-                        Some(Err(e)) => rsx! {
-                            tr {
-                                td { colspan: "6", {crate::i18n::t("admin.load_users_failed").replace("{err}", &e.to_string())} }
-                            }
-                        },
-                        Some(Ok(list)) if list.is_empty() => rsx! {
-                            tr {
-                                td { colspan: "6", {crate::i18n::t("admin.no_users")} }
-                            }
-                        },
-                        Some(Ok(list)) => rsx! {
-                            for user in list.iter().filter(|u| {
-                                (needle.is_empty()
-                                    || u.username.to_lowercase().contains(&needle)
-                                    || u.email.to_lowercase().contains(&needle))
-                                    && (role_sel.is_empty() || u.role == role_sel)
-                            }) {
-                                {
-                                    let storage_text = format!("{} MB", user.storage_used / 1_048_576);
-                                    let last_login = user.last_login_at.clone().unwrap_or_else(|| crate::i18n::t("admin.never"));
-                                    let key = user.id.clone();
-                                    let uid_for_role = user.id.clone();
-                                    let uid_for_disable = user.id.clone();
-                                    let role_now = user.role.clone();
-                                    rsx! {
-                                        tr { key: "{key}",
-                                            td { "{user.username}" }
-                                            td { "{user.email}" }
-                                            td {
-                                                select {
-                                                    class: "form-select form-select-sm",
-                                                    value: "{role_now}",
-                                                    onchange: move |e| update_role((uid_for_role.clone(), e.value())),
-                                                    option { value: "admin", {crate::i18n::t("admin.role.admin")} }
-                                                    option { value: "editor", {crate::i18n::t("admin.role.editor")} }
-                                                    option { value: "viewer", {crate::i18n::t("admin.role.viewer")} }
-                                                }
-                                            }
-                                            td { "{storage_text}" }
-                                            td { "{last_login}" }
-                                            td { class: "table-actions",
-                                                button {
-                                                    class: "btn-icon danger",
-                                                    onclick: move |_| disable_user(uid_for_disable.clone()),
-                                                    {crate::i18n::t("admin.disable")}
-                                                }
-                                            }
-                                        }
-                                    }
+                    let Some(scope) = disable_weak.upgrade() else {
+                        return;
+                    };
+                    let token = token(auth);
+                    let path = format!("/admin/users/{disable_id}/disable");
+                    let weak = scope.downgrade();
+                    let _ = scope.spawn(async move {
+                        match state::api_put::<serde_json::Value, _>(
+                            &path,
+                            &serde_json::json!({}),
+                            &token,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                if let Some(scope) = weak.upgrade() {
+                                    users_load(&scope, auth, users, feedback);
                                 }
                             }
-                        },
-                    }
-                }
+                            Err(error) => set(feedback, error),
+                        }
+                    });
+                });
+                row().fill((details, update_role, disable))
+            },
+        );
+        let create = action("Create user", move || {
+            if password.get().len() < 8 {
+                set(feedback, crate::i18n::t("profile.password_too_short"));
+                return;
             }
-        }
-
-        Modal { title: crate::i18n::t("admin.add_user"), show: show_add,
-            div { class: "modal-form",
-                div { class: "form-group",
-                    label { {crate::i18n::t("admin.col.username")} }
-                    input {
-                        r#type: "text",
-                        class: "form-input",
-                        value: "{new_username}",
-                        oninput: move |e| new_username.set(e.value()),
-                    }
-                }
-                div { class: "form-group",
-                    label { {crate::i18n::t("admin.col.email")} }
-                    input {
-                        r#type: "email",
-                        class: "form-input",
-                        value: "{new_email}",
-                        oninput: move |e| new_email.set(e.value()),
-                    }
-                }
-                div { class: "form-group",
-                    label { {crate::i18n::t("auth.password")} }
-                    input {
-                        r#type: "password",
-                        class: "form-input",
-                        value: "{new_password}",
-                        oninput: move |e| new_password.set(e.value()),
-                    }
-                }
-                if let Some(err) = add_error() {
-                    div { class: "form-error", "{err}" }
-                }
-                div { class: "modal-actions",
-                    button {
-                        class: "btn btn-outline",
-                        onclick: move |_| show_add.set(false),
-                        {crate::i18n::t("common.cancel")}
-                    }
-                    button {
-                        class: "btn btn-primary",
-                        onclick: move |_| {
-                            let username = new_username.read().clone();
-                            let email = new_email.read().clone();
-                            let password = new_password.read().clone();
-                            if username.is_empty() || email.is_empty() || password.is_empty() {
-                                add_error.set(Some(crate::i18n::t("admin.add_user_required")));
+            let role = selected_role.get();
+            if !["admin", "editor", "viewer"].contains(&role.as_str()) {
+                set(feedback, "Choose admin, editor, or viewer".into());
+                return;
+            }
+            let Some(scope) = create_weak.upgrade() else {
+                return;
+            };
+            let body = serde_json::json!({
+                "username": username.get(),
+                "email": email.get(),
+                "password": password.get(),
+            });
+            let weak = scope.downgrade();
+            let token = token(auth);
+            let _ = scope.spawn(async move {
+                match state::api_post::<serde_json::Value, _>("/auth/register", &body, "").await {
+                    Ok(value) => {
+                        if let Some(id) = value
+                            .get("user")
+                            .and_then(|user| user.get("id"))
+                            .and_then(|id| id.as_str())
+                        {
+                            let body = serde_json::json!({ "role": role });
+                            if let Err(error) = state::api_put::<serde_json::Value, _>(
+                                &format!("/admin/users/{id}"),
+                                &body,
+                                &token,
+                            )
+                            .await
+                            {
+                                set(feedback, error);
                                 return;
                             }
-                            let bus = toast_bus;
-                            let mut refresh = refresh;
-                            let mut show_add = show_add;
-                            let mut add_error = add_error;
-                            spawn(async move {
-                                let body = serde_json::json!({
-                                    "username": username,
-                                    "email": email,
-                                    "password": password,
-                                });
-                                match api_post::<serde_json::Value, _>("/auth/register", &body, "").await {
-                                    Ok(_) => {
-                                        push_toast(bus, ToastKind::Success, crate::i18n::t("admin.user_created"));
-                                        show_add.set(false);
-                                        add_error.set(None);
-                                        let cur = *refresh.read();
-                                        refresh.set(cur + 1);
-                                    }
-                                    Err(e) => add_error.set(Some(e)),
-                                }
-                            });
-                        },
-                        {crate::i18n::t("admin.add_user")}
+                        }
+                        set(password, String::new());
+                        set(username, String::new());
+                        set(email, String::new());
+                        if let Some(scope) = weak.upgrade() {
+                            users_load(&scope, auth, users, feedback);
+                        }
+                        set(feedback, "User created".into());
                     }
+                    Err(error) => set(feedback, error),
                 }
-            }
-        }
-    }
-}
-
-#[component]
-fn AdminActivity() -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let auth = use_context::<Signal<AuthState>>();
-
-    let mut search = use_signal(String::new);
-    let mut action_filter = use_signal(String::new);
-
-    let activity = use_resource(move || {
-        let token = auth.read().token.clone().unwrap_or_default();
-        async move { api_get::<Vec<ActivityEntry>>("/admin/activity", &token).await }
-    });
-
-    let needle = search().trim().to_lowercase();
-    let action_sel = action_filter();
-
-    rsx! {
-        div { class: "admin-section",
-            h2 { {crate::i18n::t("admin.activity_log")} }
-
-            div { class: "admin-filter-bar",
-                input {
-                    r#type: "search",
-                    class: "form-input",
-                    placeholder: crate::i18n::t("admin.search_activity"),
-                    value: "{search}",
-                    oninput: move |e| search.set(e.value()),
-                }
-                select {
-                    class: "form-select",
-                    value: "{action_sel}",
-                    onchange: move |e| action_filter.set(e.value()),
-                    option { value: "", {crate::i18n::t("admin.all_actions")} }
-                    option { value: "create", {crate::i18n::t("admin.action.create")} }
-                    option { value: "update", {crate::i18n::t("admin.action.update")} }
-                    option { value: "delete", {crate::i18n::t("admin.action.delete")} }
-                    option { value: "share", {crate::i18n::t("admin.action.share")} }
-                    option { value: "login", {crate::i18n::t("admin.action.login")} }
-                }
-            }
-
-            div { class: "activity-log",
-                match &*activity.read() {
-                    None => rsx! {
-                        div { class: "log-entry",
-                            span { class: "log-time", {crate::i18n::t("admin.loading_activity")} }
-                        }
-                    },
-                    Some(Err(e)) => rsx! {
-                        div { class: "log-entry",
-                            span { class: "log-time", {crate::i18n::t("admin.load_activity_failed").replace("{err}", &e.to_string())} }
-                        }
-                    },
-                    Some(Ok(list)) if list.is_empty() => rsx! {
-                        div { class: "log-entry",
-                            span { class: "log-time", {crate::i18n::t("admin.no_activity")} }
-                        }
-                    },
-                    Some(Ok(list)) => rsx! {
-                        for entry in list.iter().filter(|e| {
-                            (action_sel.is_empty() || e.action.to_lowercase().contains(&action_sel))
-                                && (needle.is_empty()
-                                    || e.action.to_lowercase().contains(&needle)
-                                    || e.resource_type.to_lowercase().contains(&needle)
-                                    || e.resource_id.to_lowercase().contains(&needle)
-                                    || e.user_id.to_lowercase().contains(&needle))
-                        }) {
-                            {
-                                let key = entry.id.clone();
-                                let resource_text = format!("{} {}", entry.resource_type, entry.resource_id);
-                                rsx! {
-                                    div { key: "{key}", class: "log-entry",
-                                        span { class: "log-time", "{entry.created_at}" }
-                                        span { class: "log-user", "{entry.user_id}" }
-                                        span { class: "log-action", "{entry.action}" }
-                                        span { class: "log-resource", "{resource_text}" }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn AdminSettings() -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let auth = use_context::<Signal<AuthState>>();
-    let toast_bus = use_context::<Signal<Vec<Toast>>>();
-
-    // Load any persisted settings to seed the form.
-    let settings = use_resource(move || {
-        let token = auth.read().token.clone().unwrap_or_default();
-        async move {
-            api_get::<Vec<(String, String)>>("/settings", &token)
-                .await
-                .unwrap_or_default()
-        }
-    });
-    let lookup = move |key: &str, default: &str| -> String {
-        settings
-            .read()
-            .as_ref()
-            .and_then(|list| list.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
-            .unwrap_or_else(|| default.to_string())
-    };
-
-    let mut default_quota = use_signal(String::new);
-    let mut max_upload = use_signal(String::new);
-    let mut allow_registration = use_signal(String::new);
-    let mut default_role = use_signal(String::new);
-
-    // Seed inputs once settings have loaded.
-    use_effect(move || {
-        if settings.read().is_some() {
-            if default_quota.read().is_empty() {
-                default_quota.set(lookup("default_quota_mb", "1024"));
-            }
-            if max_upload.read().is_empty() {
-                max_upload.set(lookup("max_upload_mb", "50"));
-            }
-            if allow_registration.read().is_empty() {
-                allow_registration.set(lookup("allow_registration", "true"));
-            }
-            if default_role.read().is_empty() {
-                default_role.set(lookup("default_role", "editor"));
-            }
-        }
-    });
-
-    let save = move |_| {
-        let token = auth.read().token.clone().unwrap_or_default();
-        let bus = toast_bus;
-        let pairs = vec![
-            ("default_quota_mb", default_quota.read().clone()),
-            ("max_upload_mb", max_upload.read().clone()),
-            ("allow_registration", allow_registration.read().clone()),
-            ("default_role", default_role.read().clone()),
-        ];
-        spawn(async move {
-            let mut ok = true;
-            for (key, value) in pairs {
-                let body = serde_json::json!({ "value": value });
-                if api_put::<serde_json::Value, _>(&format!("/settings/{key}"), &body, &token)
-                    .await
-                    .is_err()
-                {
-                    ok = false;
-                }
-            }
-            if ok {
-                push_toast(
-                    bus,
-                    ToastKind::Success,
-                    crate::i18n::t("admin.settings_saved"),
-                );
-            } else {
-                push_toast(
-                    bus,
-                    ToastKind::Error,
-                    crate::i18n::t("admin.settings_save_failed"),
-                );
-            }
+            });
         });
-    };
+        col().fill((
+            field(crate::i18n::t("common.search"), search, Purpose::Search),
+            col().fill(rows),
+            heading("Create user"),
+            field(crate::i18n::t("auth.username"), username, Purpose::Text),
+            field(crate::i18n::t("auth.email"), email, Purpose::Email),
+            field(crate::i18n::t("auth.password"), password, Purpose::Password),
+            field("Role", selected_role, Purpose::Text),
+            create,
+        ))
+    });
 
-    rsx! {
-        div { class: "admin-section",
-            h2 { {crate::i18n::t("admin.system_settings")} }
+    let activity_panel = when(scope.bond(move || tab.get() == "activity"), move || {
+        col().fill(each(
+            activity,
+            |entry| entry.id.clone(),
+            |entry, _| {
+                let entry = entry.get();
+                label(format!(
+                    "{} · {} · {} · {}/{}",
+                    entry.created_at,
+                    entry.user_id,
+                    entry.action,
+                    entry.resource_type,
+                    entry.resource_id,
+                ))
+            },
+        ))
+    });
 
-            div { class: "settings-form",
-                div { class: "form-group",
-                    label { {crate::i18n::t("admin.default_quota")} }
-                    input {
-                        r#type: "number",
-                        class: "form-input",
-                        value: "{default_quota}",
-                        oninput: move |e| default_quota.set(e.value()),
+    let settings_panel = when(scope.bond(move || tab.get() == "settings"), move || {
+        let weak = settings_weak.clone();
+        let save = action(crate::i18n::t("common.save"), move || {
+            let Some(scope) = weak.upgrade() else {
+                return;
+            };
+            let token = token(auth);
+            let pairs = [
+                ("default_quota_mb", quota.get()),
+                ("max_upload_mb", upload.get()),
+                ("allow_registration", registration.get()),
+                ("default_role", role.get()),
+            ];
+            let _ = scope.spawn(async move {
+                for (key, value) in pairs {
+                    let body = serde_json::json!({ "value": value });
+                    if let Err(error) = state::api_put::<serde_json::Value, _>(
+                        &format!("/settings/{key}"),
+                        &body,
+                        &token,
+                    )
+                    .await
+                    {
+                        set(feedback, error);
+                        return;
                     }
                 }
-                div { class: "form-group",
-                    label { {crate::i18n::t("admin.max_upload")} }
-                    input {
-                        r#type: "number",
-                        class: "form-input",
-                        value: "{max_upload}",
-                        oninput: move |e| max_upload.set(e.value()),
-                    }
-                }
-                div { class: "form-group",
-                    label { {crate::i18n::t("admin.allow_registration")} }
-                    select {
-                        class: "form-select",
-                        value: "{allow_registration}",
-                        onchange: move |e| allow_registration.set(e.value()),
-                        option { value: "true", {crate::i18n::t("admin.yes")} }
-                        option { value: "false", {crate::i18n::t("admin.no")} }
-                    }
-                }
-                div { class: "form-group",
-                    label { {crate::i18n::t("admin.default_role")} }
-                    select {
-                        class: "form-select",
-                        value: "{default_role}",
-                        onchange: move |e| default_role.set(e.value()),
-                        option { value: "editor", {crate::i18n::t("admin.role.editor")} }
-                        option { value: "viewer", {crate::i18n::t("admin.role.viewer")} }
-                    }
-                }
-                button {
-                    class: "btn btn-primary",
-                    onclick: save,
-                    {crate::i18n::t("admin.save_settings")}
-                }
-            }
-        }
-    }
+                set(feedback, crate::i18n::t("admin.settings_saved"));
+            });
+        });
+        col().fill((
+            field("Default quota (MB)", quota, Purpose::Number),
+            field("Maximum upload (MB)", upload, Purpose::Number),
+            field(
+                "Allow registration (true/false)",
+                registration,
+                Purpose::Text,
+            ),
+            field("Default role", role, Purpose::Text),
+            save,
+        ))
+    });
+
+    let tabs = ["overview", "users", "activity", "settings"]
+        .into_iter()
+        .map(|value| {
+            action(crate::i18n::t(&format!("admin.tab.{value}")), move || {
+                set(tab, value.into());
+            })
+        })
+        .collect::<Vec<_>>();
+    let panel = col().class("admin-panel").fill((
+        heading(crate::i18n::t("admin.title")),
+        row().class("admin-tabs").fill(tabs),
+        status(feedback),
+        overview,
+        user_panel,
+        activity_panel,
+        settings_panel,
+    ));
+    Box::new(col().fill((Navbar(scope, auth), panel))) as Box<dyn Widget>
 }

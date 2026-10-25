@@ -1,0 +1,29 @@
+name: Local Glory dependencies
+description: Materialize the pinned Glory and Sapid sources used by this branch.
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: glory-rs/glory
+        ref: aecbe360bd0731f118af31e653f6df2b26ef7576
+        path: .dependencies/glory
+    - uses: actions/checkout@v4
+      with:
+        repository: sapid-ui/sapid
+        ref: fd64d78edf9f91f9dc63bfa2be6e59ec1f739a58
+        path: .dependencies/sapid
+    - shell: pwsh
+      run: |
+        $manifest = Get-Content -Raw Cargo.toml
+        $root = '${{ github.workspace }}'.Replace('\', '/')
+        $manifest.Replace('D:/Works/glory-rs/glory', "$root/.dependencies/glory").Replace('D:/Works/glory-rs/sapid', "$root/.dependencies/sapid") | Set-Content -NoNewline Cargo.toml
+        $build = if ($IsWindows) { 'D:/BuildCache/office-glory' } else { '${{ runner.temp }}/office-glory' }
+        New-Item -ItemType Directory -Force -Path "$build/tmp", "$build/cargo" | Out-Null
+        "CARGO_TARGET_DIR=$build/target" >> $env:GITHUB_ENV
+        "CARGO_HOME=$build/cargo" >> $env:GITHUB_ENV
+        "TEMP=$build/tmp" >> $env:GITHUB_ENV
+        "TMP=$build/tmp" >> $env:GITHUB_ENV
+        $env:CARGO_TARGET_DIR = "$build/target"
+        $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($metadata.target_directory) -ne [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)) { throw 'Cargo target verification failed' }

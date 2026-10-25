@@ -1,7 +1,8 @@
-use dioxus::prelude::*;
+use glory::prelude::*;
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::JsCast;
-use wasm_bindgen::closure::Closure;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, closure::Closure};
+#[cfg(target_arch = "wasm32")]
 use web_sys::MessageEvent;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -31,21 +32,29 @@ pub enum HostMessage {
 }
 
 pub fn post_to_host(msg: &HostMessage) {
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    let Ok(Some(parent)) = window.parent() else {
-        return;
-    };
-    let Ok(payload) = serde_json::to_string(msg) else {
-        return;
-    };
-    let _ = parent.post_message(&payload.into(), "*");
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = msg;
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(Some(parent)) = window.parent() else {
+            return;
+        };
+        let Ok(payload) = serde_json::to_string(msg) else {
+            return;
+        };
+        let _ = parent.post_message(&payload.into(), "*");
+    }
 }
 
-#[component]
-pub fn PostMessageBridge() -> Element {
-    use_hook(|| {
+#[allow(non_snake_case)]
+pub fn PostMessageBridge(scope: Scope) -> impl Widget {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = scope;
+    #[cfg(target_arch = "wasm32")]
+    {
         let cb = Closure::<dyn FnMut(MessageEvent)>::new(move |evt: MessageEvent| {
             let raw = match evt.data().as_string() {
                 Some(s) => s,
@@ -95,7 +104,13 @@ pub fn PostMessageBridge() -> Element {
         if let Some(window) = web_sys::window() {
             let _ = window.add_event_listener_with_callback("message", cb.as_ref().unchecked_ref());
         }
-        cb.forget();
-    });
-    rsx! { Fragment {} }
+        let _ = scope.on_cleanup(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .remove_event_listener_with_callback("message", cb.as_ref().unchecked_ref());
+            }
+            drop(cb);
+        });
+    }
+    group()
 }

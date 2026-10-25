@@ -1,37 +1,17 @@
-use dioxus::prelude::*;
-
-/// A reusable modal dialog overlay.
-///
-/// When `show` is `true` the modal renders on top of the page with a dimmed
-/// backdrop.  Clicking the backdrop or the close button sets `show` to `false`.
-#[component]
-pub fn Modal(title: String, show: Signal<bool>, children: Element) -> Element {
-    if !*show.read() {
-        return rsx! {};
-    }
-
-    rsx! {
-        div { class: "modal-overlay",
-            onclick: move |_| show.set(false),
-
-            div { class: "modal-container",
-                // Stop click propagation so clicking inside the modal does
-                // not dismiss it.
-                onclick: move |evt| evt.stop_propagation(),
-
-                div { class: "modal-header",
-                    h3 { class: "modal-title", "{title}" }
-                    button {
-                        class: "modal-close",
-                        onclick: move |_| show.set(false),
-                        "x"
-                    }
-                }
-
-                div { class: "modal-body",
-                    {children}
-                }
-            }
-        }
-    }
+use crate::components::ui::{set, theme};
+use glory::prelude::*;
+#[allow(non_snake_case)]
+pub fn Modal<W: Widget>(
+    key: String,
+    title: String,
+    show: Cage<bool>,
+    content: impl FnMut() -> W + 'static,
+) -> impl Widget {
+    sapid::dialog(key)
+        .theme(theme())
+        .title(title)
+        .show_trigger(false)
+        .open(show)
+        .on_open_change(move |value| set(show, value))
+        .content(content)
 }

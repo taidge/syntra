@@ -1,12 +1,11 @@
-use dioxus::prelude::*;
-
+use crate::components::ui::*;
+use glory::prelude::*;
 #[derive(Clone, PartialEq)]
 pub struct MenuEntry {
     pub label: String,
     pub command: String,
     pub disabled: bool,
 }
-
 impl MenuEntry {
     pub fn new(label: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
@@ -16,52 +15,38 @@ impl MenuEntry {
         }
     }
 }
-
-#[derive(Props, Clone, PartialEq)]
-pub struct ContextMenuProps {
-    pub state: Signal<Option<(f64, f64, Vec<MenuEntry>)>>,
-    pub on_command: EventHandler<String>,
-}
-
-#[component]
-pub fn ContextMenu(props: ContextMenuProps) -> Element {
-    let mut state = props.state;
-    let entries = state.read().as_ref().map(|(_, _, e)| e.clone());
-    let pos = state.read().as_ref().map(|(x, y, _)| (*x, *y));
-    let (Some(entries), Some((x, y))) = (entries, pos) else {
-        return rsx! { Fragment {} };
-    };
-    rsx! {
-        div {
-            class: "context-menu-backdrop",
-            onclick: move |_| state.set(None),
-            oncontextmenu: move |evt: MouseEvent| {
-                evt.prevent_default();
-                state.set(None);
-            },
-        }
-        div {
-            class: "context-menu",
-            style: "left: {x}px; top: {y}px;",
-            onclick: move |evt: MouseEvent| evt.stop_propagation(),
-            for entry in entries.iter() {
-                {
-                    let cmd = entry.command.clone();
-                    let label = entry.label.clone();
-                    let disabled = entry.disabled;
-                    rsx! {
-                        button {
-                            class: "context-menu-item",
-                            disabled,
-                            onclick: move |_| {
-                                props.on_command.call(cmd.clone());
-                                state.set(None);
-                            },
-                            "{label}"
-                        }
-                    }
-                }
-            }
-        }
-    }
+#[allow(non_snake_case)]
+pub fn ContextMenu(
+    scope: Scope,
+    state: Cage<Option<(f64, f64, Vec<MenuEntry>)>>,
+    on_command: impl Fn(String) + 'static,
+) -> impl Widget {
+    let command = std::rc::Rc::new(on_command);
+    let entries = scope.bond(move || {
+        state
+            .get()
+            .map(|(_, _, entries)| entries)
+            .unwrap_or_default()
+    });
+    when(scope.bond(move || state.get().is_some()), move || {
+        let command = command.clone();
+        col().class("context-menu").fill((
+            each(
+                entries,
+                |entry| entry.command.clone(),
+                move |entry, _| {
+                    let command = command.clone();
+                    sapid::button()
+                        .theme(theme())
+                        .label(entry.get().label)
+                        .enabled(!entry.get().disabled)
+                        .on_press(move || {
+                            command(entry.get().command);
+                            set(state, None);
+                        })
+                },
+            ),
+            action("Close", move || set(state, None)),
+        ))
+    })
 }

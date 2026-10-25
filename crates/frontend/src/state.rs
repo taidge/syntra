@@ -8,7 +8,7 @@ use web_sys::{File, FormData, Headers, Request, RequestInit, RequestMode, Respon
 // Client-side auth state
 // ---------------------------------------------------------------------------
 
-/// Authentication state stored in a global signal.
+/// Authentication state stored in the application's Glory Cage.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct AuthState {
     pub token: Option<String>,
@@ -110,7 +110,7 @@ pub struct FileResponse {
 // API client helpers
 // ---------------------------------------------------------------------------
 
-/// Base path for all backend API calls (proxied in dev via Dioxus config).
+/// Same-origin base path for all backend API calls.
 pub const API_BASE: &str = "/api/v1";
 const AUTH_STORAGE_KEY: &str = "contrix.auth";
 

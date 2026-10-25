@@ -1,26 +1,8 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use dioxus::prelude::*;
-use gloo_timers::callback::{Interval, Timeout};
+use super::document_editor::{EditorSession, editor_header};
+use crate::state::AuthState;
+use glory::prelude::*;
 use serde::Deserialize;
-
-use crate::Route;
-use crate::collab_client::{CollabHandle, CollabMessage, ConnectionState, connect_with_reconnect};
-use crate::components::comments_pane::CommentsPane;
-use crate::components::context_menu::{ContextMenu, MenuEntry};
-use crate::components::menubar::Menubar;
-use crate::components::navbar::Navbar;
-use crate::components::toast::{Toast, ToastKind, push_toast};
-use crate::components::version_history::VersionHistory;
-use crate::state::{AuthState, api_get, api_put, export_document};
-
-#[derive(Clone, Deserialize)]
-struct DocumentResponse {
-    name: String,
-    content: serde_json::Value,
-}
-
+use serde_json::{Value, json};
 #[derive(Deserialize, Default)]
 struct SlideDto {
     #[serde(default)]
@@ -234,40 +216,93 @@ fn merge_presentation(
         metadata.insert("modified_at".into(), serde_json::json!(chrono::Utc::now()));
     }
     let previous = base.get("slides").and_then(|value| value.as_array());
-    let canonical = slides.iter().map(|slide| {
-        let old = previous.and_then(|items| items.iter().find(|item| item.get("id").and_then(|value| value.as_str()) == Some(slide.native_id.as_str())))
-            .or_else(|| slide.source.is_object().then_some(&slide.source));
-        let old_elements = old.and_then(|value| value.get("elements")).and_then(|value| value.as_array());
-        let mut replaced_text = 0usize;
-        let mut non_text = Vec::new();
-        for element in old_elements.into_iter().flatten() {
-            if element.get("type").and_then(|value| value.as_str()) == Some("TextBox")
-                && replaced_text < 2
+    let canonical = slides
+        .iter()
+        .map(|slide| {
+            let old = previous
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("id").and_then(Value::as_str) == Some(slide.native_id.as_str())
+                    })
+                })
+                .or_else(|| slide.source.is_object().then_some(&slide.source));
+            let mut result = old.cloned().unwrap_or_else(|| json!({}));
+            let mut replaced = 0usize;
+            let mut elements = Vec::new();
+            for element in old
+                .and_then(|old| old["elements"].as_array())
+                .into_iter()
+                .flatten()
             {
-                replaced_text += 1;
-            } else {
-                non_text.push(element.clone());
+                if element["type"] == "TextBox" && replaced < 2 {
+                    let text = if replaced == 0 {
+                        &slide.title
+                    } else {
+                        &slide.body
+                    };
+                    let mut next = element.clone();
+                    if text_from_element(element).as_deref() != Some(text.as_str()) {
+                        let runs = element["content"]
+                            .as_array()
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        next["content"] = json!(super::writer::replace_writer_runs(runs, text));
+                    }
+                    elements.push(next);
+                    replaced += 1;
+                } else {
+                    elements.push(element.clone());
+                }
             }
-        }
-        let old_text_ids = old_elements.into_iter().flatten()
-            .filter(|element| element.get("type").and_then(|value| value.as_str()) == Some("TextBox"))
-            .filter_map(|element| element.get("id").cloned()).collect::<Vec<_>>();
-        let title_id = old_text_ids.first().cloned().unwrap_or_else(|| serde_json::json!(uuid::Uuid::new_v4()));
-        let body_id = old_text_ids.get(1).cloned().unwrap_or_else(|| serde_json::json!(uuid::Uuid::new_v4()));
-        let mut elements = vec![text_box(title_id, &slide.title, true), text_box(body_id, &slide.body, false)];
-        elements.append(&mut non_text);
-        serde_json::json!({
-            "id": slide.native_id,
-            "elements": elements, "background": {"Solid": slide.bg_color},
-            "transition": canonical_transition(&slide.transition),
-            "animations": old.and_then(|v| v.get("animations")).cloned().unwrap_or_else(|| serde_json::json!([])),
-            "notes": slide.notes, "layout": canonical_layout(&slide.layout)
+            for (index, text) in [&slide.title, &slide.body]
+                .into_iter()
+                .enumerate()
+                .skip(replaced)
+            {
+                elements.push(text_box(json!(uuid::Uuid::new_v4()), text, index == 0));
+            }
+            let original = old.map(|old| hydrate_presentation(&json!({"slides":[old]})).remove(0));
+            result["id"] = json!(slide.native_id);
+            result["elements"] = json!(elements);
+            if original
+                .as_ref()
+                .is_none_or(|old| old.bg_color != slide.bg_color)
+                || result.get("background").is_none()
+            {
+                result["background"] = json!({"Solid":slide.bg_color});
+            }
+            if original
+                .as_ref()
+                .is_none_or(|old| old.transition != slide.transition)
+                || result.get("transition").is_none()
+            {
+                result["transition"] = canonical_transition(&slide.transition);
+            }
+            if original
+                .as_ref()
+                .is_none_or(|old| old.layout != slide.layout)
+                || result.get("layout").is_none()
+            {
+                result["layout"] = json!(canonical_layout(&slide.layout));
+            }
+            if result.get("animations").is_none() {
+                result["animations"] = json!([]);
+            }
+            result["notes"] = json!(slide.notes);
+            if result.get("title").is_some() {
+                result["title"] = json!(slide.title);
+            }
+            if result.get("body").is_some() {
+                result["body"] = json!(slide.body);
+            }
+            result
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     object.insert("slides".into(), serde_json::Value::Array(canonical));
     result
 }
 
+#[cfg(test)]
 fn presentation_replace_from_operation(
     payload: &serde_json::Value,
 ) -> Option<(String, serde_json::Value)> {
@@ -351,68 +386,6 @@ fn set_presentation_theme(content: &mut serde_json::Value, name: &str) {
     }
 }
 
-fn render_slide_objects(content: &serde_json::Value, index: usize) -> Element {
-    let elements = content
-        .get("slides")
-        .and_then(|value| value.as_array())
-        .and_then(|slides| slides.get(index))
-        .and_then(|slide| slide.get("elements"))
-        .and_then(|elements| elements.as_array())
-        .cloned()
-        .unwrap_or_default();
-    rsx! {
-        for (index, element) in elements.iter().enumerate() {
-            {
-                let kind = element.get("type").and_then(|value| value.as_str()).unwrap_or("");
-                let x = element.get("x").and_then(|value| value.as_f64()).unwrap_or(0.0) / 19.2;
-                let y = element.get("y").and_then(|value| value.as_f64()).unwrap_or(0.0) / 10.8;
-                let width = element.get("width").and_then(|value| value.as_f64()).unwrap_or(500.0) / 19.2;
-                let height = element.get("height").and_then(|value| value.as_f64()).unwrap_or(300.0) / 10.8;
-                let position = format!("position:absolute;left:{x}%;top:{y}%;width:{width}%;height:{height}%;");
-                match kind {
-                    "Image" => {
-                        let url = element.get("url").and_then(|value| value.as_str()).unwrap_or("").to_string();
-                        let alt = element.get("alt_text").and_then(|value| value.as_str()).unwrap_or("").to_string();
-                        rsx! { img { style: "{position}object-fit:contain;", src: "{url}", alt: "{alt}" } }
-                    }
-                    "Video" => {
-                        let url = element.get("url").and_then(|value| value.as_str()).unwrap_or("").to_string();
-                        rsx! { video { style: "{position}", src: "{url}", controls: true } }
-                    }
-                    "Shape" => {
-                        let fill = element.get("fill_color").and_then(|value| value.as_str()).unwrap_or("#DBEAFE");
-                        rsx! { div { style: "{position}background:{fill};border:2px solid #2563EB;border-radius:12px;" } }
-                    }
-                    "TextBox" if index >= 2 => {
-                        let text = text_from_element(element).unwrap_or_default();
-                        rsx! { div { style: "{position}white-space:pre-wrap;", "{text}" } }
-                    }
-                    "Chart" => {
-                        let labels = element.pointer("/data/labels").and_then(|value| value.as_array()).cloned().unwrap_or_default();
-                        let values = element.pointer("/data/datasets/0/values").and_then(|value| value.as_array()).cloned().unwrap_or_default();
-                        let maximum = values.iter().filter_map(|value| value.as_f64()).map(f64::abs).fold(1.0, f64::max);
-                        rsx! { div { style: "{position}display:flex;gap:8px;align-items:flex-end;padding:16px;background:#fff;border:1px solid #cbd5e1;",
-                            for (column, value) in values.iter().enumerate() {
-                                {
-                                    let value = value.as_f64().unwrap_or(0.0);
-                                    let percent = value.abs() / maximum * 85.0;
-                                    let label = labels.get(column).and_then(|value| value.as_str()).unwrap_or("");
-                                    rsx! { div { style: "flex:1;display:flex;flex-direction:column;align-items:center;height:100%;justify-content:flex-end;",
-                                        span { style: "font-size:11px;color:#111827;", "{value}" }
-                                        div { style: "width:80%;height:{percent}%;background:#2563EB;min-height:2px;" }
-                                        span { style: "font-size:11px;color:#111827;", "{label}" }
-                                    } }
-                                }
-                            }
-                        } }
-                    }
-                    _ => rsx! {},
-                }
-            }
-        }
-    }
-}
-
 #[derive(Clone, PartialEq)]
 struct SlideData {
     id: usize,
@@ -438,944 +411,6 @@ impl SlideData {
             transition: "none".into(),
             bg_color: "#ffffff".into(),
             layout: "title-body".into(),
-        }
-    }
-}
-
-#[component]
-pub fn Slides(id: String) -> Element {
-    let _ = use_context::<Signal<String>>().read();
-    let mut slides = use_signal(|| vec![SlideData::empty(0)]);
-    let mut current_slide = use_signal(|| 0usize);
-    let mut doc_title = use_signal(|| crate::i18n::t("editor.slides.untitled"));
-    let mut saved_status = use_signal(|| crate::i18n::t("common.saved"));
-    let mut loaded = use_signal(|| false);
-    let mut drag_index = use_signal(|| None::<usize>);
-    let mut present_mode = use_signal(|| false);
-    let mut ctx_menu = use_signal(|| None::<(f64, f64, Vec<MenuEntry>)>);
-    let mut comments_open = use_signal(|| false);
-    let mut versions_open = use_signal(|| false);
-    let mut layouts_open = use_signal(|| false);
-    let mut presenter_view = use_signal(|| false);
-    let mut presentation_started = use_signal(|| None::<f64>);
-    let mut elapsed_seconds = use_signal(|| 0u64);
-    let _presentation_clock = use_hook(move || {
-        Rc::new(Interval::new(1000, move || {
-            if let Some(started) = *presentation_started.read() {
-                elapsed_seconds.set(((js_sys::Date::now() - started) / 1000.0).max(0.0) as u64);
-            }
-        }))
-    });
-    let mut document_content = use_signal(|| serde_json::json!({}));
-    let mut last_collab_content = use_signal(|| serde_json::Value::Null);
-    let mut ws_handle = use_signal(|| None::<CollabHandle>);
-    let mut conn_state = use_signal(|| ConnectionState::Connecting);
-
-    let auth = use_context::<Signal<AuthState>>();
-    let toast_bus = use_context::<Signal<Vec<Toast>>>();
-    let nav = use_navigator();
-    let id_for_resource = id.clone();
-    let doc_resource = use_resource(move || {
-        let id = id_for_resource.clone();
-        let token = auth.read().token.clone().unwrap_or_default();
-        async move { api_get::<DocumentResponse>(&format!("/documents/{id}"), &token).await }
-    });
-
-    use_effect(move || {
-        if *loaded.read() {
-            return;
-        }
-        if let Some(Ok(doc)) = doc_resource.read().as_ref() {
-            doc_title.set(doc.name.clone());
-            let new_slides = hydrate_presentation(&doc.content);
-            slides.set(new_slides);
-            document_content.set(doc.content.clone());
-            last_collab_content.set(doc.content.clone());
-            current_slide.set(0);
-            loaded.set(true);
-        }
-    });
-
-    let id_for_ws = id.clone();
-    use_effect(move || {
-        let token = auth.read().token.clone().unwrap_or_default();
-        let self_id = auth
-            .read()
-            .user
-            .as_ref()
-            .map(|user| user.id.to_string())
-            .unwrap_or_default();
-        let on_message = move |message: CollabMessage| {
-            let content = match message {
-                CollabMessage::Operation(payload) => {
-                    let Some((author, content)) = presentation_replace_from_operation(&payload)
-                    else {
-                        return;
-                    };
-                    if author == self_id {
-                        return;
-                    }
-                    if *saved_status.read() == crate::i18n::t("common.unsaved") {
-                        push_toast(
-                            toast_bus,
-                            ToastKind::Info,
-                            "Concurrent slide edit received; the latest remote version is shown.",
-                        );
-                    }
-                    content
-                }
-                CollabMessage::DocumentState { content, .. } if content.is_object() => {
-                    if *saved_status.read() == crate::i18n::t("common.unsaved") {
-                        return;
-                    }
-                    content
-                }
-                CollabMessage::Error { message } => {
-                    push_toast(toast_bus, ToastKind::Error, message);
-                    return;
-                }
-                _ => return,
-            };
-            slides.set(hydrate_presentation(&content));
-            document_content.set(content.clone());
-            last_collab_content.set(content);
-            let next_index = (*current_slide.read()).min(slides.read().len().saturating_sub(1));
-            current_slide.set(next_index);
-            saved_status.set(crate::i18n::t("common.saved"));
-        };
-        let on_state = move |state| conn_state.set(state);
-        ws_handle.set(Some(connect_with_reconnect(
-            id_for_ws.clone(),
-            token,
-            on_message,
-            on_state,
-        )));
-    });
-
-    use_drop(move || {
-        if let Some(handle) = ws_handle.write().take() {
-            handle.close();
-        }
-    });
-
-    let save_timer: Rc<RefCell<Option<Timeout>>> = use_hook(|| Rc::new(RefCell::new(None)));
-
-    let serialize_slides = move || -> serde_json::Value {
-        merge_presentation(&document_content.read(), &slides.read(), &doc_title.read())
-    };
-
-    let perform_save = {
-        let id = id.clone();
-        move |body: serde_json::Value, mut status: Signal<String>, token: String| {
-            let id = id.clone();
-            status.set(crate::i18n::t("common.saving"));
-            wasm_bindgen_futures::spawn_local(async move {
-                let req = serde_json::json!({ "content": body });
-                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token)
-                    .await
-                {
-                    Ok(_) => status.set(crate::i18n::t("common.saved")),
-                    Err(e) => status
-                        .set(crate::i18n::t("editor.save_failed").replace("{err}", &e.to_string())),
-                }
-            });
-        }
-    };
-
-    let mut broadcast_presentation = move |body: &serde_json::Value| {
-        let previous = last_collab_content.read().clone();
-        if previous == *body {
-            return;
-        }
-        let user_id = auth
-            .read()
-            .user
-            .as_ref()
-            .map(|user| user.id.to_string())
-            .unwrap_or_default();
-        if user_id.is_empty() {
-            return;
-        }
-        let operation = serde_json::json!({
-            "type":"Replace", "path":["presentation"],
-            "old_value":previous, "new_value":body
-        });
-        if let Some(handle) = ws_handle.read().as_ref()
-            && handle.send_operation(&user_id, operation).is_ok()
-        {
-            last_collab_content.set(body.clone());
-        }
-    };
-
-    let schedule_save = {
-        let save_timer = save_timer.clone();
-        let perform_save = perform_save.clone();
-        move || {
-            if !*loaded.read() {
-                return;
-            }
-            saved_status.set(crate::i18n::t("common.unsaved"));
-            let body = serialize_slides();
-            document_content.set(body.clone());
-            broadcast_presentation(&body);
-            let token = auth.read().token.clone().unwrap_or_default();
-            let status = saved_status;
-            let perform_save = perform_save.clone();
-            let new_timer = Timeout::new(1500, move || {
-                perform_save(serialize_slides(), status, token);
-            });
-            *save_timer.borrow_mut() = Some(new_timer);
-        }
-    };
-
-    let flush_save = {
-        let save_timer = save_timer.clone();
-        let perform_save = perform_save.clone();
-        move || {
-            if !*loaded.read() {
-                return;
-            }
-            save_timer.borrow_mut().take();
-            let body = serialize_slides();
-            document_content.set(body.clone());
-            broadcast_presentation(&body);
-            let token = auth.read().token.clone().unwrap_or_default();
-            perform_save(body, saved_status, token);
-        }
-    };
-
-    let mut exit_present = move || {
-        present_mode.set(false);
-        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-            doc.exit_fullscreen();
-        }
-    };
-
-    let mut go_next = move || {
-        let len = slides.read().len();
-        let cur = *current_slide.read();
-        if cur + 1 < len {
-            current_slide.set(cur + 1);
-        }
-    };
-
-    let mut go_prev = move || {
-        let cur = *current_slide.read();
-        if cur > 0 {
-            current_slide.set(cur - 1);
-        }
-    };
-
-    let slide_count = slides.read().len();
-    let cur_idx = *current_slide.read();
-    let cur_title = slides
-        .read()
-        .get(cur_idx)
-        .map(|s| s.title.clone())
-        .unwrap_or_default();
-    let cur_body = slides
-        .read()
-        .get(cur_idx)
-        .map(|s| s.body.clone())
-        .unwrap_or_default();
-    let cur_notes = slides
-        .read()
-        .get(cur_idx)
-        .map(|s| s.notes.clone())
-        .unwrap_or_default();
-    let cur_bg = slides
-        .read()
-        .get(cur_idx)
-        .map(|s| s.bg_color.clone())
-        .unwrap_or_else(|| "#ffffff".into());
-    let cur_transition = slides
-        .read()
-        .get(cur_idx)
-        .map(|s| s.transition.clone())
-        .unwrap_or_else(|| "none".into());
-    let cur_layout = slides
-        .read()
-        .get(cur_idx)
-        .map(|s| s.layout.clone())
-        .unwrap_or_else(|| "title-body".into());
-    let next_title = slides
-        .read()
-        .get(cur_idx + 1)
-        .map(|s| s.title.clone())
-        .unwrap_or_default();
-    let next_body = slides
-        .read()
-        .get(cur_idx + 1)
-        .map(|s| s.body.clone())
-        .unwrap_or_default();
-    let current_theme = document_content
-        .read()
-        .pointer("/theme/name")
-        .and_then(|value| value.as_str())
-        .unwrap_or("Contrix Light")
-        .to_string();
-    let heading_font = document_content
-        .read()
-        .pointer("/theme/heading_font")
-        .and_then(|value| value.as_str())
-        .unwrap_or("Aptos Display")
-        .to_string();
-    let theme_color = document_content
-        .read()
-        .pointer("/theme/primary_color")
-        .and_then(|value| value.as_str())
-        .unwrap_or("#2563EB")
-        .to_string();
-
-    rsx! {
-        Navbar {}
-        div {
-            class: "editor-container",
-            tabindex: "0",
-            onkeydown: {
-                let mut flush_save = flush_save.clone();
-                move |evt: KeyboardEvent| {
-                    if evt.modifiers().contains(Modifiers::CONTROL)
-                        && evt.key() == Key::Character("s".to_string()) {
-                            evt.prevent_default();
-                            flush_save();
-                        }
-                }
-            },
-            div { class: "doc-title-bar",
-                input {
-                    class: "doc-title-input",
-                    value: "{doc_title}",
-                    oninput: {
-                        let mut schedule_save = schedule_save.clone();
-                        move |e: FormEvent| {
-                            doc_title.set(e.value());
-                            schedule_save();
-                        }
-                    },
-                    placeholder: crate::i18n::t("editor.slides.untitled"),
-                }
-                span { class: "save-status", "{saved_status}" }
-                button {
-                    class: "btn-icon",
-                    onclick: move |_| {
-                        let cur = *layouts_open.read();
-                        layouts_open.set(!cur);
-                    },
-                    {crate::i18n::t("editor.slides.layouts")}
-                }
-                button {
-                    class: "present-btn",
-                    onclick: move |_| {
-                        present_mode.set(true);
-                        presentation_started.set(Some(js_sys::Date::now()));
-                        elapsed_seconds.set(0);
-                        if let Some(doc) = web_sys::window().and_then(|w| w.document())
-                            && let Some(el) = doc.get_element_by_id("present-stage") {
-                                let _ = el.request_fullscreen();
-                            }
-                    },
-                    {crate::i18n::t("editor.slides.present")}
-                }
-            }
-
-            {
-                let mut flush_for_menu = flush_save.clone();
-                let mut schedule_for_menu = schedule_save.clone();
-                let id_for_menu = id.clone();
-                let bus_for_menu = toast_bus;
-                let nav_for_menu = nav;
-                rsx! {
-                    Menubar {
-                        document_type: "slides".to_string(),
-                        on_command: move |cmd: String| {
-                            let bus = bus_for_menu;
-                            match cmd.as_str() {
-                                "save" => flush_for_menu(),
-                                "back" => { nav_for_menu.push(Route::Dashboard {}); }
-                                "toggle-comments" => {
-                                    let cur = *comments_open.read();
-                                    comments_open.set(!cur);
-                                }
-                                "version-history" => {
-                                    let cur = *versions_open.read();
-                                    versions_open.set(!cur);
-                                }
-                                "presenter-view" => {
-                                    let open = *presenter_view.read();
-                                    presenter_view.set(!open);
-                                    if !open {
-                                        presentation_started.set(Some(js_sys::Date::now()));
-                                        elapsed_seconds.set(0);
-                                    }
-                                }
-                                "insert-slide" => {
-                                    let next_id = slides.read().iter().map(|s| s.id).max().unwrap_or(0) + 1;
-                                    slides.write().push(SlideData::empty(next_id));
-                                    let new_idx = slides.read().len() - 1;
-                                    current_slide.set(new_idx);
-                                    schedule_for_menu();
-                                }
-                                "insert-textbox" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Ok(Some(text)) = window.prompt_with_message("Text box content")
-                                        && !text.trim().is_empty()
-                                    {
-                                        let canonical = serialize_slides();
-                                        document_content.set(canonical);
-                                        let mut content = document_content.read().clone();
-                                        append_slide_element(&mut content, *current_slide.read(), text_box(serde_json::json!(uuid::Uuid::new_v4()), &text, false));
-                                        document_content.set(content);
-                                        schedule_for_menu();
-                                    }
-                                }
-                                "insert-image" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Ok(Some(url)) = window.prompt_with_message("Image URL or data URL")
-                                        && !url.trim().is_empty()
-                                    {
-                                        let canonical = serialize_slides();
-                                        document_content.set(canonical);
-                                        let mut content = document_content.read().clone();
-                                        append_slide_element(&mut content, *current_slide.read(), serde_json::json!({
-                                            "type":"Image", "id":uuid::Uuid::new_v4(), "x":500.0, "y":250.0,
-                                            "width":920.0, "height":520.0, "rotation":0.0, "url":url,
-                                            "alt_text":"Inserted image", "crop":null
-                                        }));
-                                        document_content.set(content);
-                                        schedule_for_menu();
-                                    }
-                                }
-                                "insert-shape" => {
-                                    let canonical = serialize_slides();
-                                    document_content.set(canonical);
-                                    let mut content = document_content.read().clone();
-                                    append_slide_element(&mut content, *current_slide.read(), serde_json::json!({
-                                        "type":"Shape", "id":uuid::Uuid::new_v4(), "x":700.0, "y":400.0,
-                                        "width":520.0, "height":260.0, "rotation":0.0, "shape_type":"RoundedRectangle",
-                                        "fill_color":"#DBEAFE", "border":{"color":"#2563EB","width":2.0}, "text":null
-                                    }));
-                                    document_content.set(content);
-                                    schedule_for_menu();
-                                }
-                                "insert-animation" => {
-                                    let canonical = serialize_slides();
-                                    document_content.set(canonical);
-                                    let mut content = document_content.read().clone();
-                                    if add_default_animation(&mut content, *current_slide.read()) {
-                                        document_content.set(content);
-                                        schedule_for_menu();
-                                        push_toast(bus, ToastKind::Success, "Fade animation added");
-                                    }
-                                }
-                                "insert-chart" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Ok(Some(input)) = window.prompt_with_message_and_default("Chart data (label,value;label,value)", "Q1,10;Q2,15;Q3,12")
-                                    {
-                                        let values = input.split(';').filter_map(|entry| {
-                                            let (label, value) = entry.split_once(',')?;
-                                            Some((label.trim().to_string(), value.trim().parse::<f64>().ok()?))
-                                        }).collect::<Vec<_>>();
-                                        if !values.is_empty() {
-                                            let canonical = serialize_slides();
-                                            document_content.set(canonical);
-                                            let mut content = document_content.read().clone();
-                                            append_slide_element(&mut content, *current_slide.read(), serde_json::json!({
-                                                "type":"Chart", "id":uuid::Uuid::new_v4(), "x":500.0,"y":300.0,"width":920.0,"height":520.0,
-                                                "chart_type":"Bar", "data":{"labels":values.iter().map(|(label,_)| label.clone()).collect::<Vec<_>>(),
-                                                    "datasets":[{"name":"Series 1","values":values.iter().map(|(_,value)| *value).collect::<Vec<_>>(),"color":"#2563EB"}]}
-                                            }));
-                                            document_content.set(content);
-                                            schedule_for_menu();
-                                        }
-                                    }
-                                }
-                                "toggle-theme" => {
-                                    if let Some(window) = web_sys::window()
-                                        && let Some(el) = window.document().and_then(|d| d.document_element()) {
-                                            let cur = el.get_attribute("data-theme").unwrap_or_default();
-                                            let next = if cur == "dark" { "light" } else { "dark" };
-                                            let _ = el.set_attribute("data-theme", next);
-                                            if let Ok(Some(storage)) = window.local_storage() {
-                                                let _ = storage.set_item("theme", next);
-                                            }
-                                        }
-                                }
-                                "print" => {
-                                    if let Some(w) = web_sys::window() { let _ = w.print(); }
-                                }
-                                "export-pdf" | "export-pptx" | "export-html" => {
-                                    let format = match cmd.as_str() {
-                                        "export-pdf" => "pdf",
-                                        "export-pptx" => "pptx",
-                                        _ => "html",
-                                    };
-                                    let id = id_for_menu.clone();
-                                    let token = auth.read().token.clone().unwrap_or_default();
-                                    let bus2 = bus;
-                                    let fmt_owned = format.to_string();
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        match export_document(&id, &fmt_owned, &token).await {
-                                            Ok(_) => push_toast(bus2, ToastKind::Success, crate::i18n::t("editor.export_succeeded").replace("{fmt}", &fmt_owned.to_uppercase())),
-                                            Err(e) => push_toast(bus2, ToastKind::Error, crate::i18n::t("editor.export_failed").replace("{err}", &e.to_string())),
-                                        }
-                                    });
-                                }
-                                other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
-                            }
-                        },
-                    }
-                }
-            }
-
-            {
-                match *conn_state.read() {
-                    ConnectionState::Reconnecting(attempt) => rsx! { div { class: "ws-banner ws-reconnecting", "Reconnecting collaboration ({attempt})…" } },
-                    ConnectionState::Failed => rsx! { div { class: "ws-banner ws-failed", "Collaboration connection failed" } },
-                    _ => rsx! {},
-                }
-            }
-
-            match doc_resource.read().as_ref() {
-                None => rsx! { div { class: "editor-loading", {crate::i18n::t("editor.loading_document")} } },
-                Some(Err(e)) => rsx! { div { class: "editor-error", {crate::i18n::t("editor.failed_load").replace("{err}", &e.to_string())} } },
-                Some(Ok(_)) => rsx! {},
-            }
-
-            div { class: "slides-editor",
-                div { class: "slide-panel",
-                    for i in 0..slide_count {
-                        {
-                            let mut schedule_save_drop = schedule_save.clone();
-                            let mut schedule_save_del = schedule_save.clone();
-                            rsx! {
-                                div {
-                                    key: "{slides.read()[i].id}-{i}",
-                                    class: if cur_idx == i { "slide-thumbnail slide-thumb active" } else { "slide-thumbnail slide-thumb" },
-                                    draggable: true,
-                                    ondragstart: move |_| {
-                                        drag_index.set(Some(i));
-                                    },
-                                    ondragover: move |e| {
-                                        e.prevent_default();
-                                    },
-                                    ondrop: move |e| {
-                                        e.prevent_default();
-                                        if let Some(from) = *drag_index.read()
-                                            && from != i {
-                                                let mut list = slides.write();
-                                                let item = list.remove(from);
-                                                list.insert(i, item);
-                                                drop(list);
-                                                let cur = *current_slide.read();
-                                                if cur == from {
-                                                    current_slide.set(i);
-                                                } else if from < cur && i >= cur {
-                                                    current_slide.set(cur - 1);
-                                                } else if from > cur && i <= cur {
-                                                    current_slide.set(cur + 1);
-                                                }
-                                                schedule_save_drop();
-                                            }
-                                        drag_index.set(None);
-                                    },
-                                    onclick: move |_| current_slide.set(i),
-                                    div { class: "slide-thumb-number", "{i + 1}" }
-                                    div { class: "slide-thumb-preview",
-                                        div { class: "thumb-content",
-                                            if i == 0 {
-                                                div { class: "thumb-title-bar" }
-                                                div { class: "thumb-subtitle-bar" }
-                                            } else {
-                                                div { class: "thumb-body-bar" }
-                                                div { class: "thumb-body-bar short" }
-                                            }
-                                        }
-                                    }
-                                    button {
-                                        class: "slide-thumb-delete",
-                                        onclick: move |e| {
-                                            e.stop_propagation();
-                                            let len = slides.read().len();
-                                            if len <= 1 {
-                                                return;
-                                            }
-                                            slides.write().remove(i);
-                                            let cur = *current_slide.read();
-                                            if cur >= slides.read().len() {
-                                                current_slide.set(slides.read().len() - 1);
-                                            } else if i < cur {
-                                                current_slide.set(cur - 1);
-                                            }
-                                            schedule_save_del();
-                                        },
-                                        "×"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    button {
-                        class: "add-slide",
-                        onclick: {
-                            let mut schedule_save = schedule_save.clone();
-                            move |_| {
-                                let next_id = slides.read().iter().map(|s| s.id).max().unwrap_or(0) + 1;
-                                slides.write().push(SlideData::empty(next_id));
-                                let new_idx = slides.read().len() - 1;
-                                current_slide.set(new_idx);
-                                schedule_save();
-                            }
-                        },
-                        {crate::i18n::t("editor.slides.add_slide")}
-                    }
-                }
-
-                div {
-                    class: "slide-canvas",
-                    "data-layout": "{cur_layout}",
-                    oncontextmenu: move |evt: MouseEvent| {
-                        evt.prevent_default();
-                        let coords = evt.client_coordinates();
-                        ctx_menu.set(Some((
-                            coords.x,
-                            coords.y,
-                            vec![
-                                MenuEntry::new(crate::i18n::t("ctx.cut"), "cut"),
-                                MenuEntry::new(crate::i18n::t("ctx.copy"), "copy"),
-                                MenuEntry::new(crate::i18n::t("ctx.paste"), "paste"),
-                                MenuEntry::new(crate::i18n::t("ctx.duplicate_slide"), "duplicate-slide"),
-                                MenuEntry::new(crate::i18n::t("ctx.delete_slide"), "delete-slide"),
-                            ],
-                        )));
-                    },
-                    div {
-                        class: "slide-content",
-                        style: "background-color: {cur_bg};position:relative;",
-
-                        div {
-                            class: "slide-title",
-                            style: "font-family:{heading_font};color:{theme_color};",
-                            contenteditable: "true",
-                            oninput: {
-                                let mut schedule_save = schedule_save.clone();
-                                move |e: FormEvent| {
-                                    if let Some(s) = slides.write().get_mut(cur_idx) {
-                                        s.title = e.value();
-                                    }
-                                    schedule_save();
-                                }
-                            },
-                            "{cur_title}"
-                        }
-                        div {
-                            class: "slide-body",
-                            contenteditable: "true",
-                            oninput: {
-                                let mut schedule_save = schedule_save.clone();
-                                move |e: FormEvent| {
-                                    if let Some(s) = slides.write().get_mut(cur_idx) {
-                                        s.body = e.value();
-                                    }
-                                    schedule_save();
-                                }
-                            },
-                            "{cur_body}"
-                        }
-                        {render_slide_objects(&document_content.read(), cur_idx)}
-                    }
-                }
-
-                if *layouts_open.read() {
-                    div { class: "layouts-rail",
-                        for (kind, name_key) in [
-                            ("title-only", "editor.slides.layout.title_only"),
-                            ("title-body", "editor.slides.layout.title_body"),
-                            ("two-column", "editor.slides.layout.two_column"),
-                            ("blank", "editor.slides.layout.blank"),
-                            ("section-header", "editor.slides.layout.section_header"),
-                            ("image-title", "editor.slides.layout.image_title"),
-                        ] {
-                            {
-                                let name = crate::i18n::t(name_key);
-                                let mut schedule_save_l = schedule_save.clone();
-                                let active = cur_layout == kind;
-                                rsx! {
-                                    button {
-                                        class: if active { "layout-tile active" } else { "layout-tile" },
-                                        onclick: move |_| {
-                                            let cur = *current_slide.read();
-                                            slides.with_mut(|sl| {
-                                                if let Some(slide) = sl.get_mut(cur) {
-                                                    slide.layout = kind.to_string();
-                                                }
-                                            });
-                                            schedule_save_l();
-                                        },
-                                        div { class: "layout-tile-name", "{name}" }
-                                        div { class: "layout-tile-preview" }
-                                    }
-                                }
-                            }
-                        }
-                        button {
-                            class: "btn btn-sm",
-                            onclick: {
-                                let mut schedule_save_all = schedule_save.clone();
-                                move |_| {
-                                    let cur_layout_now = slides.read().get(*current_slide.read())
-                                        .map(|s| s.layout.clone())
-                                        .unwrap_or_else(|| "title-body".into());
-                                    slides.with_mut(|sl| {
-                                        for slide in sl.iter_mut() {
-                                            slide.layout = cur_layout_now.clone();
-                                        }
-                                    });
-                                    schedule_save_all();
-                                    layouts_open.set(false);
-                                }
-                            },
-                            {crate::i18n::t("editor.slides.apply_to_all")}
-                        }
-                    }
-                }
-
-                div { class: "properties-panel",
-                    h3 { {crate::i18n::t("editor.slides.properties")} }
-
-                    div { class: "property-group",
-                        label { "Presentation theme" }
-                        select {
-                            class: "property-select",
-                            value: "{current_theme}",
-                            onchange: {
-                                let mut schedule_save = schedule_save.clone();
-                                move |event: FormEvent| {
-                                    let canonical = serialize_slides();
-                                    document_content.set(canonical);
-                                    let mut content = document_content.read().clone();
-                                    set_presentation_theme(&mut content, &event.value());
-                                    document_content.set(content);
-                                    schedule_save();
-                                }
-                            },
-                            option { value: "Contrix Light", "Contrix Light" }
-                            option { value: "Midnight", "Midnight" }
-                            option { value: "Editorial", "Editorial" }
-                        }
-                    }
-
-                    div { class: "property-group",
-                        label { {crate::i18n::t("editor.slides.background")} }
-                        input {
-                            r#type: "color",
-                            class: "property-input",
-                            value: "{cur_bg}",
-                            oninput: {
-                                let mut schedule_save = schedule_save.clone();
-                                move |e: FormEvent| {
-                                    if let Some(s) = slides.write().get_mut(cur_idx) {
-                                        s.bg_color = e.value();
-                                    }
-                                    schedule_save();
-                                }
-                            },
-                        }
-                    }
-
-                    div { class: "property-group",
-                        label { {crate::i18n::t("editor.slides.transition")} }
-                        select {
-                            class: "property-select",
-                            value: "{cur_transition}",
-                            oninput: {
-                                let mut schedule_save = schedule_save.clone();
-                                move |e: FormEvent| {
-                                    if let Some(s) = slides.write().get_mut(cur_idx) {
-                                        s.transition = e.value();
-                                    }
-                                    schedule_save();
-                                }
-                            },
-                            option { value: "none", {crate::i18n::t("editor.slides.transition.none")} }
-                            option { value: "fade", {crate::i18n::t("editor.slides.transition.fade")} }
-                            option { value: "slide", {crate::i18n::t("editor.slides.transition.slide")} }
-                            option { value: "zoom", {crate::i18n::t("editor.slides.transition.zoom")} }
-                            option { value: "flip", {crate::i18n::t("editor.slides.transition.flip")} }
-                        }
-                    }
-
-                    div { class: "property-group",
-                        label { {crate::i18n::t("editor.slides.layout")} }
-                        select {
-                            class: "property-select",
-                            value: "{cur_layout}",
-                            onchange: {
-                                let mut schedule_save = schedule_save.clone();
-                                move |e: FormEvent| {
-                                    let kind = e.value();
-                                    let cur = *current_slide.read();
-                                    slides.with_mut(|sl| {
-                                        if let Some(slide) = sl.get_mut(cur) {
-                                            slide.layout = kind.clone();
-                                        }
-                                    });
-                                    schedule_save();
-                                }
-                            },
-                            option { value: "title-only", {crate::i18n::t("editor.slides.layout.title_only")} }
-                            option { value: "title-body", {crate::i18n::t("editor.slides.layout.title_body")} }
-                            option { value: "two-column", {crate::i18n::t("editor.slides.layout.two_column")} }
-                            option { value: "blank", {crate::i18n::t("editor.slides.layout.blank")} }
-                            option { value: "section-header", {crate::i18n::t("editor.slides.layout.section_header")} }
-                            option { value: "image-title", {crate::i18n::t("editor.slides.layout.image_title")} }
-                        }
-                    }
-
-                    div { class: "property-group",
-                        label { {crate::i18n::t("editor.slides.speaker_notes")} }
-                        textarea {
-                            class: "speaker-notes",
-                            placeholder: crate::i18n::t("editor.slides.notes_placeholder"),
-                            value: "{cur_notes}",
-                            oninput: {
-                                let mut schedule_save = schedule_save.clone();
-                                move |e: FormEvent| {
-                                    if let Some(s) = slides.write().get_mut(cur_idx) {
-                                        s.notes = e.value();
-                                    }
-                                    schedule_save();
-                                }
-                            },
-                        }
-                    }
-                }
-            }
-
-            {
-                let slide_str = crate::i18n::t("editor.slides.slide_of")
-                    .replace("{cur}", &(cur_idx + 1).to_string())
-                    .replace("{total}", &slide_count.to_string());
-                let trans_str = crate::i18n::t("editor.slides.transition_label").replace("{kind}", &cur_transition);
-                let id_str = crate::i18n::t("editor.slides.id_label").replace("{id}", &id);
-                rsx! {
-                    div { class: "status-bar",
-                        span { "{slide_str}" }
-                        span { "{trans_str}" }
-                        span { "{id_str}" }
-                    }
-                }
-            }
-
-            div {
-                id: "present-stage",
-                class: if *present_mode.read() { "present-stage active" } else { "present-stage" },
-                tabindex: "0",
-                onkeydown: move |e: KeyboardEvent| {
-                    match e.key() {
-                        Key::ArrowRight => { e.prevent_default(); go_next(); }
-                        Key::ArrowLeft => { e.prevent_default(); go_prev(); }
-                        Key::Escape => { e.prevent_default(); exit_present(); }
-                        Key::Character(ref ch) if ch == " " => { e.prevent_default(); go_next(); }
-                        _ => {}
-                    }
-                },
-                style: "background-color: {cur_bg};",
-                div { class: "present-slide-title", style: "font-family:{heading_font};color:{theme_color};", "{cur_title}" }
-                div { class: "present-slide-body", "{cur_body}" }
-                {render_slide_objects(&document_content.read(), cur_idx)}
-                div { class: "present-counter", "{cur_idx + 1} / {slide_count}" }
-            }
-
-            if *presenter_view.read() {
-                div {
-                    class: "modal-overlay",
-                    onclick: move |_| presenter_view.set(false),
-                    div {
-                        class: "modal-dialog presenter-console",
-                        onclick: move |event| event.stop_propagation(),
-                        div { class: "modal-header",
-                            h2 { "Presenter View" }
-                            button { class: "modal-close", onclick: move |_| presenter_view.set(false), "×" }
-                        }
-                        div { class: "presenter-grid",
-                            section {
-                                h3 { "Current slide" }
-                                div { class: "presenter-preview", style: "background-color: {cur_bg};",
-                                    h2 { "{cur_title}" }
-                                    p { "{cur_body}" }
-                                }
-                            }
-                            section {
-                                h3 { "Next slide" }
-                                div { class: "presenter-preview next",
-                                    h2 { "{next_title}" }
-                                    p { "{next_body}" }
-                                }
-                            }
-                        }
-                        section { class: "presenter-notes",
-                            h3 { "Speaker notes" }
-                            p { "{cur_notes}" }
-                        }
-                        div { class: "presenter-controls",
-                            button { class: "btn", onclick: move |_| go_prev(), "Previous" }
-                            span { "{cur_idx + 1} / {slide_count}" }
-                            span { "Elapsed: {elapsed_seconds}s" }
-                            button { class: "btn", onclick: move |_| {
-                                presentation_started.set(Some(js_sys::Date::now()));
-                                elapsed_seconds.set(0);
-                            }, "Reset timer" }
-                            button { class: "btn btn-primary", onclick: move |_| go_next(), "Next" }
-                        }
-                    }
-                }
-            }
-
-            CommentsPane { doc_id: id.clone(), open: comments_open }
-            VersionHistory { doc_id: id.clone(), open: versions_open }
-            ContextMenu {
-                state: ctx_menu,
-                on_command: {
-                    let bus = toast_bus;
-                    let mut schedule_save_ctx = schedule_save.clone();
-                    move |cmd: String| {
-                        match cmd.as_str() {
-                            "duplicate-slide" => {
-                                let cur = *current_slide.read();
-                                let snapshot = slides.read().get(cur).cloned();
-                                if let Some(mut s) = snapshot {
-                                    s.source = document_content.read().get("slides").and_then(|value| value.as_array())
-                                        .and_then(|items| items.iter().find(|item| item.get("id").and_then(|value| value.as_str()) == Some(s.native_id.as_str())))
-                                        .cloned().unwrap_or_else(|| s.source.clone());
-                                    s.native_id = uuid::Uuid::new_v4().to_string();
-                                    let next_id = slides.read().iter().map(|sd| sd.id).max().unwrap_or(0) + 1;
-                                    s.id = next_id;
-                                    slides.write().insert(cur + 1, s);
-                                    current_slide.set(cur + 1);
-                                    schedule_save_ctx();
-                                }
-                            }
-                            "delete-slide" => {
-                                let len = slides.read().len();
-                                if len <= 1 { return; }
-                                let cur = *current_slide.read();
-                                slides.write().remove(cur);
-                                let new_len = slides.read().len();
-                                if cur >= new_len {
-                                    current_slide.set(new_len - 1);
-                                }
-                                schedule_save_ctx();
-                            }
-                            "cut" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_x")),
-                            "copy" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_c")),
-                            "paste" => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.calc.use_ctrl_v")),
-                            other => push_toast(bus, ToastKind::Info, crate::i18n::t("editor.coming_soon").replace("{what}", other)),
-                        }
-                    }
-                },
-            }
-            crate::components::ai_assist::AiAssist { doc_id: id.clone() }
         }
     }
 }
@@ -1446,5 +481,544 @@ mod model_tests {
                 .and_then(|value| value.as_str()),
             Some("Image")
         );
+    }
+}
+
+fn edit_slide(session: &EditorSession, index: usize, edit: impl FnOnce(&mut SlideData)) {
+    let base = session.content.get();
+    let mut slides = hydrate_presentation(&base);
+    if let Some(slide) = slides.get_mut(index) {
+        edit(slide);
+    }
+    session.edit(merge_presentation(&base, &slides, &session.name.get()));
+}
+fn slide_svg(content: &Value, index: usize) -> String {
+    use base64::Engine;
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let slides = hydrate_presentation(content);
+    let Some(slide) = slides.get(index) else {
+        return String::new();
+    };
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1920\" height=\"1080\" viewBox=\"0 0 1920 1080\"><rect width=\"1920\" height=\"1080\" fill=\"{}\"/>",
+        escape(&slide.bg_color)
+    );
+    let elements = content
+        .pointer(&format!("/slides/{index}/elements"))
+        .and_then(Value::as_array);
+    for element in elements.into_iter().flatten() {
+        let num = |name: &str, default: f64| {
+            element[name]
+                .as_f64()
+                .filter(|n| n.is_finite())
+                .unwrap_or(default)
+        };
+        let (x, y, width, height) = (
+            num("x", 120.),
+            num("y", 100.),
+            num("width", 500.),
+            num("height", 300.),
+        );
+        match element["type"].as_str().unwrap_or_default() {
+            "Shape" => {
+                let fill = escape(element["fill_color"].as_str().unwrap_or("#DBEAFE"));
+                svg.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"{width}\" height=\"{height}\" fill=\"{fill}\" stroke=\"#2563eb\"/>"));
+            }
+            "TextBox" => {
+                let size = element
+                    .pointer("/content/0/font_size")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(28.0);
+                let text = text_from_element(element).unwrap_or_default();
+                for (line, text) in text.lines().enumerate() {
+                    let y = y + size + line as f64 * size * 1.3;
+                    svg.push_str(&format!("<text x=\"{x}\" y=\"{y}\" font-family=\"Arial,sans-serif\" font-size=\"{size}\" fill=\"#111827\">{}</text>",escape(text)));
+                }
+            }
+            "Image" => {
+                let url = escape(element["url"].as_str().unwrap_or_default());
+                svg.push_str(&format!("<image href=\"{url}\" x=\"{x}\" y=\"{y}\" width=\"{width}\" height=\"{height}\"/>"));
+            }
+            "Chart" => {
+                let values = element
+                    .pointer("/data/datasets/0/values")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let max = values
+                    .iter()
+                    .filter_map(Value::as_f64)
+                    .map(f64::abs)
+                    .fold(1., f64::max);
+                for (column, value) in values.iter().enumerate() {
+                    let bar = value.as_f64().unwrap_or_default().abs() / max * height;
+                    let x = x + column as f64 * width / values.len().max(1) as f64;
+                    let y = y + height - bar;
+                    let w = width / values.len().max(1) as f64 * 0.8;
+                    svg.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{bar}\" fill=\"#2563eb\"/>"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if elements.is_none_or(Vec::is_empty) {
+        svg.push_str(&format!("<text x=\"120\" y=\"160\" font-size=\"48\">{}</text><text x=\"120\" y=\"320\" font-size=\"28\">{}</text>",escape(&slide.title),escape(&slide.body)));
+    }
+    svg.push_str("</svg>");
+    format!(
+        "data:image/svg+xml;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(svg)
+    )
+}
+
+#[allow(non_snake_case)]
+pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
+    widget(move |scope| {
+        let session = EditorSession::new(scope, auth, id.clone(), "presentation");
+        let content = session.content;
+        let current = scope.cage(0usize);
+        let presenting = scope.cage(false);
+        let comments = scope.cage(false);
+        let versions = scope.cage(false);
+        let objects = scope.cage(false);
+        let titles = content.map(|value| {
+            hydrate_presentation(value)
+                .into_iter()
+                .enumerate()
+                .map(|(index, slide)| (index, slide.title))
+                .collect::<Vec<_>>()
+        });
+        let title = scope.bond(move || {
+            hydrate_presentation(&content.get())
+                .get(current.get())
+                .map(|slide| slide.title.clone())
+                .unwrap_or_default()
+        });
+        let body = scope.bond(move || {
+            hydrate_presentation(&content.get())
+                .get(current.get())
+                .map(|slide| slide.body.clone())
+                .unwrap_or_default()
+        });
+        let notes = scope.bond(move || {
+            hydrate_presentation(&content.get())
+                .get(current.get())
+                .map(|slide| slide.notes.clone())
+                .unwrap_or_default()
+        });
+        let bg = scope.bond(move || {
+            hydrate_presentation(&content.get())
+                .get(current.get())
+                .map(|slide| slide.bg_color.clone())
+                .unwrap_or_else(|| "#ffffff".into())
+        });
+        let transition = scope.bond(move || {
+            hydrate_presentation(&content.get())
+                .get(current.get())
+                .map(|slide| Some(slide.transition.clone()))
+                .unwrap_or_default()
+        });
+        let layout = scope.bond(move || {
+            hydrate_presentation(&content.get())
+                .get(current.get())
+                .map(|slide| Some(slide.layout.clone()))
+                .unwrap_or_default()
+        });
+        let preview = scope.bond(move || slide_background_source(&content.get(), current.get()));
+        let render_objects = scope.bond(move || {
+            let value = content.get();
+            let mut items = Vec::new();
+            collect_slide_objects(
+                value
+                    .pointer(&format!("/slides/{}/elements", current.get()))
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                "slide",
+                &mut items,
+            );
+            items
+        });
+        let edit_title = session.clone();
+        let edit_body = session.clone();
+        let edit_notes = session.clone();
+        let edit_bg = session.clone();
+        let edit_transition = session.clone();
+        let edit_layout = session.clone();
+        let add = session.clone();
+        let duplicate = session.clone();
+        let delete = session.clone();
+        let move_up = session.clone();
+        let move_down = session.clone();
+        let previous = session.clone();
+        let next = session.clone();
+        let object_session = session.clone();
+        let controls = row().class("editor-toolbar").fill((
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("New slide")
+                .on_press(move || {
+                    let base = add.content.get();
+                    let mut slides = hydrate_presentation(&base);
+                    slides.push(SlideData::empty(slides.len()));
+                    current.revise(|value| *value = slides.len() - 1);
+                    add.edit(merge_presentation(&base, &slides, &add.name.get()));
+                }),
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("Duplicate")
+                .on_press(move || {
+                    let base = duplicate.content.get();
+                    let mut slides = hydrate_presentation(&base);
+                    if let Some(mut slide) = slides.get(current.get()).cloned() {
+                        slide.native_id = uuid::Uuid::new_v4().to_string();
+                        let pos = current.get() + 1;
+                        slides.insert(pos, slide);
+                        current.revise(|value| *value = pos);
+                        duplicate.edit(merge_presentation(&base, &slides, &duplicate.name.get()));
+                    }
+                }),
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("Delete slide")
+                .on_press(move || {
+                    let base = delete.content.get();
+                    let mut slides = hydrate_presentation(&base);
+                    if slides.len() > 1 {
+                        slides.remove(current.get().min(slides.len() - 1));
+                        current.revise(|value| *value = (*value).min(slides.len() - 1));
+                        delete.edit(merge_presentation(&base, &slides, &delete.name.get()));
+                    }
+                }),
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("Move up")
+                .on_press(move || {
+                    let base = move_up.content.get();
+                    let mut slides = hydrate_presentation(&base);
+                    let pos = current.get();
+                    if pos > 0 && pos < slides.len() {
+                        slides.swap(pos, pos - 1);
+                        current.revise(|value| *value -= 1);
+                        move_up.edit(merge_presentation(&base, &slides, &move_up.name.get()));
+                    }
+                }),
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("Move down")
+                .on_press(move || {
+                    let base = move_down.content.get();
+                    let mut slides = hydrate_presentation(&base);
+                    let pos = current.get();
+                    if pos + 1 < slides.len() {
+                        slides.swap(pos, pos + 1);
+                        current.revise(|value| *value += 1);
+                        move_down.edit(merge_presentation(&base, &slides, &move_down.name.get()));
+                    }
+                }),
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("Present / exit")
+                .on_press(move || presenting.revise(|value| *value = !*value)),
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("Objects & theme")
+                .on_press(move || objects.revise(|value| *value = !*value)),
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("Comments")
+                .on_press(move || comments.revise(|value| *value = !*value)),
+            sapid::button()
+                .theme(crate::components::ui::theme())
+                .label("Versions")
+                .on_press(move || versions.revise(|value| *value = !*value)),
+        ));
+        col()
+            .class("slides-app editor-shell")
+            .fill((
+                editor_header(&session, "Slides", &["pptx", "pdf", "odp", "html"]),
+                controls,
+                row().class("slides-workspace").fill((
+                    col().class("slide-list").fill(each(
+                        titles,
+                        |item| item.0,
+                        move |item, _| {
+                            sapid::button()
+                                .theme(crate::components::ui::theme())
+                                .label(item.map(|item| format!("{}. {}", item.0 + 1, item.1)))
+                                .on_press(move || current.revise(|value| *value = item.get().0))
+                        },
+                    )),
+                    col()
+                        .class_fn(move || {
+                            if presenting.get() {
+                                "slide-stage presenting".into()
+                            } else {
+                                "slide-stage".into()
+                            }
+                        })
+                        .fill((
+                            view()
+                                .class("slide-canvas")
+                                .style(
+                                    Style::new()
+                                        .position(Position::Relative)
+                                        .width(Length::Percent(100.))
+                                        .overflow_x(Overflow::Hidden)
+                                        .overflow_y(Overflow::Hidden),
+                                )
+                                .fill((
+                                    image()
+                                        .source(preview)
+                                        .alt("Slide preview")
+                                        .style(Style::new().width(Length::Percent(100.))),
+                                    super::document_editor::diagram_objects(
+                                        render_objects,
+                                        slide_object_source,
+                                        1920.,
+                                        1080.,
+                                    ),
+                                )),
+                            row().fill((
+                                sapid::button()
+                                    .theme(crate::components::ui::theme())
+                                    .label("Previous")
+                                    .on_press(move || {
+                                        let count =
+                                            hydrate_presentation(&previous.content.get()).len();
+                                        current.revise(|value| {
+                                            *value =
+                                                value.saturating_sub(1).min(count.saturating_sub(1))
+                                        });
+                                    }),
+                                text().content(scope.bond(move || {
+                                    format!(
+                                        "Slide {} / {}",
+                                        current.get() + 1,
+                                        hydrate_presentation(&content.get()).len()
+                                    )
+                                })),
+                                sapid::button()
+                                    .theme(crate::components::ui::theme())
+                                    .label("Next")
+                                    .on_press(move || {
+                                        let count = hydrate_presentation(&next.content.get()).len();
+                                        current.revise(|value| {
+                                            *value = (*value + 1).min(count.saturating_sub(1))
+                                        });
+                                    }),
+                            )),
+                            sapid::text_field()
+                                .theme(crate::components::ui::theme())
+                                .name("Slide title")
+                                .value(title)
+                                .on_value_change(move |value| {
+                                    edit_slide(&edit_title, current.get(), |slide| {
+                                        slide.title = value
+                                    })
+                                }),
+                            sapid::textarea()
+                                .theme(crate::components::ui::theme())
+                                .name("Slide body")
+                                .rows(8)
+                                .value(body)
+                                .on_value_change(move |value| {
+                                    edit_slide(&edit_body, current.get(), |slide| {
+                                        slide.body = value
+                                    })
+                                }),
+                            sapid::textarea()
+                                .theme(crate::components::ui::theme())
+                                .name("Speaker notes")
+                                .rows(4)
+                                .value(notes)
+                                .on_value_change(move |value| {
+                                    edit_slide(&edit_notes, current.get(), |slide| {
+                                        slide.notes = value
+                                    })
+                                }),
+                            row().fill((
+                                sapid::text_field()
+                                    .theme(crate::components::ui::theme())
+                                    .name("Background color")
+                                    .value(bg)
+                                    .on_value_change(move |value| {
+                                        edit_slide(&edit_bg, current.get(), |slide| {
+                                            slide.bg_color = value
+                                        })
+                                    }),
+                                sapid::native_select("slide-transition")
+                                    .theme(crate::components::ui::theme())
+                                    .name("Transition")
+                                    .value(transition)
+                                    .options(
+                                        [
+                                            "none", "fade", "slide", "zoom", "flip", "push",
+                                            "dissolve",
+                                        ]
+                                        .map(|key| sapid::select_option(key, key)),
+                                    )
+                                    .on_value_change(move |value| {
+                                        if let Some(value) = value {
+                                            edit_slide(&edit_transition, current.get(), |slide| {
+                                                slide.transition = value
+                                            })
+                                        }
+                                    }),
+                                sapid::native_select("slide-layout")
+                                    .theme(crate::components::ui::theme())
+                                    .name("Slide layout")
+                                    .value(layout)
+                                    .options(
+                                        [
+                                            "title-body",
+                                            "title-slide",
+                                            "title-only",
+                                            "two-column",
+                                            "section-header",
+                                            "blank",
+                                        ]
+                                        .map(|key| sapid::select_option(key, key)),
+                                    )
+                                    .on_value_change(move |value| {
+                                        if let Some(value) = value {
+                                            edit_slide(&edit_layout, current.get(), |slide| {
+                                                slide.layout = value
+                                            })
+                                        }
+                                    }),
+                            )),
+                        )),
+                )),
+                when(objects, move || {
+                    slide_objects(object_session.clone(), current)
+                }),
+                crate::components::comments_pane::CommentsPane(
+                    scope.clone(),
+                    auth,
+                    id.clone(),
+                    comments,
+                ),
+                crate::components::version_history::VersionHistory(
+                    scope.clone(),
+                    auth,
+                    id.clone(),
+                    versions,
+                ),
+                crate::components::ai_assist::AiAssist(scope.clone(), auth, id.clone()),
+            ))
+            .show_in(scope)
+    })
+}
+
+fn slide_objects(session: EditorSession, current: Cage<usize>) -> impl Widget {
+    widget(move |scope| {
+        let source = scope.cage(String::new());
+        let url = scope.cage(String::new());
+        let status = scope.cage(String::new());
+        let shapes = session.clone();
+        let image = session.clone();
+        let chart = session.clone();
+        let animation = session.clone();
+        let apply = session.clone();
+        let theme = session.clone();
+        col().class("slide-object-panel").fill((sapid::title(2).theme(crate::components::ui::theme()).content("Objects & theme"),
+            row().fill((sapid::button().theme(crate::components::ui::theme()).label("Insert rectangle").on_press(move||{let mut value=merge_presentation(&shapes.content.get(),&hydrate_presentation(&shapes.content.get()),&shapes.name.get());append_slide_element(&mut value,current.get(),json!({"type":"Shape","id":uuid::Uuid::new_v4(),"shape_type":"Rectangle","x":300.,"y":300.,"width":400.,"height":240.,"rotation":0.,"fill_color":"#DBEAFE","stroke_color":"#2563eb","stroke_width":2.}));shapes.edit(value);}),
+                sapid::text_field().theme(crate::components::ui::theme()).name("Image URL").value(url).on_value_change(move|value|url.revise(|current|*current=value)),
+                sapid::button().theme(crate::components::ui::theme()).label("Insert image").on_press(move||{let mut value=merge_presentation(&image.content.get(),&hydrate_presentation(&image.content.get()),&image.name.get());append_slide_element(&mut value,current.get(),json!({"type":"Image","id":uuid::Uuid::new_v4(),"url":url.get(),"alt_text":"Slide image","x":300.,"y":300.,"width":640.,"height":360.,"rotation":0.}));image.edit(value);}),
+                sapid::button().theme(crate::components::ui::theme()).label("Insert chart").on_press(move||{let mut value=merge_presentation(&chart.content.get(),&hydrate_presentation(&chart.content.get()),&chart.name.get());append_slide_element(&mut value,current.get(),json!({"type":"Chart","id":uuid::Uuid::new_v4(),"chart_type":"Bar","x":800.,"y":400.,"width":800.,"height":400.,"data":{"labels":["A","B","C"],"datasets":[{"name":"Series 1","values":[12.,24.,18.],"color":"#2563eb"}]}}));chart.edit(value);}),
+                sapid::button().theme(crate::components::ui::theme()).label("Animate first object").on_press(move||{let mut value=animation.content.get();add_default_animation(&mut value,current.get());animation.edit(value);}),
+                sapid::native_select("presentation-theme").theme(crate::components::ui::theme()).name("Theme").options(["Contrix Light","Midnight","Editorial"].map(|key|sapid::select_option(key,key))).on_value_change(move|value|if let Some(value)=value{let mut next=theme.content.get();set_presentation_theme(&mut next,&value);theme.edit(next);})
+            )),
+            text().content("Canonical presentation JSON retains positions, images, charts, animations and theme metadata."),
+            sapid::textarea().theme(crate::components::ui::theme()).name("Presentation JSON").rows(10).value(source).on_value_change(move|value|source.revise(|current|*current=value)),
+            row().fill((sapid::button().theme(crate::components::ui::theme()).label("Load JSON").on_press({let session=session.clone();move||source.revise(|value|*value=serde_json::to_string_pretty(&session.content.get()).unwrap_or_default())}),
+                sapid::button().theme(crate::components::ui::theme()).label("Apply JSON").on_press(move||match serde_json::from_str::<Value>(&source.get()){Ok(value)if value["slides"].is_array()=>{current.revise(|index|*index=0);apply.edit(value);status.revise(|value|value.clear());},Ok(_)=>status.revise(|value|*value="Expected an object containing slides".into()),Err(error)=>status.revise(|value|*value=error.to_string())}))),text().content(status),
+        )).show_in(scope)
+    })
+}
+
+#[cfg(test)]
+mod glory_roundtrip_tests {
+    use super::*;
+    #[test]
+    fn editing_text_preserves_geometry_formatting_and_slide_metadata() {
+        let slides = vec![SlideData::empty(0)];
+        let mut base = merge_presentation(&json!({}), &slides, "Deck");
+        base["slides"][0]["elements"][0]["content"][0]["text"] = json!("Original");
+        base["slides"][0]["elements"][0]["content"][0]["font_family"] = json!("Georgia");
+        base["slides"][0]["elements"][0]["content"][0]["underline"] = json!(true);
+        base["slides"][0]["elements"][0]["x"] = json!(245.);
+        base["slides"][0]["elements"][0]["rotation"] = json!(15.);
+        base["slides"][0]["custom_metadata"] = json!({"preserve":"yes"});
+        base["slides"][0]["transition"] = json!({"transition_type":"Fade","duration_ms":3500});
+        let mut hydrated = hydrate_presentation(&base);
+        hydrated[0].title = "Original edited".into();
+        let saved = merge_presentation(&base, &hydrated, "Deck");
+        assert_eq!(saved["slides"][0]["elements"][0]["x"], 245.);
+        assert_eq!(saved["slides"][0]["elements"][0]["rotation"], 15.);
+        assert_eq!(
+            saved["slides"][0]["elements"][0]["content"][0]["font_family"],
+            "Georgia"
+        );
+        assert_eq!(
+            saved["slides"][0]["elements"][0]["content"][0]["underline"],
+            true
+        );
+        assert_eq!(saved["slides"][0]["transition"]["duration_ms"], 3500);
+        assert_eq!(
+            saved["slides"][0]["custom_metadata"],
+            base["slides"][0]["custom_metadata"]
+        );
+        serde_json::from_value::<contrix_doc_engine::Presentation>(saved).unwrap();
+    }
+}
+
+fn slide_background_source(content: &Value, index: usize) -> String {
+    use base64::Engine;
+    let slides = hydrate_presentation(content);
+    let color = slides
+        .get(index)
+        .map(|slide| slide.bg_color.as_str())
+        .unwrap_or("#ffffff");
+    let color = color
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;");
+    format!("data:image/svg+xml;base64,{}",base64::engine::general_purpose::STANDARD.encode(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1920\" height=\"1080\"><rect width=\"1920\" height=\"1080\" fill=\"{color}\"/></svg>")))
+}
+fn slide_object_source(element: &Value) -> String {
+    slide_svg(
+        &json!({"slides":[{"id":"6f6dd7e4-c5eb-4f12-9485-9ac0f3e25318","elements":[element],"background":{"Solid":"transparent"}}]}),
+        0,
+    )
+}
+fn collect_slide_objects(elements: &[Value], prefix: &str, result: &mut Vec<(String, Value)>) {
+    for (index, element) in elements.iter().enumerate() {
+        let key = format!(
+            "{prefix}-{}",
+            element["id"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| index.to_string())
+        );
+        if element["type"] == "Group" {
+            collect_slide_objects(
+                element["elements"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                &key,
+                result,
+            );
+        } else {
+            result.push((key, element.clone()));
+        }
     }
 }

@@ -113,7 +113,7 @@
 | 层级 | 技术 | 用途 |
 |------|------|------|
 | 后端 | [Salvo](https://salvo.rs) | 高性能 Rust Web 框架 |
-| 前端 | [Dioxus](https://dioxuslabs.com) | 全 Rust UI 框架（Web/桌面/移动端） |
+| 前端 | [Glory](https://glory.rs) + [Sapid](https://github.com/sapid-ui/sapid) | Rust 语义控件与 WebAssembly 浏览器前端 |
 | 数据库 | [SQLx](https://github.com/launchbadge/sqlx) + SQLite/PostgreSQL | 异步数据库，编译时安全检查 |
 | 认证 | JWT + Argon2 | 无状态认证 + 安全哈希 |
 | 实时协作 | WebSocket + CRDT | 低延迟协作 |
@@ -129,7 +129,7 @@ office/
 ├── crates/
 │   ├── core/                   # 共享类型、模型、DTO、配置
 │   ├── server/                 # Salvo 后端（REST API + WebSocket）
-│   ├── frontend/               # Dioxus Web 前端
+│   ├── frontend/               # Glory + Sapid Web 前端
 │   ├── doc-engine/             # 文档模型（Writer、Calc、Slides、Whiteboard）
 │   ├── collab/                 # 实时协作引擎（CRDT/OT）
 │   └── export/                 # 导出/导入（HTML、Markdown、CSV 等）
@@ -144,8 +144,10 @@ office/
 
 ### 前置要求
 
-- [Rust](https://rustup.rs/) 1.83+（2024 版本）
-- SQLite 3（通过 sqlx 内置）或 PostgreSQL 15+
+- [Rust](https://rustup.rs/) 1.94+（2024 版本）
+- SQLite 3（通过 Diesel 内置）
+- 本地 Glory：`D:/Works/glory-rs/glory`，Sapid：`D:/Works/glory-rs/sapid`
+- `wasm32-unknown-unknown` target 和与 `Cargo.lock` 版本一致的 wasm-bindgen-cli
 
 ### 快速启动
 
@@ -154,15 +156,15 @@ office/
 git clone https://github.com/contrix-org/office.git
 cd office
 
-# 运行后端服务器（默认使用 SQLite）
-cargo run -p contrix-server
-
-# 在另一个终端，运行前端开发服务器
-cd crates/frontend
-dx serve --platform web
+# 构建 Glory + Sapid 前端并启动后端
+rustup target add wasm32-unknown-unknown
+pwsh ./scripts/dev.ps1
 ```
 
-后端将在 `http://localhost:3000` 启动，前端在 `http://localhost:8080` 启动。
+打开 `http://localhost:3000`，前端和 API 使用同一源。
+编译输出、临时文件和生成的浏览器资源都位于 `D:/BuildCache/office-glory`。
+单独构建前端可运行 `pwsh ./scripts/build-frontend.ps1`，然后在仓库根目录运行
+`pwsh ./scripts/dev.ps1 -SkipFrontendBuild`。脚本会将 Cargo 依赖缓存、编译输出和编译临时文件都设到 D 盘。
 
 ### 配置
 
@@ -352,13 +354,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 3. **Middleware（中间件）** — 横切关注点（JWT 认证、日志、CORS）
 4. **State（状态）** — 共享应用状态（数据库连接池、配置、协作管理器）
 
-### 前端（Dioxus）
+### 前端（Glory + Sapid）
 
-前端是一个单页应用，包含：
+前端使用手写 Glory Widget、Cage/Bond 响应式状态和 Sapid 控件，原生链接保留文档 URL 与浏览器历史。
+每个页面管理自己的异步任务与监听器，包含：
 
 1. **Pages（页面）** — 路由级组件（首页、登录、仪表盘、Writer、Calc、Slides 等）
 2. **Components（组件）** — 可复用 UI 组件（导航栏、侧边栏、工具栏、文件列表、模态框）
 3. **State（状态）** — 应用状态管理和 API 客户端
+
+本分支跟随当前本地语义 API。Calc 用选择模式、范围输入和 Fill 操作替代宿主尚未暴露的部分鼠标手势。
+Writer 富文本编辑支持粗体、斜体、代码和链接；其他原生格式会保留，表格、列表、图片、代码块通过独立控件编辑。
+复杂幻灯片对象也可通过演示文稿 JSON 面板调整。
 
 ### 协作引擎
 
@@ -403,6 +410,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## 致谢
 
 - [Salvo](https://salvo.rs) — 快速灵活的 Rust Web 框架
-- [Dioxus](https://dioxuslabs.com) — Rust 跨平台 UI 框架
+- [Glory](https://glory.rs) + [Sapid](https://github.com/sapid-ui/sapid) — Rust 跨平台 UI 框架
 - [SQLx](https://github.com/launchbadge/sqlx) — Rust 异步 SQL 工具包
 - 灵感来源于 [Collabora Online](https://www.collaboraoffice.com/) 和 [ONLYOFFICE](https://www.onlyoffice.com/)

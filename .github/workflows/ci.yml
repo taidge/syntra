@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
@@ -25,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -35,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -46,15 +49,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace --features contrix-frontend/ssr
 
   security:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -67,30 +72,57 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p contrix-server
       - uses: actions/upload-artifact@v4
         with:
           name: contrix-server-${{ matrix.os }}
-          path: target/release/contrix-server*
+          path: ${{ env.CARGO_TARGET_DIR }}/release/contrix-server*
 
-  e2e:
-    name: E2E Tests
+  frontend:
+    name: Build Glory browser app
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-bindgen-cli --locked --version 0.2.129 --root "$RUNNER_TEMP/office-glory/tools"
+      - shell: pwsh
+        run: ./scripts/build-frontend.ps1 -BuildRoot '${{ runner.temp }}/office-glory' -Bindgen '${{ runner.temp }}/office-glory/tools/bin/wasm-bindgen'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-web
+          path: ${{ runner.temp }}/office-glory/web
+
+  e2e:
+    name: E2E Tests
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-glory
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-web
+          path: ${{ runner.temp }}/office-glory/web
       - name: Build server
         run: cargo build -p contrix-server
       - name: Start server
         run: |
           cargo run -p contrix-server &
           sleep 5
+        env:
+          CONTRIX_STATIC_DIR: ${{ runner.temp }}/office-glory/web
       - name: Install Playwright
         working-directory: e2e
         run: |
@@ -101,9 +133,14 @@ jobs:
         run: npx playwright test --grep @api
         env:
           API_URL: http://localhost:3000
+      - name: Run browser tests
+        working-directory: e2e
+        run: npx playwright test --project ui-tests
+        env:
+          API_URL: http://localhost:3000
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: playwright-report
-          path: e2e/playwright-report/
+          path: ${{ runner.temp }}/office-glory/e2e/
           retention-days: 7
