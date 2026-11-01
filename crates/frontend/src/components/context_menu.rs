@@ -31,10 +31,10 @@ pub fn ContextMenu(
     when(scope.bond(move || state.get().is_some()), move || {
         let command = command.clone();
         col().class("context-menu").fill((
-            each(
-                entries,
-                |entry| entry.command.clone(),
-                move |entry, _| {
+            each(entries)
+                .key(|entry| entry.command.clone())
+                .children(move |item_row| {
+                    let entry = item_row.value;
                     let command = command.clone();
                     sapid::button()
                         .theme(theme())
@@ -44,8 +44,7 @@ pub fn ContextMenu(
                             command(entry.get().command);
                             set(state, None);
                         })
-                },
-            ),
+                }),
             action("Close", move || set(state, None)),
         ))
     })

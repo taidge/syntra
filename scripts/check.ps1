@@ -16,7 +16,7 @@ try {
     $metadata = & cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($metadata.target_directory) -ne [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)) { throw 'Cargo target verification failed' }
     Write-Host "Verified Cargo target: $($metadata.target_directory)"
-    & cargo fmt --all -- --check
+    & cargo fmt -- --check
     if ($LASTEXITCODE -ne 0) { throw 'format check failed' }
     & cargo test --locked --workspace --features contrix-frontend/ssr
     if ($LASTEXITCODE -ne 0) { throw 'workspace tests failed' }

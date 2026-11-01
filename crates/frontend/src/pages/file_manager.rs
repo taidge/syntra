@@ -249,10 +249,11 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
         row().class("file-manager").fill((
             Sidebar(scope.clone(), auth),
             col().class("file-content").fill((
-                row().class("breadcrumb").fill(each(
-                    crumbs,
-                    |crumb| crumb.id,
-                    move |crumb, index| {
+                row()
+                    .class("breadcrumb")
+                    .fill(each(crumbs).key(|crumb| crumb.id).children(move |row| {
+                        let crumb = row.value;
+                        let index = row.index;
                         if crumb.get().id.is_none() {
                             return Box::new(
                                 link()
@@ -278,8 +279,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                             .variant(sapid::ButtonVariant::Secondary)
                             .class("breadcrumb-item"),
                         ) as Box<dyn Widget>
-                    },
-                )),
+                    })),
                 row().class("file-toolbar").fill((
                     upload,
                     action(crate::i18n::t("file_mgr.new_folder"), move || {
@@ -293,6 +293,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                         .class("file-search")
                         .name(crate::i18n::t("common.search"))
                         .purpose(Purpose::Search)
+                        .placeholder(crate::i18n::t("file_mgr.search_files"))
                         .value(query)
                         .on_value_change(move |value| set(query, value)),
                 )),
@@ -354,173 +355,170 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                 .flex_direction(FlexDirection::Column)
                         }
                     }))
-                    .fill(each(
-                        shown,
-                        |file| file.id,
-                        move |item, _| {
-                            widget(move |row_scope| {
-                                let open_weak = row_scope.downgrade();
-                                let rename_weak = row_scope.downgrade();
-                                let delete_weak = row_scope.downgrade();
-                                let filename = row_scope.bond(move || item.get().name);
-                                let metadata = row_scope.bond(move || {
-                                    let file = item.get();
-                                    format_size(file.size)
-                                });
-                                let card_style = move || {
-                                    let direction = if grid_view.get() {
-                                        FlexDirection::Column
-                                    } else {
-                                        FlexDirection::Row
-                                    };
-                                    Style::new()
-                                        .display(Display::Flex)
-                                        .flex_direction(direction)
+                    .fill(each(shown).key(|file| file.id).children(move |item_row| {
+                        let item = item_row.value;
+                        widget(move |row_scope| {
+                            let open_weak = row_scope.downgrade();
+                            let rename_weak = row_scope.downgrade();
+                            let delete_weak = row_scope.downgrade();
+                            let filename = row_scope.bond(move || item.get().name);
+                            let metadata = row_scope.bond(move || {
+                                let file = item.get();
+                                format_size(file.size)
+                            });
+                            let card_style = move || {
+                                let direction = if grid_view.get() {
+                                    FlexDirection::Column
+                                } else {
+                                    FlexDirection::Row
                                 };
-                                view()
-                                    .class(grid_view.map(|grid| {
-                                        if *grid {
-                                            "file-card".to_string()
-                                        } else {
-                                            "file-card file-row".to_string()
-                                        }
-                                    }))
-                                    .style_fn(card_style)
-                                    .fill((
-                                        col().class("file-card-body").fill((
-                                            text()
-                                                .class(row_scope.bond(move || {
-                                                    file_icon_class(&item.get()).to_owned()
-                                                }))
-                                                .content(row_scope.bond(move || {
+                                Style::new()
+                                    .display(Display::Flex)
+                                    .flex_direction(direction)
+                            };
+                            view()
+                                .class(grid_view.map(|grid| {
+                                    if *grid {
+                                        "file-card".to_string()
+                                    } else {
+                                        "file-card file-row".to_string()
+                                    }
+                                }))
+                                .style_fn(card_style)
+                                .fill((
+                                    col().class("file-card-body").fill((
+                                        text()
+                                            .class(row_scope.bond(move || {
+                                                file_icon_class(&item.get()).to_owned()
+                                            }))
+                                            .content(
+                                                row_scope.bond(move || {
                                                     file_icon(&item.get()).to_owned()
-                                                })),
-                                            sapid::button()
-                                                .theme(theme())
-                                                .variant(sapid::ButtonVariant::Secondary)
-                                                .class("file-name")
-                                                .label(filename)
-                                                .on_press(move || {
-                                                    let open_file = item.get();
-                                                    if open_file.is_folder {
-                                                        set(parent, Some(open_file.id));
-                                                        let _ = crumbs.try_revise(|items| {
-                                                            items.push(Breadcrumb {
-                                                                id: Some(open_file.id),
-                                                                name: open_file.name.clone(),
-                                                            })
-                                                        });
-                                                        if let Some(scope) = open_weak.upgrade() {
+                                                }),
+                                            ),
+                                        sapid::button()
+                                            .theme(theme())
+                                            .variant(sapid::ButtonVariant::Secondary)
+                                            .class("file-name")
+                                            .label(filename)
+                                            .on_press(move || {
+                                                let open_file = item.get();
+                                                if open_file.is_folder {
+                                                    set(parent, Some(open_file.id));
+                                                    let _ = crumbs.try_revise(|items| {
+                                                        items.push(Breadcrumb {
+                                                            id: Some(open_file.id),
+                                                            name: open_file.name.clone(),
+                                                        })
+                                                    });
+                                                    if let Some(scope) = open_weak.upgrade() {
+                                                        refresh(
+                                                            &scope, auth, parent, files, feedback,
+                                                        );
+                                                    }
+                                                } else if let Some(id) = open_file.document_id {
+                                                    go(&format!("/documents/{id}"));
+                                                } else {
+                                                    set(
+                                                        feedback,
+                                                        "This file has no editable document".into(),
+                                                    );
+                                                }
+                                            }),
+                                    )),
+                                    text().class("file-size").content(metadata),
+                                    text().class("file-modified").content(row_scope.bond(
+                                        move || {
+                                            item.get()
+                                                .updated_at
+                                                .get(..10)
+                                                .unwrap_or(&item.get().updated_at)
+                                                .to_owned()
+                                        },
+                                    )),
+                                    row().class("file-actions").fill((
+                                        action("Rename", move || {
+                                            let rename_file = item.get();
+                                            let Some(window) = web_sys::window() else {
+                                                return;
+                                            };
+                                            let Ok(Some(name)) = window
+                                                .prompt_with_message_and_default(
+                                                    "File name",
+                                                    &rename_file.name,
+                                                )
+                                            else {
+                                                return;
+                                            };
+                                            if name.trim().is_empty() {
+                                                return;
+                                            }
+                                            let Some(scope) = rename_weak.upgrade() else {
+                                                return;
+                                            };
+                                            let token = token(auth);
+                                            let path = format!("/files/{}", rename_file.id);
+                                            let weak = scope.downgrade();
+                                            let _ = scope.spawn(async move {
+                                                match state::api_put::<serde_json::Value, _>(
+                                                    &path,
+                                                    &serde_json::json!({"name":name.trim()}),
+                                                    &token,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(_) => {
+                                                        if let Some(scope) = weak.upgrade() {
                                                             refresh(
                                                                 &scope, auth, parent, files,
                                                                 feedback,
                                                             );
                                                         }
-                                                    } else if let Some(id) = open_file.document_id {
-                                                        go(&format!("/documents/{id}"));
-                                                    } else {
-                                                        set(
-                                                            feedback,
-                                                            "This file has no editable document"
-                                                                .into(),
-                                                        );
                                                     }
-                                                }),
-                                        )),
-                                        text().class("file-size").content(metadata),
-                                        text().class("file-modified").content(row_scope.bond(
-                                            move || {
-                                                item.get()
-                                                    .updated_at
-                                                    .get(..10)
-                                                    .unwrap_or(&item.get().updated_at)
-                                                    .to_owned()
-                                            },
-                                        )),
-                                        row().class("file-actions").fill((
-                                            action("Rename", move || {
-                                                let rename_file = item.get();
-                                                let Some(window) = web_sys::window() else {
-                                                    return;
-                                                };
-                                                let Ok(Some(name)) = window
-                                                    .prompt_with_message_and_default(
-                                                        "File name",
-                                                        &rename_file.name,
-                                                    )
-                                                else {
-                                                    return;
-                                                };
-                                                if name.trim().is_empty() {
-                                                    return;
+                                                    Err(error) => set(feedback, error),
                                                 }
-                                                let Some(scope) = rename_weak.upgrade() else {
-                                                    return;
-                                                };
-                                                let token = token(auth);
-                                                let path = format!("/files/{}", rename_file.id);
-                                                let weak = scope.downgrade();
-                                                let _ = scope.spawn(async move {
-                                                    match state::api_put::<serde_json::Value, _>(
-                                                        &path,
-                                                        &serde_json::json!({"name":name.trim()}),
-                                                        &token,
+                                            });
+                                        })
+                                        .variant(sapid::ButtonVariant::Secondary)
+                                        .class("file-rename"),
+                                        action("Delete", move || {
+                                            let delete_file = item.get();
+                                            if !web_sys::window().is_some_and(|window| {
+                                                window
+                                                    .confirm_with_message(
+                                                        "Move this file to trash?",
                                                     )
-                                                    .await
-                                                    {
-                                                        Ok(_) => {
-                                                            if let Some(scope) = weak.upgrade() {
-                                                                refresh(
-                                                                    &scope, auth, parent, files,
-                                                                    feedback,
-                                                                );
-                                                            }
+                                                    .unwrap_or(false)
+                                            }) {
+                                                return;
+                                            }
+                                            let Some(scope) = delete_weak.upgrade() else {
+                                                return;
+                                            };
+                                            let token = token(auth);
+                                            let path = format!("/files/{}", delete_file.id);
+                                            let weak = scope.downgrade();
+                                            let _ = scope.spawn(async move {
+                                                match state::api_delete(&path, &token).await {
+                                                    Ok(_) => {
+                                                        if let Some(scope) = weak.upgrade() {
+                                                            refresh(
+                                                                &scope, auth, parent, files,
+                                                                feedback,
+                                                            );
                                                         }
-                                                        Err(error) => set(feedback, error),
                                                     }
-                                                });
-                                            })
-                                            .variant(sapid::ButtonVariant::Secondary)
-                                            .class("file-rename"),
-                                            action("Delete", move || {
-                                                let delete_file = item.get();
-                                                if !web_sys::window().is_some_and(|window| {
-                                                    window
-                                                        .confirm_with_message(
-                                                            "Move this file to trash?",
-                                                        )
-                                                        .unwrap_or(false)
-                                                }) {
-                                                    return;
+                                                    Err(error) => set(feedback, error),
                                                 }
-                                                let Some(scope) = delete_weak.upgrade() else {
-                                                    return;
-                                                };
-                                                let token = token(auth);
-                                                let path = format!("/files/{}", delete_file.id);
-                                                let weak = scope.downgrade();
-                                                let _ = scope.spawn(async move {
-                                                    match state::api_delete(&path, &token).await {
-                                                        Ok(_) => {
-                                                            if let Some(scope) = weak.upgrade() {
-                                                                refresh(
-                                                                    &scope, auth, parent, files,
-                                                                    feedback,
-                                                                );
-                                                            }
-                                                        }
-                                                        Err(error) => set(feedback, error),
-                                                    }
-                                                });
-                                            })
-                                            .variant(sapid::ButtonVariant::Secondary)
-                                            .class("file-delete"),
-                                        )),
-                                    ))
-                                    .build(row_scope)
-                            })
-                        },
-                    )),
+                                            });
+                                        })
+                                        .variant(sapid::ButtonVariant::Secondary)
+                                        .class("file-delete"),
+                                    )),
+                                ))
+                                .build(row_scope)
+                        })
+                    })),
             )),
         )),
         folder_dialog,

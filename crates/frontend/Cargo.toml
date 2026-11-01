@@ -2,6 +2,7 @@
 name = "contrix-frontend"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Glory and Sapid WebAssembly frontend for Contrix Office"

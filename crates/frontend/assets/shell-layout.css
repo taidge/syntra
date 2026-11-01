@@ -100,6 +100,8 @@
 #main .form-select.sapid-native-select { min-height: 0; height: auto; padding: 10px 14px; font: inherit; font-size: .9375rem; line-height: normal; color: var(--text); background: var(--bg-white); border: 1px solid var(--border-dark); border-radius: var(--radius-md); }
 @media(max-width:600px) {
   .admin-filter-bar > .form-input, .admin-filter-bar > .form-select { width: 100%; }
+  .admin-activity .log-entry { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; align-items: start; }
+  .admin-activity .log-entry > * { min-width: 0; overflow-wrap: anywhere; }
 }
 .navbar .lang-toggle, .navbar .theme-toggle { font-family: Arial, sans-serif; line-height: normal; }
 .admin-user-row { padding: 8px 16px; }

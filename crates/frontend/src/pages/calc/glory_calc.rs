@@ -514,7 +514,7 @@ fn action(label: &str, callback: impl FnMut() + 'static) -> Box<dyn Widget> {
 }
 fn control(
     name: &str,
-    value: impl Into<Lotus<String>>,
+    value: impl Into<Vary<String>>,
     callback: impl FnMut(String) + 'static,
 ) -> sapid::TextField {
     sapid::text_field()
@@ -1313,13 +1313,11 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             let weak = scope.downgrade();
             move || {
                 let weak = weak.clone();
-                each(
-                    scope_bond(&weak, move || vec![ed.layout.get()]),
-                    |generation| *generation,
-                    move |_, _| {
+                each(scope_bond(&weak, move || vec![ed.layout.get()]))
+                    .key(|generation| *generation)
+                    .children(move |_| {
                         widget(move|scope| grid(scope,ed).build(scope))
-                    },
-                )
+                    })
             }
         }),
         row().class("sheet-tabs").fill((
@@ -1333,9 +1331,10 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                             .map(|(i, n)| (i, n.clone()))
                             .collect::<Vec<_>>()
                     })
-                }),
-                |(i, _)| *i,
-                move |sheet, _| {
+                }))
+                .key(|(i, _)| *i)
+                .children(move |row| {
+                    let sheet = row.value;
                     let index = sheet.get().0;
                     sapid::button().theme(crate::components::ui::theme())
                         .variant(sapid::ButtonVariant::Secondary).size(sapid::Size::Small)
@@ -1345,8 +1344,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                         ed.activate((0, 0));
                         ed.layout.revise(|v| *v += 1);
                     })
-                },
-            ),
+                }),
             sapid::button().theme(crate::components::ui::theme()).name("Add sheet").label("+").class("sheet-tab-add").on_press(move || {
                 ed.book.revise(|b| {
                     b.checkpoint();
@@ -1483,7 +1481,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
 fn scope_bond<T: 'static>(weak: &glory::ui::WeakScope, read: impl Fn() -> T + 'static) -> Bond<T> {
     weak.upgrade().expect("live workbook scope").bond(read)
 }
-fn scope_label(sheet: Cage<(usize, String)>) -> Lotus<String> {
+fn scope_label(sheet: Cage<(usize, String)>) -> Vary<String> {
     // Each owns this Cage; read through its runtime owner for live tab renames.
     sheet.map(|(_, name)| name.clone()).into()
 }

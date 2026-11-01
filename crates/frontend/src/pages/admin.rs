@@ -230,10 +230,10 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     let user_panel = when(scope.bond(move || tab.get() == "users"), move || {
         let create_weak = create_weak.clone();
         let users_weak = users_weak.clone();
-        let rows = each(
-            shown,
-            |user| user.id.clone(),
-            move |item, _| {
+        let rows = each(shown)
+            .key(|user| user.id.clone())
+            .children(move |item_row| {
+                let item = item_row.value;
                 let user = item.get();
                 let role_weak = users_weak.clone();
                 let disable_weak = users_weak.clone();
@@ -320,8 +320,7 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                         .class("table-actions")
                         .fill(disable.unstyled().class("btn btn-outline btn-sm danger")),
                 ))
-            },
-        );
+            });
         let create_submit = std::rc::Rc::new(std::cell::RefCell::new(move || {
             if password.get().len() < 8 {
                 set(feedback, crate::i18n::t("profile.password_too_short"));
@@ -392,6 +391,7 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     .unstyled()
                     .class("form-input")
                     .name(crate::i18n::t("admin.search_users"))
+                    .placeholder(crate::i18n::t("admin.search_users"))
                     .value(search)
                     .on_value_change(move |value| set(search, value)),
                 choice(
@@ -463,7 +463,8 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
             .get()
             .into_iter()
             .filter(|entry| {
-                (action_filter.get() == "all" || action_filter.get() == entry.action)
+                (action_filter.get() == "all"
+                    || entry.action.to_lowercase().contains(&action_filter.get()))
                     && format!(
                         "{} {} {} {}",
                         entry.user_id, entry.action, entry.resource_type, entry.resource_id
@@ -484,6 +485,7 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     .unstyled()
                     .class("form-input")
                     .name(crate::i18n::t("admin.search_activity"))
+                    .placeholder(crate::i18n::t("admin.search_activity"))
                     .value(activity_search)
                     .on_value_change(move |value| set(activity_search, value)),
                 choice(
@@ -500,20 +502,21 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                         .collect(),
                 ),
             )),
-            view().class("activity-log").fill(each(
-                shown_activity,
-                |entry| entry.id.clone(),
-                |entry, _| {
-                    let entry = entry.get();
-                    view().class("log-entry").fill((
-                        label(entry.created_at).class("log-time"),
-                        label(entry.user_id).class("log-user"),
-                        label(entry.action).class("log-action"),
-                        label(format!("{}/{}", entry.resource_type, entry.resource_id))
-                            .class("log-resource"),
-                    ))
-                },
-            )),
+            view().class("activity-log").fill(
+                each(shown_activity)
+                    .key(|entry| entry.id.clone())
+                    .children(move |item_row| {
+                        let entry = item_row.value;
+                        let entry = entry.get();
+                        view().class("log-entry").fill((
+                            label(entry.created_at).class("log-time"),
+                            label(entry.user_id).class("log-user"),
+                            label(entry.action).class("log-action"),
+                            label(format!("{}/{}", entry.resource_type, entry.resource_id))
+                                .class("log-resource"),
+                        ))
+                    }),
+            ),
         ))
     });
 

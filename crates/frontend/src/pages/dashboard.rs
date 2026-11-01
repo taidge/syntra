@@ -58,48 +58,45 @@ pub fn Dashboard(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 )),
         ),
     ));
-    let cards = each(
-        docs,
-        |doc| doc.id,
-        |item, _| {
-            widget(move |scope| {
-                let doc = item.get();
-                let kind = document_kind(&doc);
-                let icon = match kind {
-                    "calc" => "C",
-                    "slides" => "S",
-                    "whiteboard" => "B",
-                    _ => "W",
-                };
-                link()
-                    .class("doc-card")
-                    .target(
-                        doc.document_id
-                            .map(|id| format!("/documents/{id}"))
-                            .unwrap_or_else(|| "/files".into()),
-                    )
-                    .name(item.map(|doc| doc.name.clone()))
-                    .fill((
-                        view()
-                            .class(format!("doc-card-preview {kind}-preview"))
-                            .fill(label(icon)),
-                        view().class("doc-card-info").fill((
-                            text()
-                                .kind(TextKind::Heading(4))
-                                .content(item.map(|doc| doc.name.clone())),
-                            text()
-                                .kind(TextKind::Paragraph)
-                                .class("doc-meta")
-                                .content(item.map(|doc| {
-                                    crate::i18n::t("dashboard.modified")
-                                        .replace("{when}", &doc.updated_at)
-                                })),
-                        )),
-                    ))
-                    .build(scope)
-            })
-        },
-    );
+    let cards = each(docs).key(|doc| doc.id).children(move |item_row| {
+        let item = item_row.value;
+        widget(move |scope| {
+            let doc = item.get();
+            let kind = document_kind(&doc);
+            let icon = match kind {
+                "calc" => "C",
+                "slides" => "S",
+                "whiteboard" => "B",
+                _ => "W",
+            };
+            link()
+                .class("doc-card")
+                .target(
+                    doc.document_id
+                        .map(|id| format!("/documents/{id}"))
+                        .unwrap_or_else(|| "/files".into()),
+                )
+                .name(item.map(|doc| doc.name.clone()))
+                .fill((
+                    view()
+                        .class(format!("doc-card-preview {kind}-preview"))
+                        .fill(label(icon)),
+                    view().class("doc-card-info").fill((
+                        text()
+                            .kind(TextKind::Heading(4))
+                            .content(item.map(|doc| doc.name.clone())),
+                        text()
+                            .kind(TextKind::Paragraph)
+                            .class("doc-meta")
+                            .content(item.map(|doc| {
+                                crate::i18n::t("dashboard.modified")
+                                    .replace("{when}", &doc.updated_at)
+                            })),
+                    )),
+                ))
+                .build(scope)
+        })
+    });
     let recents = view().class("recent-documents").fill((
         text()
             .kind(TextKind::Heading(2))
@@ -143,21 +140,22 @@ pub fn Dashboard(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
         when(scope.bond(move || docs.get().is_empty()), || {
             label(crate::i18n::t("dashboard.activity_empty")).class("doc-meta")
         }),
-        view().class("activity-list").fill(each(
-            scope.bond(move || docs.get().into_iter().take(5).collect::<Vec<_>>()),
-            |doc| doc.id,
-            |item, _| {
-                view().class("activity-item").fill((
-                    view().class("activity-dot"),
-                    text().content(item.map(|doc| {
-                        crate::i18n::t("dashboard.activity_edited").replace("{name}", &doc.name)
-                    })),
-                    text().class("activity-time").content(item.map(|doc| {
-                        crate::i18n::t("dashboard.modified").replace("{when}", &doc.updated_at)
-                    })),
-                ))
-            },
-        )),
+        view().class("activity-list").fill(
+            each(scope.bond(move || docs.get().into_iter().take(5).collect::<Vec<_>>()))
+                .key(|doc| doc.id)
+                .children(move |item_row| {
+                    let item = item_row.value;
+                    view().class("activity-item").fill((
+                        view().class("activity-dot"),
+                        text().content(item.map(|doc| {
+                            crate::i18n::t("dashboard.activity_edited").replace("{name}", &doc.name)
+                        })),
+                        text().class("activity-time").content(item.map(|doc| {
+                            crate::i18n::t("dashboard.modified").replace("{when}", &doc.updated_at)
+                        })),
+                    ))
+                }),
+        ),
     ));
     view().class("app-page dashboard-page").fill((
         Navbar(scope, auth),

@@ -61,6 +61,7 @@ pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     .unstyled()
                     .class("search-input")
                     .name(crate::i18n::t("nav.search_placeholder"))
+                    .placeholder(crate::i18n::t("nav.search_placeholder"))
                     .purpose(Purpose::Search)
                     .value(query)
                     .on_value_change(move |value| set(query, value))

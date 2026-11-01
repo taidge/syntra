@@ -1168,16 +1168,13 @@ fn board_properties(session: EditorSession, selected: Cage<Option<usize>>) -> im
                 sapid::title(2)
                     .theme(crate::components::ui::theme())
                     .content("Objects & layers"),
-                each(
-                    items,
-                    |item| item.0,
-                    move |item, _| {
-                        sapid::button()
-                            .theme(crate::components::ui::theme())
-                            .label(item.map(|item| format!("{}. {}", item.0 + 1, item.1)))
-                            .on_press(move || selected.revise(|value| *value = Some(item.get().0)))
-                    },
-                ),
+                each(items).key(|item| item.0).children(move |item_row| {
+                    let item = item_row.value;
+                    sapid::button()
+                        .theme(crate::components::ui::theme())
+                        .label(item.map(|item| format!("{}. {}", item.0 + 1, item.1)))
+                        .on_press(move || selected.revise(|value| *value = Some(item.get().0)))
+                }),
                 row().fill((
                     sapid::text_field()
                         .theme(crate::components::ui::theme())
@@ -1209,65 +1206,60 @@ fn board_properties(session: EditorSession, selected: Cage<Option<usize>>) -> im
                             }
                         }),
                 )),
-                each(
-                    content.map(|value| {
-                        value["layers"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .enumerate()
-                            .map(|(index, layer)| (index, layer.clone()))
-                            .collect::<Vec<_>>()
-                    }),
-                    |item| item.0,
-                    {
-                        let session = session.clone();
-                        move |item, _| {
-                            let rename = session.clone();
-                            let visible = session.clone();
-                            let locked = session.clone();
-                            row().fill((
-                                sapid::text_field()
-                                    .theme(crate::components::ui::theme())
-                                    .name("Layer name")
-                                    .value(item.map(|item| {
-                                        item.1["name"].as_str().unwrap_or_default().to_owned()
-                                    }))
-                                    .on_commit(move |name| {
-                                        let mut value = rename.content.get();
-                                        value["layers"][item.get().0]["name"] = json!(name);
-                                        rename.edit(value);
-                                    }),
-                                sapid::checkbox()
-                                    .theme(crate::components::ui::theme())
-                                    .label("Visible")
-                                    .checked(
-                                        item.map(|item| {
-                                            item.1["visible"].as_bool().unwrap_or(true)
-                                        }),
-                                    )
-                                    .on_checked_change(move |checked| {
-                                        let mut value = visible.content.get();
-                                        value["layers"][item.get().0]["visible"] = json!(checked);
-                                        visible.edit(value);
-                                    }),
-                                sapid::checkbox()
-                                    .theme(crate::components::ui::theme())
-                                    .label("Locked")
-                                    .checked(
-                                        item.map(|item| {
-                                            item.1["locked"].as_bool().unwrap_or(false)
-                                        }),
-                                    )
-                                    .on_checked_change(move |checked| {
-                                        let mut value = locked.content.get();
-                                        value["layers"][item.get().0]["locked"] = json!(checked);
-                                        locked.edit(value);
-                                    }),
-                            ))
-                        }
-                    },
-                ),
+                each(content.map(|value| {
+                    value["layers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .enumerate()
+                        .map(|(index, layer)| (index, layer.clone()))
+                        .collect::<Vec<_>>()
+                }))
+                .key(|item| item.0)
+                .children({
+                    let session = session.clone();
+                    move |item_row| {
+                        let item = item_row.value;
+                        let rename = session.clone();
+                        let visible = session.clone();
+                        let locked = session.clone();
+                        row().fill((
+                            sapid::text_field()
+                                .theme(crate::components::ui::theme())
+                                .name("Layer name")
+                                .value(item.map(|item| {
+                                    item.1["name"].as_str().unwrap_or_default().to_owned()
+                                }))
+                                .on_commit(move |name| {
+                                    let mut value = rename.content.get();
+                                    value["layers"][item.get().0]["name"] = json!(name);
+                                    rename.edit(value);
+                                }),
+                            sapid::checkbox()
+                                .theme(crate::components::ui::theme())
+                                .label("Visible")
+                                .checked(
+                                    item.map(|item| item.1["visible"].as_bool().unwrap_or(true)),
+                                )
+                                .on_checked_change(move |checked| {
+                                    let mut value = visible.content.get();
+                                    value["layers"][item.get().0]["visible"] = json!(checked);
+                                    visible.edit(value);
+                                }),
+                            sapid::checkbox()
+                                .theme(crate::components::ui::theme())
+                                .label("Locked")
+                                .checked(
+                                    item.map(|item| item.1["locked"].as_bool().unwrap_or(false)),
+                                )
+                                .on_checked_change(move |checked| {
+                                    let mut value = locked.content.get();
+                                    value["layers"][item.get().0]["locked"] = json!(checked);
+                                    locked.edit(value);
+                                }),
+                        ))
+                    }
+                }),
             ))
             .show_in(scope)
     })

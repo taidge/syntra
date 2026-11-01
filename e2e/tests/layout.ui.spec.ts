@@ -39,10 +39,16 @@ test('account and file pages preserve their cards and fit narrow screens', async
         const card = await page.locator('.auth-card').boundingBox();
         expect(card!.width).toBeLessThanOrEqual(width);
         await expect(page.getByLabel('Email', { exact: true })).toHaveCSS('height', '42px');
+        await expect(page.getByLabel('Email', { exact: true })).toHaveAttribute('placeholder', /\S/);
+        await expect(page.getByLabel('Password', { exact: true })).toHaveAttribute('placeholder', /\S/);
       }
       if (route === 'profile') {
         await expect(page.locator('.totp-security')).toBeVisible();
         await expect(page.getByRole('button', { name: 'Verify and enable', exact: true })).toHaveCount(0);
+      }
+      if (route === 'files') {
+        await expect(page.locator('.file-search')).toHaveAttribute('placeholder', 'Search files...');
+        await expect(page.locator('.navbar-search input')).toHaveAttribute('placeholder', 'Search documents...');
       }
       await page.screenshot({ path: test.info().outputPath(`${route}-${width}.png`), fullPage: true });
     }
@@ -93,6 +99,16 @@ for (const kind of ['writer', 'calc', 'slides', 'whiteboard'] as const) {
     const mobile = await canvas.boundingBox();
     expect(mobile!.y).toBeLessThan(500);
     expect(mobile!.height).toBeGreaterThan(150);
+    if (kind === 'whiteboard') {
+      const tools = page.locator('.board-tools-strip');
+      const selector = await page.getByRole('combobox', { name: 'Drawing tool', exact: true }).boundingBox();
+      expect(selector!.width).toBeGreaterThanOrEqual(110);
+      expect(await tools.evaluate(element => element.scrollWidth)).toBeGreaterThan(390);
+      const remove = await page.getByRole('button', { name: 'Delete selected', exact: true }).boundingBox();
+      const duplicate = await page.getByRole('button', { name: 'Duplicate selected', exact: true }).boundingBox();
+      expect(remove!.width).toBeGreaterThan(80);
+      expect(duplicate!.x).toBeGreaterThanOrEqual(remove!.x + remove!.width);
+    }
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
     expect(failures).toEqual([]);
   });

@@ -654,15 +654,16 @@ fn editor_menus(
 /// load remote image resources normally. External resources inside an SVG
 /// displayed as an image are intentionally blocked by browsers.
 pub(super) fn diagram_objects(
-    items: impl Into<Lotus<Vec<(String, Value)>>>,
+    items: impl Into<Vary<Vec<(String, Value)>>>,
     vector_source: fn(&Value) -> String,
     width: f64,
     height: f64,
 ) -> impl Widget {
-    each(
-        items,
-        |item| format!("{}:{}", item.0, item.1["type"].as_str().unwrap_or_default()),
-        move |item, _| {
+    let items: Vary<Vec<(String, Value)>> = items.into();
+    each(items)
+        .key(|item| format!("{}:{}", item.0, item.1["type"].as_str().unwrap_or_default()))
+        .children(move |item_row| {
+            let item = item_row.value;
             let external = item.get().1["type"] == "Image";
             image()
                 .class(if external {
@@ -708,8 +709,7 @@ pub(super) fn diagram_objects(
                         .width(Length::Percent(w / width * 100.))
                         .height(Length::Percent(h / height * 100.))
                 }))
-        },
-    )
+        })
 }
 
 #[allow(non_snake_case)]

@@ -30,7 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: cargo fmt -- --check
 
   clippy:
     name: Clippy
@@ -91,7 +91,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install wasm-bindgen-cli --locked --version 0.2.129 --root "$RUNNER_TEMP/office-glory/tools"
+      - run: cargo install wasm-bindgen-cli --locked --version 0.2.130 --root "$RUNNER_TEMP/office-glory/tools"
       - shell: pwsh
         run: ./scripts/build-frontend.ps1 -BuildRoot '${{ runner.temp }}/office-glory' -Bindgen '${{ runner.temp }}/office-glory/tools/bin/wasm-bindgen'
       - uses: actions/upload-artifact@v4

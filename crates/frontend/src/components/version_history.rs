@@ -57,10 +57,10 @@ pub fn VersionHistory(
                 when(items.map(|items| items.is_empty()), || {
                     label(crate::i18n::t("versions.empty")).class("pane-empty")
                 }),
-                each(
-                    items,
-                    |item| item.id.clone(),
-                    move |item, _| {
+                each(items)
+                    .key(|item| item.id.clone())
+                    .children(move |item_row| {
+                        let item = item_row.value;
                         let weak = weak.clone();
                         let id = id.clone();
                         let version = item.get();
@@ -96,8 +96,7 @@ pub fn VersionHistory(
                             })
                             .class("btn btn-outline btn-sm"),
                         ))
-                    },
-                ),
+                    }),
             )),
         ))
     })

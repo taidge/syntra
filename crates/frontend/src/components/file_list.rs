@@ -6,12 +6,11 @@ pub fn FileList(
     on_open: impl Fn(FileResponse) + 'static,
 ) -> impl Widget {
     let on_open = std::rc::Rc::new(on_open);
-    col().class("file-list").fill(each(
-        files,
-        |file| file.id,
-        move |file, _| {
+    col()
+        .class("file-list")
+        .fill(each(files).key(|file| file.id).children(move |item_row| {
+            let file = item_row.value;
             let on_open = on_open.clone();
             action(file.get().name, move || on_open(file.get()))
-        },
-    ))
+        }))
 }

@@ -25,10 +25,10 @@ pub fn push_toast(bus: Cage<Vec<Toast>>, kind: ToastKind, message: impl Into<Str
 }
 #[allow(non_snake_case)]
 pub fn ToastRack(_scope: Scope, bus: Cage<Vec<Toast>>) -> impl Widget {
-    col().class("toast-rack").fill(each(
-        bus,
-        |toast| toast.id,
-        move |item, _| {
+    col()
+        .class("toast-rack")
+        .fill(each(bus).key(|toast| toast.id).children(move |item_row| {
+            let item = item_row.value;
             widget(move |scope| {
                 let toast = item.get();
                 let id = toast.id;
@@ -59,6 +59,5 @@ pub fn ToastRack(_scope: Scope, bus: Cage<Vec<Toast>>) -> impl Widget {
                     ))
                     .build(scope)
             })
-        },
-    ))
+        }))
 }

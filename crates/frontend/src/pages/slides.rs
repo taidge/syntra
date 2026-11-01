@@ -721,51 +721,48 @@ pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 row().class("slides-editor slides-workspace").fill((
                     col()
                         .class("slide-panel slide-list")
-                        .fill(each(
-                            titles,
-                            |item| item.0,
-                            move |item, _| {
-                                widget(move |scope| {
-                                    sapid::button()
-                                        .theme(crate::components::ui::theme())
-                                        .class(scope.bond(move || {
-                                            if current.get() == item.get().0 {
-                                                "slide-thumbnail slide-thumb active".into()
-                                            } else {
-                                                "slide-thumbnail slide-thumb".into()
-                                            }
-                                        }))
-                                        .name(item.map(|item| {
+                        .fill(each(titles).key(|item| item.0).children(move |item_row| {
+                            let item = item_row.value;
+                            widget(move |scope| {
+                                sapid::button()
+                                    .theme(crate::components::ui::theme())
+                                    .class(scope.bond(move || {
+                                        if current.get() == item.get().0 {
+                                            "slide-thumbnail slide-thumb active".into()
+                                        } else {
+                                            "slide-thumbnail slide-thumb".into()
+                                        }
+                                    }))
+                                    .name(
+                                        item.map(|item| {
                                             format!("Slide {}: {}", item.0 + 1, item.1)
-                                        }))
-                                        .fill((
-                                            text()
-                                                .kind(TextKind::Inline)
-                                                .class("slide-thumb-number")
-                                                .content(item.map(|item| (item.0 + 1).to_string())),
-                                            image()
-                                                .source(scope.bond(move || {
-                                                    slide_svg(&content.get(), item.get().0)
-                                                }))
-                                                .alt("Slide thumbnail"),
-                                            text()
-                                                .kind(TextKind::Inline)
-                                                .class("slide-thumb-title")
-                                                .content(item.map(|item| {
-                                                    if item.1.is_empty() {
-                                                        "Untitled slide".into()
-                                                    } else {
-                                                        item.1.clone()
-                                                    }
-                                                })),
-                                        ))
-                                        .on_press(move || {
-                                            current.revise(|value| *value = item.get().0)
-                                        })
-                                        .build(scope)
-                                })
-                            },
-                        ))
+                                        }),
+                                    )
+                                    .fill((
+                                        text()
+                                            .kind(TextKind::Inline)
+                                            .class("slide-thumb-number")
+                                            .content(item.map(|item| (item.0 + 1).to_string())),
+                                        image()
+                                            .source(scope.bond(move || {
+                                                slide_svg(&content.get(), item.get().0)
+                                            }))
+                                            .alt("Slide thumbnail"),
+                                        text()
+                                            .kind(TextKind::Inline)
+                                            .class("slide-thumb-title")
+                                            .content(item.map(|item| {
+                                                if item.1.is_empty() {
+                                                    "Untitled slide".into()
+                                                } else {
+                                                    item.1.clone()
+                                                }
+                                            })),
+                                    ))
+                                    .on_press(move || current.revise(|value| *value = item.get().0))
+                                    .build(scope)
+                            })
+                        }))
                         .fill(new_slide),
                     col()
                         .class_fn(move || {

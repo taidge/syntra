@@ -939,7 +939,8 @@ fn writer_native_blocks(session: EditorSession) -> impl Widget {
                 .map(|(index, block)| (index, block.clone()))
                 .collect::<Vec<_>>()
         });
-        each(items,|item|item.1["id"].as_str().map(str::to_owned).unwrap_or_else(||format!("block-{}",item.0)),move|item,_|{
+        each(items).key(|item|item.1["id"].as_str().map(str::to_owned).unwrap_or_else(||format!("block-{}",item.0))).children(move|item_row|{
+            let item = item_row.value;
             let session=render_session.clone();
             widget(move|scope|{
                 let initial=item.get();let kind=initial.1["type"].as_str().unwrap_or_default().to_string();

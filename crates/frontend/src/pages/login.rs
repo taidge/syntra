@@ -72,9 +72,24 @@ pub fn Login(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 .enabled(scope.bond(move || !loading.get()))
                 .on_submit(move |_| submit(&weak, auth, email, password, code, error, loading))
                 .fill((
-                    field(crate::i18n::t("auth.email"), email, Purpose::Email),
-                    field(crate::i18n::t("auth.password"), password, Purpose::Password),
-                    field(crate::i18n::t("auth.totp_code"), code, Purpose::Text),
+                    field_placeholder(
+                        crate::i18n::t("auth.email"),
+                        email,
+                        Purpose::Email,
+                        crate::i18n::t("auth.email_placeholder"),
+                    ),
+                    field_placeholder(
+                        crate::i18n::t("auth.password"),
+                        password,
+                        Purpose::Password,
+                        crate::i18n::t("auth.password_placeholder"),
+                    ),
+                    field_placeholder(
+                        crate::i18n::t("auth.totp_code"),
+                        code,
+                        Purpose::Text,
+                        crate::i18n::t("auth.totp_placeholder"),
+                    ),
                     label(crate::i18n::t("auth.totp_hint")).class("form-hint"),
                     status(error).class("form-error"),
                     sapid::submit_button()

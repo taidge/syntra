@@ -144,7 +144,7 @@ office/
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.94+ (edition 2024)
+- [Rust](https://rustup.rs/) 1.95+ (edition 2024)
 - SQLite 3 (bundled with Diesel)
 - [Git](https://git-scm.com/) to initialize the pinned [Glory](https://github.com/glory-rs/glory) and [Sapid](https://github.com/sapid-ui/sapid) source submodules
 - `wasm32-unknown-unknown` and wasm-bindgen-cli matching the version in `Cargo.lock`
@@ -361,7 +361,7 @@ cargo test -p contrix-export
 
 ```bash
 # Format code
-cargo fmt --all
+cargo fmt
 
 # Run clippy
 cargo clippy --workspace --all-targets -- -D warnings

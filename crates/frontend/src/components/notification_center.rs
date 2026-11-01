@@ -124,60 +124,62 @@ pub fn NotificationCenter(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 when(items.map(|items| items.is_empty()), || {
                     label(crate::i18n::t("notifications.empty")).class("notification-empty")
                 }),
-                col().class("notification-list").fill(each(
-                    items,
-                    |item| item.id.clone(),
-                    move |item, _| {
-                        let weak = read_weak.clone();
-                        let notification = item.get();
-                        let id = notification.id;
-                        let target = notification.link.clone();
-                        col()
-                            .class(item.map(|item| {
-                                if item.is_read {
-                                    "notification-item".to_owned()
-                                } else {
-                                    "notification-item unread".to_owned()
-                                }
-                            }))
-                            .fill((
-                                label(notification.title).class("notification-item-header"),
-                                label(notification.message).class("notification-message"),
-                                action("Open / mark read", move || {
-                                    let Some(scope) = weak.upgrade() else {
-                                        return;
-                                    };
-                                    let token = token(auth);
-                                    let id = id.clone();
-                                    let target = target.clone();
-                                    let _ = scope.spawn(async move {
-                                        match state::api_put::<serde_json::Value, _>(
-                                            &format!("/notifications/{id}/read"),
-                                            &serde_json::json!({}),
-                                            &token,
-                                        )
-                                        .await
-                                        {
-                                            Ok(_) => {
-                                                let _ = items.try_revise(|items| {
-                                                    if let Some(item) =
-                                                        items.iter_mut().find(|item| item.id == id)
-                                                    {
-                                                        item.is_read = true;
+                col().class("notification-list").fill(
+                    each(items)
+                        .key(|item| item.id.clone())
+                        .children(move |item_row| {
+                            let item = item_row.value;
+                            let weak = read_weak.clone();
+                            let notification = item.get();
+                            let id = notification.id;
+                            let target = notification.link.clone();
+                            col()
+                                .class(item.map(|item| {
+                                    if item.is_read {
+                                        "notification-item".to_owned()
+                                    } else {
+                                        "notification-item unread".to_owned()
+                                    }
+                                }))
+                                .fill((
+                                    label(notification.title).class("notification-item-header"),
+                                    label(notification.message).class("notification-message"),
+                                    action("Open / mark read", move || {
+                                        let Some(scope) = weak.upgrade() else {
+                                            return;
+                                        };
+                                        let token = token(auth);
+                                        let id = id.clone();
+                                        let target = target.clone();
+                                        let _ = scope.spawn(async move {
+                                            match state::api_put::<serde_json::Value, _>(
+                                                &format!("/notifications/{id}/read"),
+                                                &serde_json::json!({}),
+                                                &token,
+                                            )
+                                            .await
+                                            {
+                                                Ok(_) => {
+                                                    let _ = items.try_revise(|items| {
+                                                        if let Some(item) = items
+                                                            .iter_mut()
+                                                            .find(|item| item.id == id)
+                                                        {
+                                                            item.is_read = true;
+                                                        }
+                                                    });
+                                                    if let Some(target) = target {
+                                                        go(&target);
                                                     }
-                                                });
-                                                if let Some(target) = target {
-                                                    go(&target);
                                                 }
+                                                Err(error) => set(feedback, error),
                                             }
-                                            Err(error) => set(feedback, error),
-                                        }
-                                    });
-                                })
-                                .class("btn-link"),
-                            ))
-                    },
-                )),
+                                        });
+                                    })
+                                    .class("btn-link"),
+                                ))
+                        }),
+                ),
             ))
         }),
     ))

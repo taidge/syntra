@@ -123,6 +123,9 @@
 .board-tools-strip { flex-wrap: nowrap !important; overflow-x: auto; overflow-y: hidden; }
 .board-tools-strip > .drawing-toolbar, .board-tools-strip > .whiteboard-edit-toolbar { display: contents !important; }
 .board-tools-strip > * { flex-shrink: 0; }
+.board-tools-strip > .drawing-toolbar > *,
+.board-tools-strip > .whiteboard-edit-toolbar > * { flex-shrink: 0; }
+.whiteboard-app .board-tools-strip .whiteboard-tool-select { min-width: 115px; }
 .whiteboard-color-swatch { width: 28px; height: 28px; min-width: 28px; border: 1px solid var(--border); border-radius: 3px; }
 .whiteboard-color-input { width: 28px; height: 28px; min-width: 28px; gap: 0 !important; }
 .whiteboard-color-input > .sapid-color-editor, .whiteboard-color-input > .sapid-color-validation { display: none !important; }

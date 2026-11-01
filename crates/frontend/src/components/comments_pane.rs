@@ -108,10 +108,10 @@ pub fn CommentsPane(
                 when(items.map(|items| items.is_empty()), || {
                     label(crate::i18n::t("comments.empty")).class("pane-empty")
                 }),
-                each(
-                    items,
-                    |item| item.id.clone(),
-                    move |item, _| {
+                each(items)
+                    .key(|item| item.id.clone())
+                    .children(move |item_row| {
+                        let item = item_row.value;
                         let comment = item.get();
                         let parent = comment.id.clone();
                         col()
@@ -133,8 +133,7 @@ pub fn CommentsPane(
                                 action("Reply", move || set(reply, Some(parent.clone())))
                                     .class("btn-link comment-reply-btn"),
                             ))
-                    },
-                ),
+                    }),
             )),
             col().class("comments-compose").fill((
                 text().content_fn(move || {
@@ -150,18 +149,19 @@ pub fn CommentsPane(
                     .name(crate::i18n::t("comments.placeholder"))
                     .value(draft)
                     .on_value_change(move |value| set(draft, value)),
-                row().fill(each(
-                    suggestions,
-                    |name| name.clone(),
-                    move |name, _| {
-                        action(format!("@{}", name.get()), move || {
-                            let current = draft.get();
-                            if let Some(at) = current.rfind('@') {
-                                set(draft, format!("{}@{} ", &current[..at], name.get()));
-                            }
-                        })
-                    },
-                )),
+                row().fill(
+                    each(suggestions)
+                        .key(|name| name.clone())
+                        .children(move |item_row| {
+                            let name = item_row.value;
+                            action(format!("@{}", name.get()), move || {
+                                let current = draft.get();
+                                if let Some(at) = current.rfind('@') {
+                                    set(draft, format!("{}@{} ", &current[..at], name.get()));
+                                }
+                            })
+                        }),
+                ),
                 row().class("comment-compose-actions").fill((
                     when(reply.map(|reply| reply.is_some()), move || {
                         action("Cancel reply", move || set(reply, None)).class("btn-link")
