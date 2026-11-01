@@ -691,6 +691,10 @@ fn style_to_json(style: &CellStyle) -> Option<serde_json::Value> {
     obj.insert("bold".to_string(), serde_json::Value::Bool(style.bold));
     obj.insert("italic".to_string(), serde_json::Value::Bool(style.italic));
     obj.insert(
+        "underline".to_string(),
+        serde_json::Value::Bool(style.underline),
+    );
+    obj.insert(
         "font_family".to_string(),
         if !style.font_family.is_empty() {
             serde_json::Value::String(style.font_family.clone())
@@ -1573,7 +1577,7 @@ fn in_selection(cell: (u32, u32), a: (u32, u32), b: (u32, u32)) -> bool {
     cell.0 >= min_row && cell.0 <= max_row && cell.1 >= min_col && cell.1 <= max_col
 }
 
-/// Tracks an in-progress drag-to-fill gesture.
+mod fill;
 mod glory_calc;
 pub use glory_calc::Calc;
 

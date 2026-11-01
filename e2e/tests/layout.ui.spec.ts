@@ -18,7 +18,7 @@ async function expectCalcToolbarFits(page: Page) {
       box.scrollHeight - box.clientHeight, horizontalScrollbar, verticalScrollbar);
   })).toBeLessThanOrEqual(1);
 
-  const more = page.getByRole('button', { name: /^More tools \(/ });
+  const more = page.getByRole('button', { name: /More tools \(/ });
   if (await more.isVisible()) {
     await more.click();
     const overflow = page.locator('.sapid-overflow-panel');

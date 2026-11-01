@@ -4,6 +4,12 @@ use super::*;
 #[cfg(target_arch = "wasm32")]
 #[path = "cell_events.rs"]
 mod cell_events;
+#[cfg(target_arch = "wasm32")]
+#[path = "clipboard_events.rs"]
+mod clipboard_events;
+#[cfg(target_arch = "wasm32")]
+#[path = "pointer_events.rs"]
+mod pointer_events;
 
 #[derive(Clone)]
 struct Book {
@@ -142,10 +148,130 @@ struct Editor {
     filter: Cage<Option<(u32, String)>>,
     formula: Cage<String>,
     editing: Cage<Option<(usize, u32, u32)>>,
+    fill_preview: Cage<Option<MergedRange>>,
+    resize_preview: Cage<Option<(bool, u32, f64)>>,
     status: Cage<String>,
     layout: Cage<u64>,
 }
 impl Editor {
+    fn range(self) -> MergedRange {
+        MergedRange {
+            start: self.anchor.get(),
+            end: self.end.get(),
+        }
+        .normalized()
+    }
+    fn read_active(self) {
+        let si = self.sheet.get();
+        let (r, c) = self.active.get();
+        let raw = self.book.with(|b| {
+            b.snapshot
+                .cells
+                .get(&(si, r, c))
+                .cloned()
+                .unwrap_or_default()
+        });
+        self.formula.revise(|v| *v = raw);
+    }
+    fn select_range(self, range: MergedRange) {
+        if !self.finish_edit(false) {
+            return;
+        }
+        let range = range.normalized();
+        self.active.revise(|v| *v = range.start);
+        self.anchor.revise(|v| *v = range.start);
+        self.end.revise(|v| *v = range.end);
+        self.extra.revise(Vec::clear);
+        self.read_active();
+    }
+    fn select_point(self, point: (u32, u32), extend: bool, additive: bool) {
+        if !self.finish_edit(false) {
+            return;
+        }
+        if extend || self.extend.get() {
+            self.end.revise(|v| *v = point);
+        } else if additive || self.additive.get() {
+            let mut cells = self.selected();
+            if cells.contains(&point) && cells.len() > 1 {
+                cells.retain(|p| *p != point);
+            } else if !cells.contains(&point) {
+                cells.push(point);
+            }
+            let active = if cells.contains(&point) {
+                point
+            } else {
+                cells[0]
+            };
+            cells.retain(|p| *p != active);
+            self.active.revise(|v| *v = active);
+            self.anchor.revise(|v| *v = active);
+            self.end.revise(|v| *v = active);
+            self.extra.revise(|v| *v = cells);
+        } else {
+            self.activate(point);
+        }
+        self.read_active();
+    }
+    fn dimension(self, sheet: &serde_json::Value, column: bool, index: u32) -> f64 {
+        self.resize_preview
+            .get()
+            .filter(|(axis, i, _)| *axis == column && *i == index)
+            .map(|(_, _, size)| size)
+            .unwrap_or_else(|| sheet_axis_size(sheet, column, index))
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn resize_axis(self, column: bool, index: u32, size: f64) {
+        let si = self.sheet.get();
+        self.book.revise(|b| {
+            b.checkpoint();
+            b.content = b.serialize();
+            let key = if column {
+                "column_widths"
+            } else {
+                "row_heights"
+            };
+            if !b.content["sheets"][si][key].is_object() {
+                b.content["sheets"][si][key] = serde_json::json!({});
+            }
+            b.content["sheets"][si][key][index.to_string()] = serde_json::json!(size);
+        });
+    }
+    fn drag_fill(self, source: MergedRange, extent: MergedRange) -> bool {
+        let si = self.sheet.get();
+        let patch = self
+            .book
+            .with(|b| super::fill::plan_fill(&b.snapshot, si, source, extent));
+        let patch = match patch {
+            Ok(patch) => patch,
+            Err(error) => {
+                self.status.revise(|v| *v = error.to_string());
+                return false;
+            }
+        };
+        let error = self.book.with(|b| {
+            patch.changes.iter().find_map(|change| {
+                validation_error_for(
+                    &b.content,
+                    si,
+                    change.point.0,
+                    change.point.1,
+                    change.value.as_deref().unwrap_or(""),
+                )
+            })
+        });
+        if let Some(error) = error {
+            self.status.revise(|v| *v = error);
+            return false;
+        }
+        if !patch.changes.is_empty() {
+            self.book.revise(|b| {
+                b.checkpoint();
+                patch.apply_to(&mut b.snapshot);
+            });
+        }
+        self.select_range(patch.range);
+        true
+    }
     fn selected(self) -> Vec<(u32, u32)> {
         current_selection_cells(
             self.active.get(),
@@ -459,31 +585,16 @@ impl Editor {
         });
     }
     fn fill(self, down: bool) {
-        let si = self.sheet.get();
-        let range = MergedRange {
-            start: self.anchor.get(),
-            end: self.end.get(),
-        }
-        .normalized();
-        self.book.revise(|b| {
-            b.checkpoint();
-            for r in range.start.0..=range.end.0 {
-                for c in range.start.1..=range.end.1 {
-                    let source = if down {
-                        (si, range.start.0, c)
-                    } else {
-                        (si, r, range.start.1)
-                    };
-                    let key = (si, r, c);
-                    if let Some(value) = b.snapshot.cells.get(&source).cloned() {
-                        b.snapshot.cells.insert(key, value);
-                    }
-                    if let Some(style) = b.snapshot.styles.get(&source).cloned() {
-                        b.snapshot.styles.insert(key, style);
-                    }
-                }
-            }
-        });
+        let range = self.range();
+        let source = MergedRange {
+            start: range.start,
+            end: if down {
+                (range.start.0, range.end.1)
+            } else {
+                (range.end.0, range.start.1)
+            },
+        };
+        self.drag_fill(source, range);
     }
     fn metadata(self, operation: impl FnOnce(&mut serde_json::Value, usize, MergedRange)) {
         let si = self.sheet.get();
@@ -626,11 +737,73 @@ fn control(
         .on_value_change(callback)
 }
 
+#[derive(Clone, Copy)]
+enum ClipboardCommand {
+    Copy,
+    Cut,
+    Paste,
+}
+
+fn clipboard_command(
+    weak: glory::ui::WeakScope,
+    ed: Editor,
+    command: ClipboardCommand,
+) -> impl FnMut() + Clone {
+    move || {
+        let Some(scope) = weak.upgrade() else {
+            return;
+        };
+        #[cfg(target_arch = "wasm32")]
+        match command {
+            ClipboardCommand::Copy => clipboard_events::request_copy(&scope, ed, false),
+            ClipboardCommand::Cut => clipboard_events::request_copy(&scope, ed, true),
+            ClipboardCommand::Paste => clipboard_events::request_paste(&scope, ed),
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (scope, command);
+            ed.status
+                .revise(|value| *value = "System clipboard requires the browser".into());
+        }
+    }
+}
+
 fn format_control(
+    scope: &Scope,
+    ed: Editor,
     name: &str,
     default: &str,
     callback: impl FnMut(String) + 'static,
 ) -> impl Widget {
+    let field = name.to_owned();
+    let fallback = default.to_owned();
+    let value = scope.bond(move || {
+        let si = ed.sheet.get();
+        let (r, c) = ed.active.get();
+        ed.book.with(|b| {
+            let style = b
+                .snapshot
+                .styles
+                .get(&(si, r, c))
+                .cloned()
+                .unwrap_or_default();
+            let value = match field.as_str() {
+                "Font family" => style.font_family,
+                "Font size" => style.font_size,
+                "Text color (#rrggbb)" => style.text_color,
+                "Fill color (#rrggbb)" => style.fill_color,
+                "Number format" => style.number_format,
+                "Column width" => ed.dimension(&b.content["sheets"][si], true, c).to_string(),
+                "Row height" => ed.dimension(&b.content["sheets"][si], false, r).to_string(),
+                _ => String::new(),
+            };
+            if value.is_empty() {
+                fallback.clone()
+            } else {
+                value
+            }
+        })
+    });
     col()
         .class(format!(
             "calc-format-field {}",
@@ -646,7 +819,7 @@ fn format_control(
                 .theme(crate::components::ui::theme())
                 .size(sapid::Size::Small)
                 .name(name.to_owned())
-                .default_value(default)
+                .value(value)
                 .on_value_change(callback),
         ))
 }
@@ -666,11 +839,16 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         filter: scope.cage(None),
         formula: scope.cage(String::new()),
         editing: scope.cage(None),
+        fill_preview: scope.cage(None),
+        resize_preview: scope.cage(None),
         status: scope.cage("Loading document…".to_owned()),
         layout: scope.cage(0),
     };
     #[cfg(target_arch = "wasm32")]
-    cell_events::install(&scope, ed);
+    {
+        pointer_events::install(&scope, ed);
+        clipboard_events::install(&scope, ed);
+    }
     let loaded = scope.cage(false);
     let title = scope.cage("Spreadsheet".to_owned());
     let connected = scope.cage(ConnectionState::Connecting);
@@ -818,6 +996,8 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             });
         }
     });
+    #[cfg(target_arch = "wasm32")]
+    cell_events::install(&scope, ed, save.clone());
     scope.effect({
         let timer = timer.clone();
         let save = save.clone();
@@ -826,6 +1006,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             let busy = saving.get();
             timer.borrow_mut().take();
             if loaded.get() && ed.book.with(|b| b.dirty) && !busy {
+                ed.status.revise(|v| *v = "Unsaved changes".into());
                 let save = save.clone();
                 *timer.borrow_mut() = Some(Timeout::new(1500, move || save()));
             }
@@ -839,6 +1020,20 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     });
     let formula_node = scope.cage(None);
     let address = scope.cage("A1".to_owned());
+    scope.effect(move || {
+        let range = ed.range();
+        let active = ed.active.get();
+        let value = if range.start == range.end {
+            cell_ref(active.0, active.1)
+        } else {
+            format!(
+                "{}:{}",
+                cell_ref(range.start.0, range.start.1),
+                cell_ref(range.end.0, range.end.1)
+            )
+        };
+        address.revise(|v| *v = value);
+    });
     let selection = scope.cage("A1:A1".to_owned());
     let sheet_name = scope.cage("Sheet1".to_owned());
     let last_sheet_name = scope.cage(None::<(usize, String)>);
@@ -890,16 +1085,6 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             scope.bond(move || collaborators.with(|v| format!("{} collaborators", v.len()))),
         )),
     ];
-    let copy_text = scope.bond(move || {
-        let value = selection_text(ed);
-        if value.len() <= glory::render::MAX_CLIPBOARD_BYTES {
-            value
-        } else {
-            String::new()
-        }
-    });
-    let copy_enabled =
-        scope.bond(move || selection_text(ed).len() <= glory::render::MAX_CLIPBOARD_BYTES);
     let toolbar: Vec<sapid::OverflowItem> = vec![
         toolbar_action("Bold", move || ed.format(|s| s.bold = !s.bold)),
         toolbar_action("Italic", move || ed.format(|s| s.italic = !s.italic)),
@@ -941,40 +1126,18 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             });
             ed.formula.revise(String::clear);
         }),
-        sapid::overflow_item("copy-selection").content(move || {
-            sapid::copy_button()
-                .theme(crate::components::ui::theme())
-                .label("Copy selection")
-                .source(copy_text)
-                .enabled(copy_enabled)
-                .on_result(move |outcome| {
-                    clipboard.revise(|v| *v = selection_text(ed));
-                    ed.status.revise(|v| {
-                        *v = match outcome {
-                            glory::render::ClipboardOutcome::Written => "Selection copied".into(),
-                            _ => "Clipboard unavailable; use the editable selection data field"
-                                .into(),
-                        }
-                    });
-                })
-        }),
-        toolbar_action("Paste selection", move || {
-            let si = ed.sheet.get();
-            let (r, c) = ed.active.get();
-            let value = clipboard.get();
-            ed.book.revise(|b| {
-                b.checkpoint();
-                for (dr, line) in value.lines().enumerate() {
-                    for (dc, v) in line.split('\t').enumerate() {
-                        if r + (dr as u32) < NUM_ROWS && c + (dc as u32) < NUM_COLS {
-                            b.snapshot
-                                .cells
-                                .insert((si, r + dr as u32, c + dc as u32), v.into());
-                        }
-                    }
-                }
-            });
-        }),
+        toolbar_action(
+            "Copy selection",
+            clipboard_command(scope.downgrade(), ed, ClipboardCommand::Copy),
+        ),
+        toolbar_action(
+            "Cut selection",
+            clipboard_command(scope.downgrade(), ed, ClipboardCommand::Cut),
+        ),
+        toolbar_action(
+            "Paste selection",
+            clipboard_command(scope.downgrade(), ed, ClipboardCommand::Paste),
+        ),
         toolbar_action("Chart selection", move || {
             ed.metadata(|content, si, range| {
                 append_array_entry(
@@ -1006,15 +1169,21 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         }),
     ];
     let mut formats: Vec<Box<dyn Widget>> = vec![
-        Box::new(format_control("Font size", "14", move |v| {
+        Box::new(format_control(&scope, ed, "Font size", "14", move |v| {
             if v.parse::<f64>().is_ok_and(f64::is_finite) {
                 ed.format(|s| s.font_size = v.clone());
             }
         })),
-        Box::new(format_control("Font family", "sans-serif", move |v| {
-            ed.format(|s| s.font_family = v.clone())
-        })),
         Box::new(format_control(
+            &scope,
+            ed,
+            "Font family",
+            "sans-serif",
+            move |v| ed.format(|s| s.font_family = v.clone()),
+        )),
+        Box::new(format_control(
+            &scope,
+            ed,
             "Text color (#rrggbb)",
             "#172033",
             move |v| {
@@ -1024,6 +1193,8 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             },
         )),
         Box::new(format_control(
+            &scope,
+            ed,
             "Fill color (#rrggbb)",
             "#ffffff",
             move |v| {
@@ -1032,41 +1203,57 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 }
             },
         )),
-        Box::new(format_control("Number format", "general", move |v| {
-            ed.format(|s| s.number_format = v.clone())
-        })),
-        Box::new(format_control("Column width", "80", move |value| {
-            let Some(width) = value
-                .parse::<f64>()
-                .ok()
-                .filter(|v| v.is_finite() && (24.0..=800.0).contains(v))
-            else {
-                return;
-            };
-            let col = ed.active.get().1.to_string();
-            ed.metadata(|content, si, _| {
-                if !content["sheets"][si]["column_widths"].is_object() {
-                    content["sheets"][si]["column_widths"] = serde_json::json!({});
-                }
-                content["sheets"][si]["column_widths"][col] = serde_json::json!(width);
-            });
-        })),
-        Box::new(format_control("Row height", "24", move |value| {
-            let Some(height) = value
-                .parse::<f64>()
-                .ok()
-                .filter(|v| v.is_finite() && (18.0..=400.0).contains(v))
-            else {
-                return;
-            };
-            let row = ed.active.get().0.to_string();
-            ed.metadata(|content, si, _| {
-                if !content["sheets"][si]["row_heights"].is_object() {
-                    content["sheets"][si]["row_heights"] = serde_json::json!({});
-                }
-                content["sheets"][si]["row_heights"][row] = serde_json::json!(height);
-            });
-        })),
+        Box::new(format_control(
+            &scope,
+            ed,
+            "Number format",
+            "general",
+            move |v| ed.format(|s| s.number_format = v.clone()),
+        )),
+        Box::new(format_control(
+            &scope,
+            ed,
+            "Column width",
+            "80",
+            move |value| {
+                let Some(width) = value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && (24.0..=800.0).contains(v))
+                else {
+                    return;
+                };
+                let col = ed.active.get().1.to_string();
+                ed.metadata(|content, si, _| {
+                    if !content["sheets"][si]["column_widths"].is_object() {
+                        content["sheets"][si]["column_widths"] = serde_json::json!({});
+                    }
+                    content["sheets"][si]["column_widths"][col] = serde_json::json!(width);
+                });
+            },
+        )),
+        Box::new(format_control(
+            &scope,
+            ed,
+            "Row height",
+            "24",
+            move |value| {
+                let Some(height) = value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && (18.0..=400.0).contains(v))
+                else {
+                    return;
+                };
+                let row = ed.active.get().0.to_string();
+                ed.metadata(|content, si, _| {
+                    if !content["sheets"][si]["row_heights"].is_object() {
+                        content["sheets"][si]["row_heights"] = serde_json::json!({});
+                    }
+                    content["sheets"][si]["row_heights"][row] = serde_json::json!(height);
+                });
+            },
+        )),
     ];
     let extra_formats = formats.split_off(2);
     let export: Vec<Box<dyn Widget>> = ["xlsx", "csv", "pdf", "ods"]
@@ -1131,6 +1318,33 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 sapid::menu_item("redo")
                     .label(crate::i18n::t("menu.edit.redo"))
                     .on_activate(move || ed.history(true)),
+            )
+            .item(
+                sapid::menu_item("copy")
+                    .label(crate::i18n::t("menu.edit.copy"))
+                    .on_activate(clipboard_command(
+                        scope.downgrade(),
+                        ed,
+                        ClipboardCommand::Copy,
+                    )),
+            )
+            .item(
+                sapid::menu_item("cut")
+                    .label(crate::i18n::t("menu.edit.cut"))
+                    .on_activate(clipboard_command(
+                        scope.downgrade(),
+                        ed,
+                        ClipboardCommand::Cut,
+                    )),
+            )
+            .item(
+                sapid::menu_item("paste")
+                    .label(crate::i18n::t("menu.edit.paste"))
+                    .on_activate(clipboard_command(
+                        scope.downgrade(),
+                        ed,
+                        ClipboardCommand::Paste,
+                    )),
             )
             .item(
                 sapid::menu_item("clipboard")
@@ -1396,6 +1610,10 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             sapid::text_field().theme(crate::components::ui::theme()).name("Selection data (tab separated)").multiline(true).value(clipboard)
                 .on_value_change(move|value|clipboard.revise(|v|*v=value)),
             sapid::button().theme(crate::components::ui::theme()).label("Load selection data").on_press(move||clipboard.revise(|v|*v=selection_text(ed))),
+            sapid::button().theme(crate::components::ui::theme()).label("Paste selection data").on_press(move|| {
+                #[cfg(target_arch = "wasm32")]
+                clipboard_events::request_paste_text(ed, clipboard.get());
+            }),
         )),
         row().class("selection-toolbar").style(selection_open.map(|open|Style::new().display(if *open { Display::Flex } else { Display::None }))).fill((
             control("Selection range", selection, move |v| {
@@ -1438,7 +1656,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 each(scope_bond(&weak, move || vec![ed.layout.get()]))
                     .key(|generation| *generation)
                     .children(move |_| {
-                        widget(move|scope| grid(scope,ed).build(scope))
+                        widget(move|scope| grid_context(scope,ed).build(scope))
                     })
             }
         }),
@@ -1705,6 +1923,87 @@ fn cell_style(style: &CellStyle) -> Style {
     }
     out
 }
+fn grid_context(scope: &Scope, ed: Editor) -> impl Widget {
+    let mut menu = sapid::context_menu("calc-context")
+        .theme(crate::components::ui::theme())
+        .size(sapid::Size::Small)
+        .name("Cell actions")
+        .label("Cell actions")
+        .target_name("Spreadsheet actions")
+        .target(grid(scope, ed));
+    #[cfg(target_arch = "wasm32")]
+    {
+        for (key, label, cut) in [("copy", "Copy", false), ("cut", "Cut", true)] {
+            let weak = scope.downgrade();
+            menu = menu.item(sapid::menu_item(key).label(label).on_activate(move || {
+                if let Some(scope) = weak.upgrade() {
+                    clipboard_events::request_copy(&scope, ed, cut);
+                }
+            }));
+        }
+        let weak = scope.downgrade();
+        menu = menu
+            .item(
+                sapid::menu_item("paste")
+                    .label("Paste")
+                    .on_activate(move || {
+                        if let Some(scope) = weak.upgrade() {
+                            clipboard_events::request_paste(&scope, ed);
+                        }
+                    }),
+            )
+            .separator("clipboard");
+    }
+    menu = menu
+        .item(
+            sapid::menu_item("undo")
+                .label("Undo")
+                .on_activate(move || ed.history(false)),
+        )
+        .item(
+            sapid::menu_item("redo")
+                .label("Redo")
+                .on_activate(move || ed.history(true)),
+        )
+        .item(
+            sapid::menu_item("clear")
+                .label("Clear cells")
+                .on_activate(move || {
+                    let cells = ed.selected();
+                    let si = ed.sheet.get();
+                    ed.book.revise(|b| {
+                        b.checkpoint();
+                        for (r, c) in cells {
+                            b.snapshot.cells.remove(&(si, r, c));
+                        }
+                    });
+                    ed.read_active();
+                }),
+        )
+        .separator("structure")
+        .item(
+            sapid::menu_item("insert-row")
+                .label("Insert row")
+                .on_activate(move || ed.row_column(false, false)),
+        )
+        .item(
+            sapid::menu_item("insert-column")
+                .label("Insert column")
+                .on_activate(move || ed.row_column(true, false)),
+        )
+        .item(
+            sapid::menu_item("delete-row")
+                .label("Delete row")
+                .on_activate(move || ed.row_column(false, true)),
+        )
+        .item(
+            sapid::menu_item("delete-column")
+                .label("Delete column")
+                .on_activate(move || ed.row_column(true, true)),
+        );
+    view().class("calc-grid-workspace").fill(menu)
+}
+
 fn grid(scope: &Scope, ed: Editor) -> impl Widget {
     let si = ed.sheet.get();
     let ranges = ed.book.with(|b| {
@@ -1717,7 +2016,18 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
     let mut head = sapid::table_row("head").cell(
         sapid::table_header_cell("corner")
             .class("corner-cell row-header")
-            .text(""),
+            .content(move || {
+                glory::ui::button()
+                    .class("calc-grid-header calc-select-all")
+                    .name("Select all cells")
+                    .label("◢")
+                    .on(EventKind::Activate, move |_| {
+                        ed.select_range(MergedRange {
+                            start: (0, 0),
+                            end: (NUM_ROWS - 1, NUM_COLS - 1),
+                        })
+                    })
+            }),
     );
     for c in 0..NUM_COLS {
         head = head.cell(
@@ -1725,7 +2035,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                 .style(scope.bond(move || {
                     ed.book.with(|book| {
                         let sheet = &book.content["sheets"][si];
-                        let width = sheet_axis_size(sheet, true, c);
+                        let width = ed.dimension(sheet, true, c);
                         let mut style = Style::new()
                             .width(Length::Px(width))
                             .min_width(Length::Px(width));
@@ -1733,7 +2043,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                             style.position = Some(Position::Sticky);
                             style.left = Some(Length::Px(
                                 80.0 + (0..c)
-                                    .map(|prior| sheet_axis_size(sheet, true, prior))
+                                    .map(|prior| ed.dimension(sheet, true, prior))
                                     .sum::<f64>(),
                             ));
                         }
@@ -1741,7 +2051,25 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                     })
                 }))
                 .class("col-header")
-                .text(col_letter(c).to_string()),
+                .content(move || {
+                    group().fill((
+                        glory::ui::button()
+                            .class("calc-grid-header calc-column-header")
+                            .name(format!("Select column {}", col_letter(c)))
+                            .label(col_letter(c).to_string())
+                            .on(EventKind::Activate, move |_| {
+                                ed.select_range(MergedRange {
+                                    start: (0, c),
+                                    end: (NUM_ROWS - 1, c),
+                                })
+                            }),
+                        glory::ui::button()
+                            .class("calc-column-resize")
+                            .name(format!("Resize column {}", col_letter(c)))
+                            .label("")
+                            .focus(glory::render::FocusMode::Programmatic),
+                    ))
+                }),
         );
     }
     let mut nodes = HashMap::new();
@@ -1786,7 +2114,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                                             })
                                         })
                                 })
-                                .map(|prior| sheet_axis_size(sheet, false, prior))
+                                .map(|prior| ed.dimension(sheet, false, prior))
                                 .sum();
                             style.position = Some(Position::Sticky);
                             style.top = Some(Length::Px(24.0 + preceding_height));
@@ -1794,7 +2122,25 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                         style
                     })
                 }))
-                .text((r + 1).to_string()),
+                .content(move || {
+                    group().fill((
+                        glory::ui::button()
+                            .class("calc-grid-header calc-row-header")
+                            .name(format!("Select row {}", r + 1))
+                            .label((r + 1).to_string())
+                            .on(EventKind::Activate, move |_| {
+                                ed.select_range(MergedRange {
+                                    start: (r, 0),
+                                    end: (r, NUM_COLS - 1),
+                                })
+                            }),
+                        glory::ui::button()
+                            .class("calc-row-resize")
+                            .name(format!("Resize row {}", r + 1))
+                            .label("")
+                            .focus(glory::render::FocusMode::Programmatic),
+                    ))
+                }),
         );
         for c in 0..NUM_COLS {
             let merged = ranges.iter().find(|range| range.contains((r, c)));
@@ -1809,8 +2155,8 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                 .style(scope.bond(move || {
                     ed.book.with(|b| {
                         let sheet = &b.content["sheets"][si];
-                        let width = sheet_axis_size(sheet, true, c);
-                        let height = sheet_axis_size(sheet, false, r);
+                        let width = ed.dimension(sheet, true, c);
+                        let height = ed.dimension(sheet, false, r);
                         let mut style = Style::new()
                             .width(Length::Px(width))
                             .min_width(Length::Px(width))
@@ -1833,15 +2179,14 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                                             })
                                         })
                                 })
-                                .map(|prior| sheet_axis_size(sheet, false, prior))
+                                .map(|prior| ed.dimension(sheet, false, prior))
                                 .sum();
                             style.top = Some(Length::Px(24.0 + preceding_height));
                         }
                         if (c as u64) < sheet["frozen_cols"].as_u64().unwrap_or(0) {
                             style.position = Some(Position::Sticky);
-                            let preceding_width: f64 = (0..c)
-                                .map(|prior| sheet_axis_size(sheet, true, prior))
-                                .sum();
+                            let preceding_width: f64 =
+                                (0..c).map(|prior| ed.dimension(sheet, true, prior)).sum();
                             style.left = Some(Length::Px(80.0 + preceding_width));
                         }
                         style
@@ -1883,11 +2228,35 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                             }
                         )
                     });
+                    let range = ed.range();
+                    let mut edges = String::new();
+                    if selected {
+                        if r == range.start.0 {
+                            edges.push_str(" selection-top");
+                        }
+                        if r == range.end.0 {
+                            edges.push_str(" selection-bottom");
+                        }
+                        if c == range.start.1 {
+                            edges.push_str(" selection-left");
+                        }
+                        if c == range.end.1 {
+                            edges.push_str(" selection-right");
+                        }
+                    }
+                    if ed
+                        .fill_preview
+                        .get()
+                        .is_some_and(|range| range.contains((r, c)))
+                    {
+                        edges.push_str(" calc-fill-preview");
+                    }
                     format!(
-                        "cell{}{}{}",
+                        "cell{}{}{}{}",
                         if active { " active" } else { "" },
                         if selected { " selected" } else { "" },
-                        extra
+                        extra,
+                        edges
                     )
                 }))
                 .content(move || {
@@ -1912,7 +2281,18 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                     });
                     let input_name = format!("Edit {name}");
                     let name = name.clone();
-                    when(
+                    let handle_visible = scope.bond(move || {
+                        let range = ed.range();
+                        ed.extra.with(Vec::is_empty)
+                            && ed.editing.get().is_none()
+                            && range.end == (r, c)
+                            && !ed.book.with(|b| {
+                                b.snapshot.merged_cells.get(&si).is_some_and(|ranges| {
+                                    ranges.iter().any(|merged| merged.overlaps(range))
+                                })
+                            })
+                    });
+                    let content = when(
                         ed.editing.map(move |target| *target == Some((si, r, c))),
                         move || {
                             let input_name = input_name.clone();
@@ -1989,34 +2369,19 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                                 })
                             }))
                             .on(EventKind::Activate, move |_| {
-                                if !ed.finish_edit(false) {
-                                    return;
-                                }
-                                if ed.extend.get() {
-                                    ed.end.revise(|v| *v = (r, c));
-                                    ed.active.revise(|v| *v = (r, c));
-                                } else if ed.additive.get() {
-                                    let old = ed.active.get();
-                                    ed.extra.revise(|v| {
-                                        if !v.contains(&old) {
-                                            v.push(old)
-                                        }
-                                    });
-                                    ed.active.revise(|v| *v = (r, c));
-                                } else {
-                                    ed.activate((r, c));
-                                }
-                                let (row, col) = ed.active.get();
-                                let value = ed.book.with(|b| {
-                                    b.snapshot
-                                        .cells
-                                        .get(&(si, row, col))
-                                        .cloned()
-                                        .unwrap_or_default()
-                                });
-                                ed.formula.revise(|v| *v = value);
+                                ed.select_point((r, c), false, false)
                             })
-                    })
+                    });
+                    group().fill((
+                        content,
+                        when(handle_visible, || {
+                            glory::ui::button()
+                                .name("Drag to fill")
+                                .label("+")
+                                .class("calc-fill-handle")
+                                .focus(glory::render::FocusMode::Programmatic)
+                        }),
+                    ))
                 });
             if let Some(range) = merged {
                 cell = cell
@@ -2081,7 +2446,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                         let sheet = &book.content["sheets"][si];
                         let width: f64 = 80.0
                             + (0..NUM_COLS)
-                                .map(|column| sheet_axis_size(sheet, true, column))
+                                .map(|column| ed.dimension(sheet, true, column))
                                 .sum::<f64>();
                         Style::new().width(Length::Px(width))
                     })
@@ -2265,6 +2630,8 @@ mod tests {
                 filter: scope.cage(None),
                 formula: scope.cage(String::new()),
                 editing: scope.cage(None),
+                fill_preview: scope.cage(None),
+                resize_preview: scope.cage(None),
                 status: scope.cage(String::new()),
                 layout: scope.cage(0),
             };
@@ -2274,5 +2641,117 @@ mod tests {
         assert!(app.stats().nodes > 1300);
         app.clear().expect("grid disposes its Owners");
         assert_eq!(app.stats().nodes, 0);
+    }
+
+    fn fill_test_editor(scope: &Scope, book: Book) -> Editor {
+        Editor {
+            book: scope.cage(book),
+            sheet: scope.cage(0),
+            active: scope.cage((0, 0)),
+            anchor: scope.cage((0, 0)),
+            end: scope.cage((0, 0)),
+            extra: scope.cage(Vec::new()),
+            extend: scope.cage(false),
+            additive: scope.cage(false),
+            filter: scope.cage(None),
+            formula: scope.cage(String::new()),
+            editing: scope.cage(None),
+            fill_preview: scope.cage(None),
+            resize_preview: scope.cage(None),
+            status: scope.cage(String::new()),
+            layout: scope.cage(0),
+        }
+    }
+
+    #[test]
+    fn drag_fill_copies_formula_and_styles_as_one_undo_transaction() {
+        let app = App::memory();
+        app.mount(widget(move |scope| {
+            let mut book = Book {
+                content: serde_json::json!({"sheets":[{"id":"stable-sheet","name":"Sheet1","cells":[],"column_widths":{"0":125}}]}),
+                ..Default::default()
+            };
+            book.snapshot.cells.extend([
+                ((0, 0, 0), "7".into()),
+                ((0, 0, 1), "=A1+$D$1".into()),
+                ((0, 0, 3), "100".into()),
+                ((0, 1, 0), "99".into()),
+                ((0, 1, 1), "old target".into()),
+            ]);
+            let source_style = CellStyle { bold: true, fill_color: "#dbeafe".into(), ..Default::default() };
+            let formula_style = CellStyle { italic: true, align: "right".into(), ..Default::default() };
+            book.snapshot.styles.insert((0, 0, 0), source_style.clone());
+            book.snapshot.styles.insert((0, 0, 1), formula_style.clone());
+            book.snapshot.styles.insert((0, 1, 0), CellStyle { underline: true, ..Default::default() });
+            let original_snapshot = book.snapshot.clone();
+            let original_content = book.content.clone();
+            book.undo.push((original_snapshot.clone(), original_content.clone()));
+            book.redo.push((original_snapshot.clone(), original_content.clone()));
+            let ed = fill_test_editor(scope, book);
+            let source = MergedRange { start: (0, 0), end: (0, 1) };
+            let extent = MergedRange { start: (0, 0), end: (2, 1) };
+            assert!(ed.drag_fill(source, extent));
+            ed.book.with(|book| {
+                assert_eq!(book.undo.len(), 2, "one drop creates exactly one checkpoint");
+                assert!(book.redo.is_empty());
+                assert_eq!(book.snapshot.cells[&(0, 1, 0)], "7");
+                assert_eq!(book.snapshot.cells[&(0, 2, 1)], "=A3+$D$1");
+                assert_eq!(book.snapshot.styles[&(0, 2, 0)], source_style);
+                assert_eq!(book.snapshot.styles[&(0, 2, 1)], formula_style);
+                assert_eq!(book.snapshot.cells[&(0, 0, 0)], "7");
+                assert_eq!(book.snapshot.cells[&(0, 0, 1)], "=A1+$D$1");
+                assert_eq!(book.snapshot.cells[&(0, 0, 3)], "100");
+                assert!(book.dirty);
+            });
+            ed.history(false);
+            ed.book.with(|book| {
+                assert!(book.snapshot == original_snapshot, "undo restores all values and styles");
+                assert_eq!(book.content, original_content);
+                assert_eq!(book.undo.len(), 1);
+                assert_eq!(book.redo.len(), 1);
+            });
+            view().build(scope)
+        })).expect("fill transaction runs in an active editor Owner");
+        app.clear().expect("dispose test editor");
+    }
+
+    #[test]
+    fn drag_fill_validation_rejects_the_entire_batch_before_checkpointing() {
+        let app = App::memory();
+        app.mount(widget(move |scope| {
+            let mut book = Book {
+                content: serde_json::json!({"sheets":[{"id":"validated-sheet","name":"Sheet1","cells":[],"data_validations":[{
+                "range_start":{"row":2,"col":0},"range_end":{"row":2,"col":0},
+                "rule":{"WholeNumberBetween":[0,10]},"error_message":"Numbers 0 through 10 only"
+            }]}]}),
+                ..Default::default()
+            };
+            book.snapshot.cells.extend([
+                ((0, 0, 0), "text seed".into()),
+                ((0, 1, 0), "untouched first target".into()),
+                ((0, 2, 0), "5".into()),
+            ]);
+            book.snapshot.styles.insert((0, 0, 0), CellStyle { bold: true, ..Default::default() });
+            book.snapshot.styles.insert((0, 1, 0), CellStyle { italic: true, ..Default::default() });
+            let original_snapshot = book.snapshot.clone();
+            let original_content = book.content.clone();
+            let revision = book.revision;
+            let ed = fill_test_editor(scope, book);
+            assert!(!ed.drag_fill(
+                MergedRange { start: (0, 0), end: (0, 0) },
+                MergedRange { start: (0, 0), end: (3, 0) },
+            ));
+            ed.book.with(|book| {
+                assert!(book.snapshot == original_snapshot, "no earlier target or source is partially overwritten");
+                assert_eq!(book.content, original_content);
+                assert!(book.undo.is_empty());
+                assert!(book.redo.is_empty());
+                assert_eq!(book.revision, revision);
+                assert!(!book.dirty);
+            });
+            assert_eq!(ed.status.get(), "Numbers 0 through 10 only");
+            view().build(scope)
+        })).expect("validation runs in an active editor Owner");
+        app.clear().expect("dispose test editor");
     }
 }

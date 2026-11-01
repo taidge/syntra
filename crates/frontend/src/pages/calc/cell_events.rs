@@ -17,7 +17,7 @@ fn focus_cell(point: (u32, u32)) {
 fn point(element: &web_sys::Element) -> Option<(u32, u32)> {
     parse_cell_ref(&element.get_attribute("aria-label")?)
 }
-pub(super) fn install(scope: &Scope, ed: Editor) {
+pub(super) fn install(scope: &Scope, ed: Editor, save: Rc<dyn Fn()>) {
     let Some(document) = web_sys::window().and_then(|w| w.document()) else {
         return;
     };
@@ -51,6 +51,31 @@ pub(super) fn install(scope: &Scope, ed: Editor) {
     let weak = scope.downgrade();
     let key =
         Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
+            if (event.ctrl_key() || event.meta_key())
+                && event.key().eq_ignore_ascii_case("s")
+                && let Some(element) = event
+                    .target()
+                    .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                && element.closest(".calc-editor").ok().flatten().is_some()
+            {
+                event.prevent_default();
+                event.stop_propagation();
+                if let Some(input) = element.dyn_ref::<web_sys::HtmlInputElement>() {
+                    ed.formula.revise(|v| *v = input.value());
+                    if ed.editing.get().is_none()
+                        && element.get_attribute("aria-label").as_deref() == Some("Formula")
+                    {
+                        let (si, (r, c)) = (ed.sheet.get(), ed.active.get());
+                        if !ed.commit_at((si, r, c), input.value()) {
+                            return;
+                        }
+                    }
+                }
+                if ed.finish_edit(false) {
+                    save();
+                }
+                return;
+            }
             if event.is_composing() || event.ctrl_key() || event.meta_key() || event.alt_key() {
                 return;
             }

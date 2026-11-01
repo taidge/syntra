@@ -71,11 +71,43 @@ function cellAt(page: Page, row: number, col: number) {
     return page.locator('.sheet-grid tbody tr').nth(row).locator('.cell').nth(col).locator('.cell-button');
 }
 
+function namedCell(page: Page, name: string) {
+    return page.getByRole('button', { name, exact: true });
+}
+
+async function enterCell(page: Page, name: string, value: string, display = value) {
+    await namedCell(page, name).click();
+    await page.getByRole('textbox', { name: 'Formula', exact: true }).fill(value);
+    await page.getByRole('button', { name: 'Apply formula', exact: true }).click();
+    await expect(namedCell(page, name)).toHaveText(display);
+}
+
+/** Exercise physical pointer events rather than the selection or Fill buttons. */
+async function dragBetween(page: Page, source: Locator, destination: Locator) {
+    await source.scrollIntoViewIfNeeded();
+    const start = await source.boundingBox();
+    await destination.scrollIntoViewIfNeeded();
+    const end = await destination.boundingBox();
+    expect(start).not.toBeNull();
+    expect(end).not.toBeNull();
+    await page.mouse.move(start!.x + start!.width / 2, start!.y + start!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(end!.x + end!.width / 2, end!.y + end!.height / 2, { steps: 12 });
+    await page.mouse.up();
+}
+
+async function dragFillHandle(page: Page, destination: string) {
+    const handle = page.locator('.calc-fill-handle:visible');
+    await expect(handle).toHaveCount(1);
+    await dragBetween(page, handle, namedCell(page, destination));
+}
+
 /** Toolbar commands remain real buttons when moved into the overflow popover. */
 async function clickToolbarAction(page: Page, name: string) {
     const action = page.getByRole('button', { name, exact: true });
-    const more = page.getByRole('button', { name: /^More tools \(/ });
+    const more = page.getByRole('button', { name: /More tools \(/ });
     if (!await action.isVisible()) {
+        await expect(more).toBeVisible();
         await more.click();
     }
     await expect(action).toBeVisible();
@@ -142,6 +174,259 @@ test.describe('Calc page UI @ui', () => {
 
         await expect(page.locator('.cell.active')).toHaveCount(1);
         await expect(page.locator('.status-bar')).toContainText('Cell: D3');
+    });
+
+    test('mouse dragging selects a rectangle without changing its cell values', async ({ page }) => {
+        await enterCell(page, 'A1', 'First');
+        await enterCell(page, 'C3', 'Last');
+        await dragBetween(page, namedCell(page, 'A1'), namedCell(page, 'C3'));
+
+        await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(9);
+        await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('A1:C3');
+        await expect(namedCell(page, 'A1')).toHaveText('First');
+        await expect(namedCell(page, 'C3')).toHaveText('Last');
+        await page.screenshot({ path: test.info().outputPath('calc-mouse-range.png') });
+    });
+
+    test('Shift-click extends a range and Control-click adds a separate cell', async ({ page }) => {
+        await namedCell(page, 'A1').click();
+        await namedCell(page, 'C3').click({ modifiers: ['Shift'] });
+        await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(9);
+
+        await namedCell(page, 'A1').click();
+        await namedCell(page, 'C3').click({ modifiers: ['Control'] });
+        await expect(page.locator('.cell.active, .cell.selected').filter({ has: namedCell(page, 'A1') })).toHaveCount(1);
+        await expect(page.locator('.cell.active, .cell.selected').filter({ has: namedCell(page, 'C3') })).toHaveCount(1);
+        await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(2);
+    });
+
+    test('the name box and formula bar follow the selected cell', async ({ page }) => {
+        await enterCell(page, 'A2', 'Selected value');
+        await namedCell(page, 'D4').click();
+        await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('D4');
+        await expect(page.getByRole('textbox', { name: 'Formula', exact: true })).toHaveValue('');
+        await namedCell(page, 'A2').click();
+        await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('A2');
+        await expect(page.getByRole('textbox', { name: 'Formula', exact: true })).toHaveValue('Selected value');
+    });
+
+    test('dragging the fill handle repeats a value and format with one undo step and reload persistence', async ({ page, request }) => {
+        await enterCell(page, 'A1', '5');
+        await clickToolbarAction(page, 'Bold');
+        await namedCell(page, 'A1').click();
+        await dragFillHandle(page, 'A4');
+        for (const name of ['A1', 'A2', 'A3', 'A4']) {
+            await expect(namedCell(page, name)).toHaveText('5');
+            await expect(namedCell(page, name).locator('xpath=ancestor::td[1]')).toHaveClass(/cell-bold/);
+        }
+        await page.screenshot({ path: test.info().outputPath('calc-drag-fill.png') });
+        await page.keyboard.press('Control+z');
+        await expect(namedCell(page, 'A1')).toHaveText('5');
+        for (const name of ['A2', 'A3', 'A4']) {
+            await expect(namedCell(page, name)).toHaveText('');
+            await expect(namedCell(page, name).locator('xpath=ancestor::td[1]')).not.toHaveClass(/cell-bold/);
+        }
+        await namedCell(page, 'A1').click();
+        await dragFillHandle(page, 'A4');
+        await expect.poll(async () => {
+            const response = await request.get(`${API_BASE}/documents/${docId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            expect(response.ok()).toBeTruthy();
+            const cells = (await response.json()).data.content.sheets[0].cells;
+            return cells.find(([point]: [{ row: number; col: number }]) => point.row === 3 && point.col === 0)?.[1];
+        }).toMatchObject({ value: { type: 'Number', value: 5 }, format: { bold: true } });
+
+        await page.reload();
+        await expect(namedCell(page, 'A4')).toHaveText('5');
+        await expect(namedCell(page, 'A4').locator('xpath=ancestor::td[1]')).toHaveClass(/cell-bold/);
+    });
+
+    test('dragging a two-cell numeric series extends it down and up', async ({ page }) => {
+        await enterCell(page, 'A1', '1');
+        await enterCell(page, 'A2', '2');
+        await dragBetween(page, namedCell(page, 'A1'), namedCell(page, 'A2'));
+        await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(2);
+        await dragFillHandle(page, 'A5');
+        for (let row = 1; row <= 5; row++) await expect(namedCell(page, `A${row}`)).toHaveText(String(row));
+
+        await enterCell(page, 'C3', '3');
+        await enterCell(page, 'C4', '4');
+        await dragBetween(page, namedCell(page, 'C3'), namedCell(page, 'C4'));
+        await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(2);
+        await dragFillHandle(page, 'C1');
+        for (let row = 1; row <= 4; row++) await expect(namedCell(page, `C${row}`)).toHaveText(String(row));
+    });
+
+    test('drag filling formulas adjusts relative references and preserves absolute ones', async ({ page, request }) => {
+        await enterCell(page, 'A1', '1');
+        await enterCell(page, 'A2', '2');
+        await enterCell(page, 'A3', '3');
+        await enterCell(page, 'D1', '10');
+        await enterCell(page, 'B1', '=A1+$D$1', '11');
+        await namedCell(page, 'B1').click();
+        await dragFillHandle(page, 'B3');
+        await expect(namedCell(page, 'B2')).toHaveText('12');
+        await expect(namedCell(page, 'B3')).toHaveText('13');
+        await namedCell(page, 'B3').click();
+        await expect(page.getByRole('textbox', { name: 'Formula', exact: true })).toHaveValue('=A3+$D$1');
+        await page.keyboard.press('Control+z');
+        await expect(namedCell(page, 'B2')).toHaveText('');
+        await expect(namedCell(page, 'B3')).toHaveText('');
+        await expect(namedCell(page, 'B1')).toHaveText('11');
+        await namedCell(page, 'B1').click();
+        await dragFillHandle(page, 'B3');
+        await expect.poll(async () => {
+            const response = await request.get(`${API_BASE}/documents/${docId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const cells = (await response.json()).data.content.sheets[0].cells;
+            return cells.find(([point]: [{ row: number; col: number }]) => point.row === 2 && point.col === 1)?.[1]?.formula;
+        }).toBe('=A3+$D$1');
+        await page.reload();
+        await expect(namedCell(page, 'B3')).toHaveText('13');
+    });
+
+    test('column and row headers select their complete ranges', async ({ page }) => {
+        await page.locator('.col-header').nth(1).click();
+        await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(50);
+        await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('B1:B50');
+        await page.locator('tbody .row-header').nth(1).click();
+        await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(26);
+        await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('A2:Z2');
+    });
+
+    test('header edge dragging resizes a column and row and saves their dimensions', async ({ page, request }) => {
+        const column = page.locator('.col-header').first();
+        const row = page.locator('tbody .row-header').first();
+        const initialWidth = (await column.boundingBox())!.width;
+        const initialHeight = (await row.boundingBox())!.height;
+        const columnHandle = await page.locator('.calc-column-resize').first().boundingBox();
+        expect(columnHandle).not.toBeNull();
+        await page.mouse.move(columnHandle!.x + columnHandle!.width / 2, columnHandle!.y + columnHandle!.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(columnHandle!.x + columnHandle!.width / 2 + 48, columnHandle!.y + columnHandle!.height / 2, { steps: 10 });
+        await page.mouse.up();
+        await expect.poll(async () => (await column.boundingBox())!.width).toBeCloseTo(initialWidth + 48, 0);
+        const rowHandle = await page.locator('.calc-row-resize').first().boundingBox();
+        expect(rowHandle).not.toBeNull();
+        await page.mouse.move(rowHandle!.x + rowHandle!.width / 2, rowHandle!.y + rowHandle!.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(rowHandle!.x + rowHandle!.width / 2, rowHandle!.y + rowHandle!.height / 2 + 20, { steps: 10 });
+        await page.mouse.up();
+        await expect.poll(async () => (await row.boundingBox())!.height).toBeCloseTo(initialHeight + 20, 0);
+        await expect.poll(async () => {
+            const response = await request.get(`${API_BASE}/documents/${docId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const sheet = (await response.json()).data.content.sheets[0];
+            return [sheet.column_widths['0'], sheet.row_heights['0']];
+        }).toEqual([initialWidth + 48, initialHeight + 20]);
+        await page.reload();
+        await expect.poll(async () => (await column.boundingBox())?.width).toBeCloseTo(initialWidth + 48, 0);
+        await expect.poll(async () => (await row.boundingBox())?.height).toBeCloseTo(initialHeight + 20, 0);
+    });
+
+    test('right-click opens cell commands for the clicked cell and Escape closes them', async ({ page }) => {
+        await enterCell(page, 'A1', 'Context target');
+        await namedCell(page, 'C3').click();
+        await namedCell(page, 'A1').click({ button: 'right' });
+        const menu = page.getByRole('menu');
+        await expect(menu).toBeVisible();
+        await expect(menu.getByRole('menuitem', { name: 'Copy', exact: true })).toBeVisible();
+        await expect(menu.getByRole('menuitem', { name: 'Paste', exact: true })).toBeVisible();
+        await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('A1');
+        await expect(page.getByRole('textbox', { name: 'Formula', exact: true })).toHaveValue('Context target');
+        await page.screenshot({ path: test.info().outputPath('calc-cell-context-menu.png') });
+        await page.keyboard.press('Escape');
+        await expect(menu).toBeHidden();
+    });
+
+    test('system clipboard supports table paste, range copy, cut and separate undo steps', async ({ page, context }) => {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: APP_BASE });
+        const previousClipboard = await page.evaluate(() => navigator.clipboard.readText());
+        try {
+            await page.evaluate(() => navigator.clipboard.writeText('alpha\t1\nbeta\t2'));
+            await namedCell(page, 'A1').click();
+            await page.keyboard.press('Control+v');
+            for (const [name, value] of [['A1', 'alpha'], ['B1', '1'], ['A2', 'beta'], ['B2', '2']]) {
+                await expect(namedCell(page, name)).toHaveText(value);
+            }
+
+            await dragBetween(page, namedCell(page, 'A1'), namedCell(page, 'B2'));
+            await page.keyboard.press('Control+c');
+            await expect.poll(async () => (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n'))
+                .toBe('alpha\t1\nbeta\t2');
+            await page.keyboard.press('Control+x');
+            for (const name of ['A1', 'B1', 'A2', 'B2']) await expect(namedCell(page, name)).toHaveText('');
+            await namedCell(page, 'D1').click();
+            await page.keyboard.press('Control+v');
+            for (const [name, value] of [['D1', 'alpha'], ['E1', '1'], ['D2', 'beta'], ['E2', '2']]) {
+                await expect(namedCell(page, name)).toHaveText(value);
+            }
+
+            await page.keyboard.press('Control+z');
+            for (const name of ['D1', 'E1', 'D2', 'E2', 'A1', 'B1', 'A2', 'B2']) {
+                await expect(namedCell(page, name)).toHaveText('');
+            }
+            await page.keyboard.press('Control+z');
+            await expect(namedCell(page, 'A1')).toHaveText('alpha');
+            await expect(namedCell(page, 'B2')).toHaveText('2');
+            await expect(namedCell(page, 'D1')).toHaveText('');
+        } finally {
+            await page.evaluate(value => navigator.clipboard.writeText(value), previousClipboard);
+        }
+    });
+
+    test('Edit menu and overflow toolbar use the operating system clipboard', async ({ page, context }) => {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: APP_BASE });
+        const previousClipboard = await page.evaluate(() => navigator.clipboard.readText());
+        try {
+            await enterCell(page, 'A1', 'Menu source');
+            await page.getByRole('button', { name: 'Edit', exact: true }).click();
+            await page.getByRole('menuitem', { name: 'Copy', exact: true }).click();
+            await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Menu source');
+            await namedCell(page, 'D4').click();
+            await page.getByRole('button', { name: 'Edit', exact: true }).click();
+            await page.getByRole('menuitem', { name: 'Paste', exact: true }).click();
+            await expect(namedCell(page, 'D4')).toHaveText('Menu source');
+
+            await enterCell(page, 'A2', 'Toolbar source');
+            await clickToolbarAction(page, 'Copy selection');
+            await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Toolbar source');
+            await namedCell(page, 'E6').click();
+            await clickToolbarAction(page, 'Paste selection');
+            await expect(namedCell(page, 'E6')).toHaveText('Toolbar source');
+        } finally {
+            await page.evaluate(value => navigator.clipboard.writeText(value), previousClipboard);
+        }
+    });
+
+    test('font settings and underline survive Control+S from inline editing and reload', async ({ page, request }) => {
+        await namedCell(page, 'A1').click();
+        await page.getByRole('textbox', { name: 'Font family', exact: true }).fill('Arial');
+        await page.getByRole('textbox', { name: 'Font size', exact: true }).fill('18');
+        await clickToolbarAction(page, 'Underline');
+        await namedCell(page, 'A1').dblclick();
+        const editor = page.getByRole('textbox', { name: 'Edit A1', exact: true });
+        await expect(editor).toBeFocused();
+        await editor.fill('Saved via shortcut');
+        await page.keyboard.press('Control+s');
+        await expect(editor).toBeHidden();
+        await expect(namedCell(page, 'A1')).toHaveText('Saved via shortcut');
+        await expect.poll(async () => {
+            const response = await request.get(`${API_BASE}/documents/${docId}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            expect(response.ok()).toBeTruthy();
+            return (await response.json()).data.content.sheets[0].cells[0]?.[1];
+        }).toMatchObject({ value: { value: 'Saved via shortcut' },
+            format: { font_family: 'Arial', font_size: 18, underline: true } });
+        await page.reload();
+        await expect(namedCell(page, 'A1')).toHaveText('Saved via shortcut');
+        await expect(namedCell(page, 'A1').locator('xpath=ancestor::td[1]')).toHaveClass(/cell-underline/);
+        await expect(page.getByRole('textbox', { name: 'Font family', exact: true })).toHaveValue('Arial');
+        await expect(page.getByRole('textbox', { name: 'Font size', exact: true })).toHaveValue('18');
     });
 
     test('selecting a cell allows its formula editor to receive focus', async ({ page }) => {
