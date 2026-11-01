@@ -90,3 +90,10 @@ impl From<diesel::result::Error> for AppError {
         AppError::Database(e.to_string())
     }
 }
+
+#[cfg(feature = "async-db")]
+impl From<horme::Error> for AppError {
+    fn from(error: horme::Error) -> Self {
+        Self::Database(error.to_string())
+    }
+}

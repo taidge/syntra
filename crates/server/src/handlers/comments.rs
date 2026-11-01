@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -14,14 +16,14 @@ use crate::middleware::auth::get_user_id;
 
 /// Authorize the caller for `required_role` on the document, rendering the
 /// appropriate error response and returning `false` when access is denied.
-fn ensure_document_access(
-    conn: &mut diesel::SqliteConnection,
+async fn ensure_document_access(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     document_id: &str,
     user_id: &str,
     required_role: &str,
     res: &mut Response,
 ) -> bool {
-    match load_accessible_document(conn, document_id, user_id, required_role) {
+    match load_accessible_document(conn, document_id, user_id, required_role).await {
         Ok(Some(_)) => true,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -74,7 +76,7 @@ pub async fn list_comments(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res) {
+    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res).await {
         return;
     }
 
@@ -110,6 +112,7 @@ pub async fn list_comments(req: &mut Request, depot: &mut Depot, res: &mut Respo
             String,
             String,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let comments: Vec<CommentResponse> = rows
@@ -195,7 +198,7 @@ pub async fn create_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
         }
     };
 
-    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res) {
+    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res).await {
         return;
     }
 
@@ -214,6 +217,7 @@ pub async fn create_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
     if let Err(e) = diesel::insert_into(c::comments)
         .values(&new_comment)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -233,7 +237,8 @@ pub async fn create_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
             "parent_id": body.parent_id.map(|p| p.to_string()),
             "created_at": now.to_rfc3339(),
         }),
-    );
+    )
+    .await;
 
     {
         use contrix_core::schema::documents::dsl as d;
@@ -243,6 +248,7 @@ pub async fn create_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
             .filter(d::id.eq(&doc_id_param))
             .select(f::owner_id)
             .first::<String>(&mut conn)
+            .await
             .optional()
             .unwrap_or(None);
         if let Some(owner_id) = owner
@@ -266,6 +272,7 @@ pub async fn create_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(u::id.eq(&uid))
         .select((u::username, u::display_name, u::avatar_url))
         .first::<(String, Option<String>, Option<String>)>(&mut conn)
+        .await
         .unwrap_or(("unknown".to_string(), None, None));
 
     let resp = CommentResponse {
@@ -345,6 +352,7 @@ pub async fn update_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
         c::updated_at.eq(now.to_rfc3339()),
     ))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -404,6 +412,7 @@ pub async fn delete_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
             .filter(c::user_id.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -464,6 +473,7 @@ pub async fn resolve_comment(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(c::id.eq(&comment_id_param))
         .select(c::document_id)
         .first::<String>(&mut conn)
+        .await
         .optional()
         .unwrap_or(None);
     let comment_doc_id = match comment_doc_id {
@@ -476,13 +486,14 @@ pub async fn resolve_comment(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
     };
-    if !ensure_document_access(&mut conn, &comment_doc_id, &uid, "viewer", res) {
+    if !ensure_document_access(&mut conn, &comment_doc_id, &uid, "viewer", res).await {
         return;
     }
 
     match diesel::update(c::comments.filter(c::id.eq(&comment_id_param)))
         .set((c::is_resolved.eq(true), c::updated_at.eq(now.to_rfc3339())))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

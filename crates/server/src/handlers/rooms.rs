@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -22,12 +24,17 @@ use crate::middleware::auth::get_user_id;
 
 /// Whether `user_id` is a member or the owner of `room_id`. Room owners are not
 /// necessarily present in `room_members`, so both are checked.
-fn is_room_participant(conn: &mut diesel::SqliteConnection, room_id: &str, user_id: &str) -> bool {
+async fn is_room_participant(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+    room_id: &str,
+    user_id: &str,
+) -> bool {
     let is_member = rm::room_members
         .filter(rm::room_id.eq(room_id))
         .filter(rm::user_id.eq(user_id))
         .count()
         .get_result::<i64>(conn)
+        .await
         .unwrap_or(0)
         > 0;
     if is_member {
@@ -38,6 +45,7 @@ fn is_room_participant(conn: &mut diesel::SqliteConnection, room_id: &str, user_
         .filter(r::owner_id.eq(user_id))
         .count()
         .get_result::<i64>(conn)
+        .await
         .unwrap_or(0)
         > 0
 }
@@ -141,6 +149,7 @@ pub async fn create_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
     if let Err(e) = diesel::insert_into(r::rooms)
         .values(&new_room)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -160,7 +169,8 @@ pub async fn create_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
     let _ = diesel::insert_into(rm::room_members)
         .values(&owner_member)
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     let resp = RoomResponse {
         id: room_id_val,
@@ -212,6 +222,7 @@ pub async fn list_rooms(depot: &mut Depot, res: &mut Response) {
         .filter(rm::user_id.eq(&uid))
         .select(rm::room_id)
         .load::<String>(&mut conn)
+        .await
     {
         Ok(ids) => ids,
         Err(e) => {
@@ -227,19 +238,19 @@ pub async fn list_rooms(depot: &mut Depot, res: &mut Response) {
         .filter(r::id.eq_any(&member_room_ids).or(r::owner_id.eq(&uid)))
         .order(r::updated_at.desc())
         .load::<Room>(&mut conn)
+        .await
     {
         Ok(rows) => {
-            let room_list: Vec<RoomResponse> = rows
-                .into_iter()
-                .map(|room| {
-                    let count: i64 = rm::room_members
-                        .filter(rm::room_id.eq(&room.id))
-                        .count()
-                        .get_result(&mut conn)
-                        .unwrap_or(0);
-                    room_model_to_response(room, count as u32)
-                })
-                .collect();
+            let mut room_list = Vec::with_capacity(rows.len());
+            for room in rows {
+                let count: i64 = rm::room_members
+                    .filter(rm::room_id.eq(&room.id))
+                    .count()
+                    .get_result(&mut conn)
+                    .await
+                    .unwrap_or(0);
+                room_list.push(room_model_to_response(room, count as u32));
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(room_list)));
         }
@@ -286,10 +297,11 @@ pub async fn get_room(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     match r::rooms
         .filter(r::id.eq(&room_id_param))
         .first::<Room>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(room)) => {
-            if !is_room_participant(&mut conn, &room_id_param, &uid) {
+            if !is_room_participant(&mut conn, &room_id_param, &uid).await {
                 res.status_code(StatusCode::FORBIDDEN);
                 res.render(Json(ApiResponse::<()>::err(
                     AppError::Forbidden("Not a member of this room".into()).to_response(),
@@ -300,6 +312,7 @@ pub async fn get_room(req: &mut Request, depot: &mut Depot, res: &mut Response) 
                 .filter(rm::room_id.eq(&room.id))
                 .count()
                 .get_result(&mut conn)
+                .await
                 .unwrap_or(0);
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(room_model_to_response(
@@ -368,34 +381,43 @@ pub async fn update_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
 
     // Build update depending on which fields are provided.
     let result = match (&body.name, &body.description) {
-        (Some(name), Some(desc)) => diesel::update(
-            r::rooms
-                .filter(r::id.eq(&room_id_param))
-                .filter(r::owner_id.eq(&uid)),
-        )
-        .set((
-            r::name.eq(name),
-            r::description.eq(Some(desc)),
-            r::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn),
-        (Some(name), None) => diesel::update(
-            r::rooms
-                .filter(r::id.eq(&room_id_param))
-                .filter(r::owner_id.eq(&uid)),
-        )
-        .set((r::name.eq(name), r::updated_at.eq(now.to_rfc3339())))
-        .execute(&mut conn),
-        (None, Some(desc)) => diesel::update(
-            r::rooms
-                .filter(r::id.eq(&room_id_param))
-                .filter(r::owner_id.eq(&uid)),
-        )
-        .set((
-            r::description.eq(Some(desc)),
-            r::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn),
+        (Some(name), Some(desc)) => {
+            diesel::update(
+                r::rooms
+                    .filter(r::id.eq(&room_id_param))
+                    .filter(r::owner_id.eq(&uid)),
+            )
+            .set((
+                r::name.eq(name),
+                r::description.eq(Some(desc)),
+                r::updated_at.eq(now.to_rfc3339()),
+            ))
+            .execute(&mut conn)
+            .await
+        }
+        (Some(name), None) => {
+            diesel::update(
+                r::rooms
+                    .filter(r::id.eq(&room_id_param))
+                    .filter(r::owner_id.eq(&uid)),
+            )
+            .set((r::name.eq(name), r::updated_at.eq(now.to_rfc3339())))
+            .execute(&mut conn)
+            .await
+        }
+        (None, Some(desc)) => {
+            diesel::update(
+                r::rooms
+                    .filter(r::id.eq(&room_id_param))
+                    .filter(r::owner_id.eq(&uid)),
+            )
+            .set((
+                r::description.eq(Some(desc)),
+                r::updated_at.eq(now.to_rfc3339()),
+            ))
+            .execute(&mut conn)
+            .await
+        }
         (None, None) => {
             res.status_code(StatusCode::BAD_REQUEST);
             res.render(Json(ApiResponse::<()>::err(
@@ -459,8 +481,9 @@ pub async fn delete_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
     };
 
     // Delete room members first.
-    let _ =
-        diesel::delete(rm::room_members.filter(rm::room_id.eq(&room_id_param))).execute(&mut conn);
+    let _ = diesel::delete(rm::room_members.filter(rm::room_id.eq(&room_id_param)))
+        .execute(&mut conn)
+        .await;
 
     match diesel::delete(
         r::rooms
@@ -468,6 +491,7 @@ pub async fn delete_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
             .filter(r::owner_id.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -526,6 +550,7 @@ pub async fn toggle_archive(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(r::id.eq(&room_id_param))
         .filter(r::owner_id.eq(&uid))
         .first::<Room>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(room)) => room,
@@ -558,6 +583,7 @@ pub async fn toggle_archive(req: &mut Request, depot: &mut Depot, res: &mut Resp
         r::updated_at.eq(now.to_rfc3339()),
     ))
     .execute(&mut conn)
+    .await
     {
         Ok(_) => {
             res.status_code(StatusCode::OK);
@@ -622,6 +648,7 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
         .filter(r::owner_id.eq(&uid))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -656,6 +683,7 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
     match diesel::insert_into(rm::room_members)
         .values(&new_member)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             // Fetch username for response.
@@ -663,6 +691,7 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
                 .filter(u::id.eq(body.user_id.to_string()))
                 .select((u::username, u::display_name))
                 .first::<(String, Option<String>)>(&mut conn)
+                .await
                 .unwrap_or(("unknown".to_string(), None));
 
             let resp = RoomMemberResponse {
@@ -724,6 +753,7 @@ pub async fn remove_member(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(r::owner_id.eq(&uid))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -749,6 +779,7 @@ pub async fn remove_member(req: &mut Request, depot: &mut Depot, res: &mut Respo
             .filter(rm::user_id.eq(&user_id_param)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -802,7 +833,7 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
-    if !is_room_participant(&mut conn, &room_id_param, &uid) {
+    if !is_room_participant(&mut conn, &room_id_param, &uid).await {
         res.status_code(StatusCode::FORBIDDEN);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Forbidden("Not a member of this room".into()).to_response(),
@@ -831,6 +862,7 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
             String,
             String,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let members: Vec<RoomMemberResponse> = rows
@@ -895,6 +927,7 @@ pub async fn list_room_files(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(rm::user_id.eq(&uid))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0)
         > 0;
     let is_owner = r::rooms
@@ -902,6 +935,7 @@ pub async fn list_room_files(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(r::owner_id.eq(&uid))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0)
         > 0;
 
@@ -918,13 +952,15 @@ pub async fn list_room_files(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(f::is_trashed.eq(false))
         .order((f::is_folder.desc(), f::name.asc()))
         .load::<File>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let mut file_list: Vec<FileResponse> =
                 rows.into_iter().map(file_model_to_response).collect();
             for r in &mut file_list {
                 r.shared_with_count =
-                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string());
+                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string())
+                        .await;
             }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
@@ -997,6 +1033,7 @@ pub async fn update_room_logo(req: &mut Request, depot: &mut Depot, res: &mut Re
         r::updated_at.eq(now.to_rfc3339()),
     ))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -1075,6 +1112,7 @@ pub async fn update_room_color(req: &mut Request, depot: &mut Depot, res: &mut R
     )
     .set((r::color.eq(&body.color), r::updated_at.eq(now.to_rfc3339())))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -1148,6 +1186,7 @@ pub async fn set_room_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
     let room = match r::rooms
         .filter(r::id.eq(&room_id_param))
         .first::<Room>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(room)) => room,
@@ -1172,6 +1211,7 @@ pub async fn set_room_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(u::id.eq(&uid))
         .select(u::role)
         .first::<String>(&mut conn)
+        .await
         .unwrap_or_default();
 
     if user_role != "admin" && room.owner_id != uid {
@@ -1190,6 +1230,7 @@ pub async fn set_room_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
             r::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             res.status_code(StatusCode::OK);
@@ -1267,6 +1308,7 @@ pub async fn set_room_lifetime(req: &mut Request, depot: &mut Depot, res: &mut R
         r::updated_at.eq(now.to_rfc3339()),
     ))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

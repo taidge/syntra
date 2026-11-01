@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -39,6 +41,7 @@ pub async fn get_watermark(depot: &mut Depot, res: &mut Response) {
 
     match ws::watermark_settings
         .first::<WatermarkSettings>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(settings)) => {
@@ -135,6 +138,7 @@ pub async fn update_watermark(req: &mut Request, depot: &mut Depot, res: &mut Re
 
     let existing = ws::watermark_settings
         .first::<WatermarkSettings>(&mut conn)
+        .await
         .optional();
 
     match existing {
@@ -156,6 +160,7 @@ pub async fn update_watermark(req: &mut Request, depot: &mut Depot, res: &mut Re
                     ws::updated_at.eq(now.to_rfc3339()),
                 ))
                 .execute(&mut conn)
+                .await
             {
                 res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
                 res.render(Json(ApiResponse::<()>::err(
@@ -192,6 +197,7 @@ pub async fn update_watermark(req: &mut Request, depot: &mut Depot, res: &mut Re
             if let Err(e) = diesel::insert_into(ws::watermark_settings)
                 .values(&new_settings)
                 .execute(&mut conn)
+                .await
             {
                 res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
                 res.render(Json(ApiResponse::<()>::err(
@@ -268,6 +274,7 @@ pub async fn disable_watermark(depot: &mut Depot, res: &mut Response) {
             ws::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             res.status_code(StatusCode::OK);

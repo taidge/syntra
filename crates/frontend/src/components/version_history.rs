@@ -48,9 +48,10 @@ pub fn VersionHistory(
                 text()
                     .kind(TextKind::Heading(2))
                     .content(crate::i18n::t("versions.title")),
-                action("×", move || set(open, false))
-                    .name("Close version history")
-                    .class("btn-icon"),
+                icon_button("Close version history", Icon::Close, move || {
+                    set(open, false)
+                })
+                .class("btn-icon icon-button"),
             )),
             status(feedback),
             col().class("version-list").fill((

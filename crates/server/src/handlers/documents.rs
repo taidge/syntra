@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -84,14 +86,15 @@ async fn delete_previous_blob_if_safe(storage: &StorageBackend, old_path: &str) 
     let _ = storage.delete_file(old_path).await;
 }
 
-fn resolve_document_id(
-    conn: &mut diesel::SqliteConnection,
+async fn resolve_document_id(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     identifier: &str,
 ) -> Result<Option<String>, AppError> {
     d::documents
         .filter(d::id.eq(identifier))
         .select(d::id)
         .first::<String>(conn)
+        .await
         .optional()
         .map_err(|e| AppError::Database(e.to_string()))
 }
@@ -155,7 +158,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
 
     let room_id_for_new_document = if let Some(parent_id) = parent_id_str.as_deref() {
-        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
+        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor").await {
             Ok(Some(parent)) => {
                 if let Some(requested_room_id) = requested_room_id.as_deref()
                     && parent.room_id.as_deref() != Some(requested_room_id)
@@ -183,7 +186,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             }
         }
     } else if let Some(room_id) = requested_room_id.as_deref() {
-        match check_room_access(&mut conn, &uid, room_id, "editor") {
+        match check_room_access(&mut conn, &uid, room_id, "editor").await {
             Ok(()) => Some(room_id.to_string()),
             Err(e) => {
                 res.status_code(StatusCode::FORBIDDEN);
@@ -217,6 +220,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     if let Err(e) = diesel::insert_into(f::files)
         .values(&new_file)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -227,7 +231,8 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
 
     let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
         .set(u::storage_used.eq(u::storage_used + size_val))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     // Create the document record.
     let new_doc = NewDocument {
@@ -243,6 +248,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     if let Err(e) = diesel::insert_into(d::documents)
         .values(&new_doc)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -262,7 +268,8 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             "document_type": body.document_type.as_str(),
             "created_at": now.to_rfc3339(),
         }),
-    );
+    )
+    .await;
 
     let resp = DocumentResponse {
         id: doc_id_val,
@@ -311,7 +318,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -353,6 +360,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
             String,
             String,
         )>(&mut conn)
+        .await
         .optional();
 
     match row {
@@ -470,6 +478,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             Option<String>,
             String,
         )>(&mut conn)
+        .await
         .optional();
 
     let (
@@ -527,7 +536,8 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
     let _ = diesel::insert_into(v::versions)
         .values(&new_ver)
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     // Update the document.
     match diesel::update(d::documents.filter(d::id.eq(&resolved_doc_id)))
@@ -537,6 +547,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             d::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             let _ = diesel::update(f::files.filter(f::id.eq(&file_id_val)))
@@ -545,10 +556,12 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
                     f::size.eq(new_size),
                     f::updated_at.eq(now.to_rfc3339()),
                 ))
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
             let _ = diesel::update(u::users.filter(u::id.eq(&owner_id)))
                 .set(u::storage_used.eq(u::storage_used + size_diff))
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
             delete_previous_blob_if_safe(&state.storage, &old_path).await;
 
             crate::services::WebhookService::fire_event(
@@ -563,7 +576,8 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
                     "version": new_version,
                     "updated_at": now.to_rfc3339(),
                 }),
-            );
+            )
+            .await;
 
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(serde_json::json!({
@@ -612,7 +626,7 @@ pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -635,6 +649,7 @@ pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(f::owner_id.eq(&uid))
         .select(d::file_id)
         .first::<String>(&mut conn)
+        .await
         .optional();
 
     let file_id_val = match file_id_row {
@@ -662,7 +677,8 @@ pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             f::trashed_at.eq(Some(now.to_rfc3339())),
             f::updated_at.eq(now.to_rfc3339()),
         ))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     crate::services::WebhookService::fire_event(
         &state.db,
@@ -673,7 +689,8 @@ pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             "owner_id": uid,
             "deleted_at": now.to_rfc3339(),
         }),
-    );
+    )
+    .await;
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(
@@ -712,7 +729,7 @@ pub async fn get_document_content(req: &mut Request, depot: &mut Depot, res: &mu
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -734,6 +751,7 @@ pub async fn get_document_content(req: &mut Request, depot: &mut Depot, res: &mu
         .filter(f::owner_id.eq(&uid))
         .select((d::content, d::version))
         .first::<(Option<String>, i32)>(&mut conn)
+        .await
         .optional();
 
     match row {
@@ -807,7 +825,7 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -829,6 +847,7 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(f::owner_id.eq(&uid))
         .select((d::doc_type, d::content, f::name))
         .first::<(String, Option<String>, String)>(&mut conn)
+        .await
         .optional();
 
     let (doc_type_str, content_opt, file_name) = match row {
@@ -849,66 +868,13 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let content_str = content_opt.unwrap_or_default();
-    let doc_type = DocumentType::parse_lossy(&doc_type_str);
-    let content: serde_json::Value = serde_json::from_str(&content_str).unwrap_or_default();
-
-    // Perform the export based on doc type and format.
-    let exported: Result<Vec<u8>, String> = match (&doc_type, &export_format) {
-        (DocumentType::Writer, ExportFormat::Html) => {
-            match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
-                Ok(doc) => {
-                    let html = contrix_export::html::writer_to_html(&doc);
-                    Ok(html.into_bytes())
-                }
-                Err(e) => Err(format!("Failed to parse writer document: {e}")),
-            }
-        }
-        (DocumentType::Writer, ExportFormat::Markdown) => {
-            match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
-                Ok(doc) => {
-                    let md = contrix_export::markdown::writer_to_markdown(&doc);
-                    Ok(md.into_bytes())
-                }
-                Err(e) => Err(format!("Failed to parse writer document: {e}")),
-            }
-        }
-        (DocumentType::Calc, ExportFormat::Csv) => {
-            match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
-                Ok(wb) => {
-                    if let Some(sheet) = wb.sheets.first() {
-                        let csv = contrix_export::csv::sheet_to_csv(sheet);
-                        Ok(csv.into_bytes())
-                    } else {
-                        Ok(Vec::new())
-                    }
-                }
-                Err(e) => Err(format!("Failed to parse workbook: {e}")),
-            }
-        }
-        (DocumentType::Writer, ExportFormat::Docx) => {
-            match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
-                Ok(doc) => contrix_export::docx::writer_to_docx(&doc),
-                Err(e) => Err(format!("Failed to parse writer document: {e}")),
-            }
-        }
-        (DocumentType::Calc, ExportFormat::Xlsx) => {
-            match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
-                Ok(wb) => contrix_export::xlsx::workbook_to_xlsx(&wb),
-                Err(e) => Err(format!("Failed to parse workbook: {e}")),
-            }
-        }
-        (DocumentType::Slides, ExportFormat::Pptx) => {
-            match serde_json::from_value::<contrix_doc_engine::Presentation>(content) {
-                Ok(pres) => contrix_export::pptx::presentation_to_pptx(&pres),
-                Err(e) => Err(format!("Failed to parse presentation: {e}")),
-            }
-        }
-        (_, ExportFormat::Json) => Ok(content_str.into_bytes()),
-        _ => Err(format!(
-            "Export format '{format_str}' not supported for document type '{doc_type_str}'"
-        )),
-    };
+    let exported = super::convert::export_content(
+        content_opt.unwrap_or_default(),
+        doc_type_str,
+        export_format,
+        format_str,
+    )
+    .await;
 
     match exported {
         Ok(data) => {
@@ -965,7 +931,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -988,6 +954,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(f::owner_id.eq(&uid))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(_) => {
@@ -1018,6 +985,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
             v::label,
         ))
         .load::<(String, i32, String, String, Option<String>)>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let version_list: Vec<serde_json::Value> = rows
@@ -1101,6 +1069,7 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
             i32,
             Option<String>,
         )>(&mut conn)
+        .await
         .optional();
 
     let (
@@ -1136,6 +1105,7 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(v::document_id.eq(&resolved_doc_id))
         .select(v::content)
         .first::<Option<String>>(&mut conn)
+        .await
         .optional();
 
     let restored_content = match version_row {
@@ -1185,7 +1155,8 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
     let _ = diesel::insert_into(v::versions)
         .values(&snap)
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     // Apply the restored content.
     let _ = diesel::update(d::documents.filter(d::id.eq(&resolved_doc_id)))
@@ -1194,17 +1165,20 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
             d::version.eq(new_version),
             d::updated_at.eq(now.to_rfc3339()),
         ))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
     let _ = diesel::update(f::files.filter(f::id.eq(&file_id_val)))
         .set((
             f::path.eq(&new_path),
             f::size.eq(new_size),
             f::updated_at.eq(now.to_rfc3339()),
         ))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
     let _ = diesel::update(u::users.filter(u::id.eq(&owner_id)))
         .set(u::storage_used.eq(u::storage_used + size_diff))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
     delete_previous_blob_if_safe(&state.storage, &old_path).await;
 
     res.status_code(StatusCode::OK);
@@ -1267,7 +1241,7 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param) {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -1290,6 +1264,7 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(f::owner_id.eq(&uid))
         .count()
         .get_result(&mut conn)
+        .await
         .unwrap_or_default();
 
     if count == 0 {
@@ -1306,6 +1281,7 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(v::document_id.eq(&resolved_doc_id))
         .select((v::version_number, v::content))
         .first::<(i32, Option<String>)>(&mut conn)
+        .await
         .optional();
 
     let (v1_number, v1_content_str) = match ver1 {
@@ -1332,6 +1308,7 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(v::document_id.eq(&resolved_doc_id))
         .select((v::version_number, v::content))
         .first::<(i32, Option<String>)>(&mut conn)
+        .await
         .optional();
 
     let (v2_number, v2_content_str) = match ver2 {

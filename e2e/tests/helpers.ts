@@ -18,7 +18,7 @@ export async function registerUser(
   const response = await request.post(`${API_BASE}/auth/register`, {
     data: { username, email, password },
   });
-  expect(response.ok()).toBeTruthy();
+  expect(response.ok(), response.ok() ? undefined : `Registration failed (${response.status()}): ${await response.text()}`).toBeTruthy();
   const body = await response.json();
   expect(body.success).toBe(true);
   return {

@@ -5,6 +5,8 @@ use contrix_core::models::File;
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::users::dsl as u;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use crate::middleware::auth::get_user_id;
@@ -69,13 +71,15 @@ pub async fn list_trashed(depot: &mut Depot, res: &mut Response) {
         .filter(f::is_trashed.eq(true))
         .order(f::trashed_at.desc())
         .load::<File>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let mut file_list: Vec<FileResponse> =
                 rows.into_iter().map(file_model_to_response).collect();
             for r in &mut file_list {
                 r.shared_with_count =
-                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string());
+                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string())
+                        .await;
             }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
@@ -133,6 +137,7 @@ pub async fn restore_file(req: &mut Request, depot: &mut Depot, res: &mut Respon
         f::updated_at.eq(now.to_rfc3339()),
     ))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -192,6 +197,7 @@ pub async fn permanently_delete(req: &mut Request, depot: &mut Depot, res: &mut 
         .filter(f::owner_id.eq(&uid))
         .filter(f::is_trashed.eq(true))
         .first::<File>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => row,
@@ -216,7 +222,10 @@ pub async fn permanently_delete(req: &mut Request, depot: &mut Depot, res: &mut 
     let is_folder = file_row.is_folder;
 
     // Delete from DB.
-    if let Err(e) = diesel::delete(f::files.filter(f::id.eq(&file_id_param))).execute(&mut conn) {
+    if let Err(e) = diesel::delete(f::files.filter(f::id.eq(&file_id_param)))
+        .execute(&mut conn)
+        .await
+    {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Database(e.to_string()).to_response(),
@@ -231,7 +240,8 @@ pub async fn permanently_delete(req: &mut Request, depot: &mut Depot, res: &mut 
         // Update user's storage_used.
         let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
             .set(u::storage_used.eq(u::storage_used - file_size))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
 
     res.status_code(StatusCode::OK);
@@ -274,6 +284,7 @@ pub async fn empty_trash(depot: &mut Depot, res: &mut Response) {
         .filter(f::owner_id.eq(&uid))
         .filter(f::is_trashed.eq(true))
         .load::<File>(&mut conn)
+        .await
     {
         Ok(rows) => rows,
         Err(e) => {
@@ -301,13 +312,15 @@ pub async fn empty_trash(depot: &mut Depot, res: &mut Response) {
             .filter(f::is_trashed.eq(true)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(count) => {
             // Update user's storage_used.
             if total_freed > 0 {
                 let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
                     .set(u::storage_used.eq(u::storage_used - total_freed))
-                    .execute(&mut conn);
+                    .execute(&mut conn)
+                    .await;
             }
 
             res.status_code(StatusCode::OK);
@@ -358,6 +371,7 @@ pub async fn trash_count(depot: &mut Depot, res: &mut Response) {
         .filter(f::is_trashed.eq(true))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
     {
         Ok(count) => {
             res.status_code(StatusCode::OK);

@@ -29,7 +29,9 @@ pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 .name("Contrix Office")
                 .class("brand-link")
                 .fill((
-                    label("📋").class("brand-icon"),
+                    view()
+                        .class("brand-icon")
+                        .fill(icon_sized(Icon::Office, 20.)),
                     label("Contrix Office").class("brand-text"),
                 )),
         ),
@@ -42,7 +44,8 @@ pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
             ),
         )),
         view().class("navbar-end").fill((
-            view().class("navbar-search").fill(
+            view().class("navbar-search has-search-icon").fill((
+                view().class("search-icon").fill(icon(Icon::Search)),
                 sapid::text_field()
                     .unstyled()
                     .class("search-input")
@@ -52,10 +55,10 @@ pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     .value(query)
                     .on_value_change(move |value| set(query, value))
                     .on_commit(|_| go("/files")),
-            ),
+            )),
             crate::components::notification_center::NotificationCenter(scope.clone(), auth),
             view().class("navbar-user").fill((
-                action(language, || {
+                action("", || {
                     let next = if crate::i18n::current_locale() == "zh" {
                         "en"
                     } else {
@@ -68,14 +71,19 @@ pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 })
                 .unstyled()
                 .name("Switch language")
-                .class("lang-toggle"),
-                action("🌙", move || {
+                .class("lang-toggle with-icon")
+                .fill((icon(Icon::Globe), label(language).class("language-code"))),
+                action("", move || {
                     let next_dark = current_theme() != "dark";
                     set_theme(if next_dark { "dark" } else { "light" });
                 })
                 .unstyled()
                 .name(crate::i18n::t("nav.theme_toggle"))
-                .class("theme-toggle"),
+                .class("theme-toggle icon-button")
+                .fill((
+                    icon(Icon::Sun).class("ui-icon theme-light-icon"),
+                    icon(Icon::Moon).class("ui-icon theme-dark-icon"),
+                )),
                 link()
                     .target("/profile")
                     .name(crate::i18n::t("profile.title"))
@@ -89,13 +97,15 @@ pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                             .to_uppercase()
                             .to_string()
                     })),
-                action(crate::i18n::t("nav.logout"), move || {
+                action("", move || {
                     crate::state::clear_auth_state();
                     set(auth, AuthState::default());
                     go("/login");
                 })
                 .unstyled()
-                .class("btn btn-outline btn-sm"),
+                .name(crate::i18n::t("nav.logout"))
+                .class("btn btn-outline btn-sm with-icon logout-button")
+                .fill((icon(Icon::Logout), label(crate::i18n::t("nav.logout")))),
             )),
         )),
     ))

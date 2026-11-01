@@ -39,7 +39,7 @@ pub fn FindDialog(scope: Scope, open: Cage<bool>, callbacks: FindCallbacks) -> i
                 action("Replace all", move || {
                     replace_all(query.get(), replacement.get())
                 }),
-                action("Close", move || set(open, false)),
+                icon_button("Close", Icon::Close, move || set(open, false)),
             )),
         ))
     })

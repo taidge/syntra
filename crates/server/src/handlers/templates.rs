@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -111,6 +113,7 @@ pub async fn create_template(req: &mut Request, depot: &mut Depot, res: &mut Res
     if let Err(e) = diesel::insert_into(tmpl::templates)
         .values(&new_template)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -170,6 +173,7 @@ pub async fn list_templates(depot: &mut Depot, res: &mut Response) {
         .filter(tmpl::created_by.eq(&uid).or(tmpl::is_global.eq(true)))
         .order(tmpl::created_at.desc())
         .load::<Template>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let template_list: Vec<TemplateResponse> =
@@ -222,6 +226,7 @@ pub async fn get_template(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .filter(tmpl::id.eq(&template_id_param))
         .filter(tmpl::created_by.eq(&uid).or(tmpl::is_global.eq(true)))
         .first::<Template>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => {
@@ -290,6 +295,7 @@ pub async fn update_template(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(tmpl::id.eq(&template_id_param))
         .filter(tmpl::created_by.eq(&uid))
         .first::<Template>(&mut conn)
+        .await
         .optional();
 
     match existing {
@@ -315,29 +321,34 @@ pub async fn update_template(req: &mut Request, depot: &mut Depot, res: &mut Res
     if let Some(ref name) = body.name {
         let _ = diesel::update(tmpl::templates.filter(tmpl::id.eq(&template_id_param)))
             .set(tmpl::name.eq(name))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(ref description) = body.description {
         let _ = diesel::update(tmpl::templates.filter(tmpl::id.eq(&template_id_param)))
             .set(tmpl::description.eq(Some(description)))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(ref content) = body.content {
         let content_str = serde_json::to_string(content).unwrap_or_default();
         let _ = diesel::update(tmpl::templates.filter(tmpl::id.eq(&template_id_param)))
             .set(tmpl::content.eq(Some(content_str)))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
 
     // Always update updated_at.
     let _ = diesel::update(tmpl::templates.filter(tmpl::id.eq(&template_id_param)))
         .set(tmpl::updated_at.eq(now.to_rfc3339()))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     // Return the updated template.
     match tmpl::templates
         .filter(tmpl::id.eq(&template_id_param))
         .first::<Template>(&mut conn)
+        .await
     {
         Ok(row) => {
             res.status_code(StatusCode::OK);
@@ -390,6 +401,7 @@ pub async fn delete_template(req: &mut Request, depot: &mut Depot, res: &mut Res
             .filter(tmpl::created_by.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -467,6 +479,7 @@ pub async fn create_document_from_template(
         .filter(tmpl::id.eq(&template_id_param))
         .filter(tmpl::created_by.eq(&uid).or(tmpl::is_global.eq(true)))
         .first::<Template>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(t)) => t,
@@ -490,7 +503,9 @@ pub async fn create_document_from_template(
     let room_id_for_new_file = if let Some(parent_id) = body.parent_id.as_deref() {
         match crate::handlers::access::load_accessible_target_folder(
             &mut conn, parent_id, &uid, "editor",
-        ) {
+        )
+        .await
+        {
             Ok(Some(parent)) => parent.room_id,
             Ok(None) => {
                 res.status_code(StatusCode::NOT_FOUND);
@@ -544,6 +559,7 @@ pub async fn create_document_from_template(
     if let Err(e) = diesel::insert_into(f::files)
         .values(&new_file)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -566,6 +582,7 @@ pub async fn create_document_from_template(
     if let Err(e) = diesel::insert_into(d::documents)
         .values(&new_doc)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(

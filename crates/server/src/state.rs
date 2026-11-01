@@ -1,8 +1,5 @@
 use std::sync::Arc;
 
-use diesel::SqliteConnection;
-use diesel::r2d2::{ConnectionManager, Pool};
-
 use contrix_collab::CollabManager;
 use contrix_core::config::AppConfig;
 
@@ -12,7 +9,7 @@ use crate::services::StorageBackend;
 use crate::services::ThumbnailService;
 use crate::services::WopiSessionStore;
 
-pub type DbPool = Pool<ConnectionManager<SqliteConnection>>;
+pub type DbPool = crate::database::Database;
 
 /// Shared application state injected into Salvo's [`Depot`] for every request.
 pub struct AppState {

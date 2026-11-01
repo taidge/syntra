@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -20,20 +22,27 @@ use crate::services::{StorageBackend, StorageService};
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn document_id_for_file(conn: &mut diesel::SqliteConnection, file_id: &str) -> Option<Uuid> {
+async fn document_id_for_file(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+    file_id: &str,
+) -> Option<Uuid> {
     d::documents
         .filter(d::file_id.eq(file_id))
         .select(d::id)
         .first::<String>(conn)
+        .await
         .optional()
         .ok()
         .flatten()
         .and_then(|id| id.parse().ok())
 }
 
-fn file_model_to_response(conn: &mut diesel::SqliteConnection, row: File) -> FileResponse {
-    let document_id = document_id_for_file(conn, &row.id);
-    let shared_with_count = crate::handlers::access::count_shares_for_file(conn, &row.id);
+async fn file_model_to_response(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+    row: File,
+) -> FileResponse {
+    let document_id = document_id_for_file(conn, &row.id).await;
+    let shared_with_count = crate::handlers::access::count_shares_for_file(conn, &row.id).await;
     FileResponse {
         id: row.id.parse().unwrap_or_default(),
         name: row.name,
@@ -56,7 +65,7 @@ fn file_model_to_response(conn: &mut diesel::SqliteConnection, row: File) -> Fil
 }
 
 async fn read_file_with_document_fallback(
-    conn: &mut diesel::SqliteConnection,
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     storage: &StorageBackend,
     file_id: &str,
     file_path: &str,
@@ -68,6 +77,7 @@ async fn read_file_with_document_fallback(
                 .filter(d::file_id.eq(file_id))
                 .select(d::content)
                 .first::<Option<String>>(conn)
+                .await
                 .optional()
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -125,7 +135,7 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
     };
 
     let result: Result<Vec<File>, AppError> = if let Some(pid) = parent_id_param {
-        let parent = match load_accessible_folder(&mut conn, &pid, &uid, "viewer") {
+        let parent = match load_accessible_folder(&mut conn, &pid, &uid, "viewer").await {
             Ok(Some(row)) => row,
             Ok(None) => {
                 res.status_code(StatusCode::NOT_FOUND);
@@ -155,6 +165,7 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
 
         query
             .load::<File>(&mut conn)
+            .await
             .map_err(|e| AppError::Database(e.to_string()))
     } else {
         f::files
@@ -165,15 +176,16 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
             .limit(limit_val)
             .offset(offset_val)
             .load::<File>(&mut conn)
+            .await
             .map_err(|e| AppError::Database(e.to_string()))
     };
 
     match result {
         Ok(rows) => {
-            let file_list: Vec<FileResponse> = rows
-                .into_iter()
-                .map(|row| file_model_to_response(&mut conn, row))
-                .collect();
+            let mut file_list = Vec::with_capacity(rows.len());
+            for row in rows {
+                file_list.push(file_model_to_response(&mut conn, row).await);
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
         }
@@ -322,7 +334,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     };
 
     let room_id_for_new_file = if let Some(parent_id) = parent_id_param.as_deref() {
-        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
+        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor").await {
             Ok(Some(parent)) => {
                 if let Some(requested_room_id) = room_id_param.as_deref()
                     && parent.room_id.as_deref() != Some(requested_room_id)
@@ -350,7 +362,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
             }
         }
     } else if let Some(room_id) = room_id_param.as_deref() {
-        match check_room_access(&mut conn, &uid, room_id, "editor") {
+        match check_room_access(&mut conn, &uid, room_id, "editor").await {
             Ok(()) => Some(room_id.to_string()),
             Err(e) => {
                 res.status_code(StatusCode::FORBIDDEN);
@@ -399,6 +411,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     if let Err(e) = diesel::insert_into(f::files)
         .values(&new_file)
         .execute(&mut conn)
+        .await
     {
         let _ = state.storage.delete_file(&storage_path).await;
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
@@ -411,7 +424,8 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     // Update user storage_used.
     let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
         .set(u::storage_used.eq(u::storage_used + size_val))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     // Generate thumbnail for image uploads.
     let mut thumbnail_path_val: Option<String> = None;
@@ -426,7 +440,8 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
             Ok(thumb_rel) => {
                 let _ = diesel::update(f::files.filter(f::id.eq(file_id_val.to_string())))
                     .set(f::thumbnail_path.eq(Some(&thumb_rel)))
-                    .execute(&mut conn);
+                    .execute(&mut conn)
+                    .await;
                 thumbnail_path_val = Some(thumb_rel);
                 tracing::debug!("Thumbnail generated for file {file_id_val}");
             }
@@ -450,7 +465,8 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
             "room_id": &room_id_for_new_file,
             "created_at": now.to_rfc3339(),
         }),
-    );
+    )
+    .await;
 
     let mut imported_doc_id: Option<Uuid> = None;
     let ext = std::path::Path::new(&file_name)
@@ -487,6 +503,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
             if let Err(e) = diesel::insert_into(contrix_core::schema::documents::dsl::documents)
                 .values(&new_doc)
                 .execute(&mut conn)
+                .await
             {
                 tracing::warn!("auto-import: failed to insert document for {file_id_val}: {e}");
             } else {
@@ -548,12 +565,12 @@ pub async fn get_file(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         }
     };
 
-    match load_accessible_file(&mut conn, &file_id_param, &uid, "viewer") {
+    match load_accessible_file(&mut conn, &file_id_param, &uid, "viewer").await {
         Ok(Some(row)) => {
             res.status_code(StatusCode::OK);
-            res.render(Json(ApiResponse::ok(file_model_to_response(
-                &mut conn, row,
-            ))));
+            res.render(Json(ApiResponse::ok(
+                file_model_to_response(&mut conn, row).await,
+            )));
         }
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -623,7 +640,7 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
-    let target = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor") {
+    let target = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -642,6 +659,7 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     match diesel::update(f::files.filter(f::id.eq(&target.id)))
         .set((f::name.eq(&new_name), f::updated_at.eq(now.to_rfc3339())))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -659,7 +677,8 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
                     "owner_id": &uid,
                     "updated_at": now.to_rfc3339(),
                 }),
-            );
+            )
+            .await;
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
                 serde_json::json!({ "message": "File renamed" }),
@@ -706,7 +725,7 @@ pub async fn delete_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
-    let target = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor") {
+    let target = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -729,6 +748,7 @@ pub async fn delete_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
             f::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -746,7 +766,8 @@ pub async fn delete_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
                     "owner_id": &uid,
                     "deleted_at": now.to_rfc3339(),
                 }),
-            );
+            )
+            .await;
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
                 serde_json::json!({ "message": "File trashed" }),
@@ -805,7 +826,7 @@ pub async fn move_file(req: &mut Request, depot: &mut Depot, res: &mut Response)
         }
     };
 
-    let source = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor") {
+    let source = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -826,7 +847,9 @@ pub async fn move_file(req: &mut Request, depot: &mut Depot, res: &mut Response)
         &body.target_folder_id.to_string(),
         &uid,
         "editor",
-    ) {
+    )
+    .await
+    {
         Ok(Some(folder)) => folder,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -849,6 +872,7 @@ pub async fn move_file(req: &mut Request, depot: &mut Depot, res: &mut Response)
             f::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -902,7 +926,7 @@ pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    let file_row = match load_accessible_file(&mut conn, &file_id_param, &uid, "viewer") {
+    let file_row = match load_accessible_file(&mut conn, &file_id_param, &uid, "viewer").await {
         Ok(Some(row)) if !row.is_folder => row,
         Ok(Some(_)) => {
             res.status_code(StatusCode::BAD_REQUEST);
@@ -1019,7 +1043,7 @@ pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Resp
         }
     };
 
-    let target = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor") {
+    let target = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -1041,6 +1065,7 @@ pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Resp
             f::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

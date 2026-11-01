@@ -1,5 +1,6 @@
 use chrono::Utc;
-use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -49,6 +50,7 @@ pub async fn get_smtp(depot: &mut Depot, res: &mut Response) {
 
     match smtp::smtp_settings
         .first::<SmtpSettings>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(settings)) => {
@@ -126,7 +128,7 @@ pub async fn update_smtp(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let now = Utc::now().to_rfc3339();
 
     // Delete any existing row(s) and insert the new settings (upsert pattern).
-    let _ = diesel::delete(smtp::smtp_settings).execute(&mut conn);
+    let _ = diesel::delete(smtp::smtp_settings).execute(&mut conn).await;
 
     let new_settings = NewSmtpSettings {
         id: Uuid::new_v4().to_string(),
@@ -147,6 +149,7 @@ pub async fn update_smtp(req: &mut Request, depot: &mut Depot, res: &mut Respons
     match diesel::insert_into(smtp::smtp_settings)
         .values(&new_settings)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             let resp = SmtpSettingsResponse {
@@ -195,6 +198,7 @@ pub async fn test_smtp(depot: &mut Depot, res: &mut Response) {
     // Verify that SMTP settings exist before attempting a test.
     let settings = match smtp::smtp_settings
         .first::<SmtpSettings>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(s)) => s,
@@ -222,13 +226,14 @@ pub async fn test_smtp(depot: &mut Depot, res: &mut Response) {
     // result. lettre's transport is blocking, so run it off the async runtime.
     let pool = state.db.clone();
     let to = settings.from_email.clone();
-    let send_result = tokio::task::spawn_blocking(move || {
+    let send_result = tokio::spawn(async move {
         crate::services::EmailService::send(
             &pool,
             &to,
             "Contrix Office SMTP test",
             "<p>This is a test email confirming your SMTP settings work.</p>",
         )
+        .await
     })
     .await;
 

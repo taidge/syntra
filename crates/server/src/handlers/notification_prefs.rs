@@ -1,4 +1,6 @@
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -56,6 +58,7 @@ pub async fn list_preferences(depot: &mut Depot, res: &mut Response) {
     match np::notification_preferences
         .filter(np::user_id.eq(&uid))
         .load::<NotificationPreference>(&mut conn)
+        .await
     {
         Ok(rows) => {
             // Build a complete list: stored prefs + defaults for missing types.
@@ -144,6 +147,7 @@ pub async fn set_preference(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(np::user_id.eq(&uid))
         .filter(np::event_type.eq(&event_type_param))
         .first::<NotificationPreference>(&mut conn)
+        .await
         .optional();
 
     match existing {
@@ -156,6 +160,7 @@ pub async fn set_preference(req: &mut Request, depot: &mut Depot, res: &mut Resp
             )
             .set(np::enabled.eq(body.enabled))
             .execute(&mut conn)
+            .await
             {
                 Ok(_) => {
                     res.status_code(StatusCode::OK);
@@ -183,6 +188,7 @@ pub async fn set_preference(req: &mut Request, depot: &mut Depot, res: &mut Resp
             match diesel::insert_into(np::notification_preferences)
                 .values(&new_pref)
                 .execute(&mut conn)
+                .await
             {
                 Ok(_) => {
                     res.status_code(StatusCode::OK);

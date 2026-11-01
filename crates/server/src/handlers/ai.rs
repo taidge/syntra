@@ -1,4 +1,5 @@
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +83,7 @@ pub async fn assist(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                 return;
             }
         };
-        match load_accessible_document(&mut conn, document_id, &user_id, "viewer") {
+        match load_accessible_document(&mut conn, document_id, &user_id, "viewer").await {
             Ok(Some(_)) => {}
             Ok(None) | Err(AppError::NotFound(_)) | Err(AppError::Forbidden(_)) => {
                 render_error(
@@ -101,6 +102,7 @@ pub async fn assist(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .filter(d::id.eq(document_id))
             .select(d::content)
             .first::<Option<String>>(&mut conn)
+            .await
         {
             Ok(content) => content.unwrap_or_else(|| "{}".into()),
             Err(error) => {
@@ -183,7 +185,8 @@ pub async fn assist(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                 ip_address: Some(&ip_address),
                 user_agent: user_agent.as_deref(),
             },
-        );
+        )
+        .await;
     }
 
     res.status_code(StatusCode::OK);

@@ -1,4 +1,5 @@
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use contrix_core::dto::{ApiResponse, QuotaResponse, UpdateQuotaRequest};
@@ -54,6 +55,7 @@ pub async fn get_my_quota(depot: &mut Depot, res: &mut Response) {
         .filter(u::id.eq(&uid))
         .select((u::id, u::storage_used, u::storage_quota))
         .first::<(String, i64, Option<i64>)>(&mut conn)
+        .await
     {
         Ok((user_id, used, quota)) => {
             let quota_val = quota.unwrap_or(0);
@@ -108,6 +110,7 @@ pub async fn get_user_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(u::id.eq(&target_user_id))
         .select((u::id, u::storage_used, u::storage_quota))
         .first::<(String, i64, Option<i64>)>(&mut conn)
+        .await
     {
         Ok((user_id, used, quota)) => {
             let quota_val = quota.unwrap_or(0);
@@ -125,7 +128,7 @@ pub async fn get_user_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(resp)));
         }
-        Err(diesel::result::Error::NotFound) => {
+        Err(horme::Error::Query(diesel::result::Error::NotFound)) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::NotFound("User not found".into()).to_response(),
@@ -187,6 +190,7 @@ pub async fn set_user_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
     match diesel::update(u::users.filter(u::id.eq(&target_user_id)))
         .set(u::storage_quota.eq(Some(quota_bytes)))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -200,6 +204,7 @@ pub async fn set_user_quota(req: &mut Request, depot: &mut Depot, res: &mut Resp
                 .filter(u::id.eq(&target_user_id))
                 .select((u::id, u::storage_used, u::storage_quota))
                 .first::<(String, i64, Option<i64>)>(&mut conn)
+                .await
             {
                 Ok((user_id, used, quota)) => {
                     let quota_val = quota.unwrap_or(0);

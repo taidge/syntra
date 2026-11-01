@@ -2,7 +2,7 @@ use crate::{components::ui::*, state::AuthState};
 use glory::prelude::*;
 
 fn feature(
-    icon: &'static str,
+    kind_icon: Icon,
     kind: &'static str,
     title: &'static str,
     description: &'static str,
@@ -10,7 +10,7 @@ fn feature(
     view().class("feature-card").fill((
         view()
             .class(format!("feature-icon {kind}-icon"))
-            .fill(label(icon)),
+            .fill(icon_sized(kind_icon, 20.)),
         text().kind(TextKind::Heading(3)).content(title),
         text().kind(TextKind::Paragraph).content(description),
     ))
@@ -32,10 +32,10 @@ pub fn Home(_scope: Scope, _auth: Cage<AuthState>) -> impl Widget {
         view().class("features").fill((
             text().kind(TextKind::Heading(2)).class("section-title").content("Everything you need"),
             view().class("feature-grid").fill((
-                feature("W", "writer", "Writer", "A rich text editor for documents, reports, and letters with formatting, tables, and images."),
-                feature("C", "calc", "Calc", "A powerful spreadsheet with formulas, charts, and data analysis tools for all your number-crunching needs."),
-                feature("S", "slides", "Slides", "Create stunning presentations with transitions, animations, speaker notes, and collaborative editing."),
-                feature("B", "whiteboard", "Whiteboard", "A freeform canvas for brainstorming, sketching, and diagramming with pens, shapes, and text."),
+                feature(Icon::Document, "writer", "Writer", "A rich text editor for documents, reports, and letters with formatting, tables, and images."),
+                feature(Icon::Spreadsheet, "calc", "Calc", "A powerful spreadsheet with formulas, charts, and data analysis tools for all your number-crunching needs."),
+                feature(Icon::Presentation, "slides", "Slides", "Create stunning presentations with transitions, animations, speaker notes, and collaborative editing."),
+                feature(Icon::Whiteboard, "whiteboard", "Whiteboard", "A freeform canvas for brainstorming, sketching, and diagramming with pens, shapes, and text."),
             )),
         )),
         view().class("highlights").fill((

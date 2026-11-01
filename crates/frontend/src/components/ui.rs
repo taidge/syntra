@@ -1,4 +1,5 @@
 //! Small application helpers built from Glory semantics and Sapid controls.
+pub use super::icons::{Icon, icon, icon_drawing, icon_sized};
 use crate::state::AuthState;
 use glory::prelude::*;
 
@@ -121,6 +122,17 @@ pub fn action(name: impl Into<String>, callback: impl FnMut() + 'static) -> sapi
         .theme(theme())
         .label(name.into())
         .on_press(callback)
+}
+pub fn icon_button(
+    name: impl Into<String>,
+    kind: Icon,
+    callback: impl FnMut() + 'static,
+) -> sapid::Button {
+    let name = name.into();
+    action("", callback)
+        .name(name)
+        .class("icon-button")
+        .fill(icon(kind))
 }
 pub fn anchor(name: impl Into<String>, target: impl Into<String>) -> glory::ui::Link {
     link().label(name.into()).target(target.into())

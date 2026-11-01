@@ -1,4 +1,4 @@
-use crate::components::ui::{set, theme};
+use crate::components::ui::{Icon, icon, set, theme};
 use glory::prelude::*;
 #[allow(non_snake_case)]
 pub fn Modal<W: Widget>(
@@ -12,7 +12,7 @@ pub fn Modal<W: Widget>(
         .class("office-modal")
         .title(title)
         .close_label(crate::i18n::t("common.close"))
-        .close_content(|| text().kind(TextKind::Inline).content("×"))
+        .close_content(|| icon(Icon::Close))
         .show_trigger(false)
         .open(show)
         .on_open_change(move |value| set(show, value))

@@ -972,6 +972,8 @@ fn cell_ref(row: u32, col: u32) -> String {
 fn format_number_default(n: f64) -> String {
     if n.is_nan() {
         "#ERR".to_string()
+    } else if n == 0.0 {
+        "0".to_string()
     } else if n.fract() == 0.0 && n.abs() < 1e16 {
         format!("{n:.0}")
     } else {

@@ -269,24 +269,37 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                         }
                         let weak = breadcrumb_weak.clone();
                         Box::new(
-                            action(crumb.get().name, move || {
-                                set(parent, crumb.get().id);
-                                let _ = crumbs.try_revise(|items| items.truncate(index.get() + 1));
-                                if let Some(scope) = weak.upgrade() {
-                                    refresh(&scope, auth, parent, files, feedback);
-                                }
-                            })
-                            .variant(sapid::ButtonVariant::Secondary)
-                            .class("breadcrumb-item"),
+                            view().class("breadcrumb-step").fill((
+                                icon(Icon::ChevronRight),
+                                action(crumb.get().name, move || {
+                                    set(parent, crumb.get().id);
+                                    let _ =
+                                        crumbs.try_revise(|items| items.truncate(index.get() + 1));
+                                    if let Some(scope) = weak.upgrade() {
+                                        refresh(&scope, auth, parent, files, feedback);
+                                    }
+                                })
+                                .variant(sapid::ButtonVariant::Secondary)
+                                .class("breadcrumb-item"),
+                            )),
                         ) as Box<dyn Widget>
                     })),
                 row().class("file-toolbar").fill((
-                    upload,
+                    view().class("file-upload-wrap").fill((
+                        view().class("file-upload-icon").fill(icon(Icon::Upload)),
+                        upload,
+                    )),
                     action(crate::i18n::t("file_mgr.new_folder"), move || {
                         set(folder_open, true)
                     })
                     .variant(sapid::ButtonVariant::Secondary)
-                    .class("btn btn-outline btn-sm"),
+                    .name(crate::i18n::t("file_mgr.new_folder"))
+                    .label("")
+                    .class("btn btn-outline btn-sm with-icon")
+                    .fill((
+                        icon(Icon::Plus),
+                        label(crate::i18n::t("file_mgr.new_folder")),
+                    )),
                     view().class("toolbar-spacer"),
                     sapid::text_field()
                         .theme(theme())
@@ -299,26 +312,30 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 )),
                 status(feedback),
                 row().class("file-view-toggle").fill((
-                    action(crate::i18n::t("file_list.view_grid"), move || {
-                        set(grid_view, true)
-                    })
+                    icon_button(
+                        crate::i18n::t("file_list.view_grid"),
+                        Icon::Grid,
+                        move || set(grid_view, true),
+                    )
                     .variant(sapid::ButtonVariant::Secondary)
                     .class(grid_view.map(|grid| {
                         if *grid {
-                            "toggle-btn active".to_string()
+                            "toggle-btn icon-button active".to_string()
                         } else {
-                            "toggle-btn".to_string()
+                            "toggle-btn icon-button".to_string()
                         }
                     })),
-                    action(crate::i18n::t("file_list.view_list"), move || {
-                        set(grid_view, false)
-                    })
+                    icon_button(
+                        crate::i18n::t("file_list.view_list"),
+                        Icon::List,
+                        move || set(grid_view, false),
+                    )
                     .variant(sapid::ButtonVariant::Secondary)
                     .class(grid_view.map(|grid| {
                         if !*grid {
-                            "toggle-btn active".to_string()
+                            "toggle-btn icon-button active".to_string()
                         } else {
-                            "toggle-btn".to_string()
+                            "toggle-btn icon-button".to_string()
                         }
                     })),
                 )),
@@ -387,15 +404,15 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                 .style_fn(card_style)
                                 .fill((
                                     col().class("file-card-body").fill((
-                                        text()
+                                        view()
                                             .class(row_scope.bond(move || {
                                                 file_icon_class(&item.get()).to_owned()
                                             }))
-                                            .content(
+                                            .fill(icon_sized(Icon::Document, 20.).drawing(
                                                 row_scope.bond(move || {
-                                                    file_icon(&item.get()).to_owned()
+                                                    icon_drawing(file_icon(&item.get()))
                                                 }),
-                                            ),
+                                            )),
                                         sapid::button()
                                             .theme(theme())
                                             .variant(sapid::ButtonVariant::Secondary)
@@ -437,7 +454,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                         },
                                     )),
                                     row().class("file-actions").fill((
-                                        action("Rename", move || {
+                                        icon_button("Rename", Icon::Pencil, move || {
                                             let rename_file = item.get();
                                             let Some(window) = web_sys::window() else {
                                                 return;
@@ -480,8 +497,8 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                             });
                                         })
                                         .variant(sapid::ButtonVariant::Secondary)
-                                        .class("file-rename"),
-                                        action("Delete", move || {
+                                        .class("file-rename icon-button"),
+                                        icon_button("Delete", Icon::Trash, move || {
                                             let delete_file = item.get();
                                             if !web_sys::window().is_some_and(|window| {
                                                 window
@@ -513,7 +530,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                             });
                                         })
                                         .variant(sapid::ButtonVariant::Secondary)
-                                        .class("file-delete"),
+                                        .class("file-delete icon-button"),
                                     )),
                                 ))
                                 .build(row_scope)
@@ -551,15 +568,8 @@ fn file_kind(file: &FileResponse) -> &'static str {
         "generic"
     }
 }
-fn file_icon(file: &FileResponse) -> &'static str {
-    match file_kind(file) {
-        "folder" => "F",
-        "writer" => "W",
-        "calc" => "C",
-        "slides" => "S",
-        "whiteboard" => "B",
-        _ => "↧",
-    }
+fn file_icon(file: &FileResponse) -> Icon {
+    Icon::document(file_kind(file))
 }
 fn file_icon_class(file: &FileResponse) -> &'static str {
     match file_kind(file) {

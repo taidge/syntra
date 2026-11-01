@@ -1,6 +1,5 @@
 use chrono::Utc;
-use diesel::SqliteConnection;
-use diesel::prelude::*;
+use horme::prelude::*;
 use uuid::Uuid;
 
 use contrix_core::models::NewActivityLog;
@@ -20,8 +19,8 @@ impl AuditService {
     ///
     /// `ip_address` and `user_agent` are optional enhanced-audit fields that, when
     /// present, enrich the log entry with request context.
-    pub fn log(
-        conn: &mut SqliteConnection,
+    pub async fn log(
+        conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
         user_id: &str,
         action: &str,
         resource_type: &str,
@@ -43,6 +42,7 @@ impl AuditService {
         if let Err(e) = diesel::insert_into(al::activity_logs)
             .values(&entry)
             .execute(conn)
+            .await
         {
             tracing::error!("AuditService: failed to insert activity log: {e}");
         }

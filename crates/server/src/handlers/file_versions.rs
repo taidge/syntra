@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -47,6 +49,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(f::id.eq(&file_id_param))
         .filter(f::owner_id.eq(&uid))
         .first::<File>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(_)) => {}
@@ -70,6 +73,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(fv::file_id.eq(&file_id_param))
         .order(fv::version_number.desc())
         .load::<FileVersion>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let versions: Vec<serde_json::Value> = rows
@@ -135,6 +139,7 @@ pub async fn create_version(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(f::owner_id.eq(&uid))
         .filter(f::is_folder.eq(false))
         .first::<File>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => row,
@@ -159,6 +164,7 @@ pub async fn create_version(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(fv::file_id.eq(&file_id_param))
         .select(diesel::dsl::max(fv::version_number))
         .first::<Option<i32>>(&mut conn)
+        .await
         .unwrap_or(None);
 
     let next_version = max_version.unwrap_or(0) + 1;
@@ -177,6 +183,7 @@ pub async fn create_version(req: &mut Request, depot: &mut Depot, res: &mut Resp
     match diesel::insert_into(fv::file_versions)
         .values(&new_version)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             res.status_code(StatusCode::CREATED);

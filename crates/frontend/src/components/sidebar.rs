@@ -22,7 +22,10 @@ pub fn Sidebar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
             .class("sidebar-action")
             .name(crate::i18n::t(key))
             .label("")
-            .fill((label("+").class("action-icon"), label(crate::i18n::t(key))))
+            .fill((
+                icon(Icon::document(kind)).class("ui-icon action-icon"),
+                label(crate::i18n::t(key)),
+            ))
     })
     .collect::<Vec<_>>();
     view().class("sidebar").fill((

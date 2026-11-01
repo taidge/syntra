@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -22,13 +23,13 @@ use crate::middleware::auth::get_user_id;
 /// Returns `Ok(None)` when the document does not exist *or* the caller is not
 /// permitted to access it (forbidden is folded into not-found so existence is
 /// not leaked). Only genuine database errors propagate as `Err`.
-fn resolve_document_id(
-    conn: &mut diesel::SqliteConnection,
+async fn resolve_document_id(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     identifier: &str,
     user_id: &str,
     required_role: &str,
 ) -> Result<Option<String>, AppError> {
-    match load_accessible_document(conn, identifier, user_id, required_role) {
+    match load_accessible_document(conn, identifier, user_id, required_role).await {
         Ok(Some(_)) => Ok(Some(identifier.to_string())),
         Ok(None) | Err(AppError::Forbidden(_)) | Err(AppError::NotFound(_)) => Ok(None),
         Err(e) => Err(e),
@@ -88,7 +89,8 @@ pub async fn sign_document(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "editor") {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "editor").await
+    {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -109,6 +111,7 @@ pub async fn sign_document(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(d::id.eq(&resolved_doc_id))
         .select(d::content)
         .first::<Option<String>>(&mut conn)
+        .await
         .unwrap_or(None);
 
     let content_str = content_opt.unwrap_or_default();
@@ -130,6 +133,7 @@ pub async fn sign_document(req: &mut Request, depot: &mut Depot, res: &mut Respo
     match diesel::insert_into(ds::document_signatures)
         .values(&new_sig)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             res.status_code(StatusCode::CREATED);
@@ -182,7 +186,8 @@ pub async fn list_signatures(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer") {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer").await
+    {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -202,6 +207,7 @@ pub async fn list_signatures(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(ds::document_id.eq(&resolved_doc_id))
         .order(ds::signed_at.desc())
         .load::<DocumentSignature>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let sigs: Vec<serde_json::Value> = rows
@@ -261,7 +267,8 @@ pub async fn verify_signatures(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer") {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer").await
+    {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -282,6 +289,7 @@ pub async fn verify_signatures(req: &mut Request, depot: &mut Depot, res: &mut R
         .filter(d::id.eq(&resolved_doc_id))
         .select(d::content)
         .first::<Option<String>>(&mut conn)
+        .await
         .unwrap_or(None);
 
     let content_str = content_opt.unwrap_or_default();
@@ -292,6 +300,7 @@ pub async fn verify_signatures(req: &mut Request, depot: &mut Depot, res: &mut R
         .filter(ds::document_id.eq(&resolved_doc_id))
         .order(ds::signed_at.desc())
         .load::<DocumentSignature>(&mut conn)
+        .await
         .unwrap_or_default();
 
     let results: Vec<serde_json::Value> = signatures

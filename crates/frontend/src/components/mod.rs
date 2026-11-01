@@ -3,6 +3,7 @@ pub mod comments_pane;
 pub mod context_menu;
 pub mod file_list;
 pub mod find_dialog;
+pub mod icons;
 pub mod menubar;
 pub mod mobile_bar;
 pub mod modal;
@@ -16,3 +17,6 @@ pub mod version_history;
 
 pub use toast::{Toast, ToastKind, ToastRack, push_toast};
 pub mod ui;
+
+#[cfg(test)]
+mod mount_tests;

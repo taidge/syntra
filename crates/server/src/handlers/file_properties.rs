@@ -1,4 +1,5 @@
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -47,6 +48,7 @@ pub async fn list_properties(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(f::owner_id.eq(&uid))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0)
         > 0;
 
@@ -61,6 +63,7 @@ pub async fn list_properties(req: &mut Request, depot: &mut Depot, res: &mut Res
     match fp::file_properties
         .filter(fp::file_id.eq(&file_id_param))
         .load::<FileProperty>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let props: Vec<serde_json::Value> = rows
@@ -138,6 +141,7 @@ pub async fn set_property(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .filter(f::owner_id.eq(&uid))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0)
         > 0;
 
@@ -156,7 +160,8 @@ pub async fn set_property(req: &mut Request, depot: &mut Depot, res: &mut Respon
             .filter(fp::prop_key.eq(&key_param)),
     )
     .set(fp::prop_value.eq(&body.value))
-    .execute(&mut conn);
+    .execute(&mut conn)
+    .await;
 
     match updated {
         Ok(0) => {
@@ -171,6 +176,7 @@ pub async fn set_property(req: &mut Request, depot: &mut Depot, res: &mut Respon
             match diesel::insert_into(fp::file_properties)
                 .values(&new_prop)
                 .execute(&mut conn)
+                .await
             {
                 Ok(_) => {
                     res.status_code(StatusCode::OK);
@@ -241,6 +247,7 @@ pub async fn delete_property(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(f::owner_id.eq(&uid))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0)
         > 0;
 
@@ -258,6 +265,7 @@ pub async fn delete_property(req: &mut Request, depot: &mut Depot, res: &mut Res
             .filter(fp::prop_key.eq(&key_param)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

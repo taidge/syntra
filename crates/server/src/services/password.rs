@@ -1,5 +1,5 @@
-use diesel::SqliteConnection;
-use diesel::prelude::*;
+use horme::prelude::*;
+use std::result::Result;
 
 use contrix_core::error::AppError;
 use contrix_core::models::PasswordPolicy;
@@ -11,9 +11,12 @@ impl PasswordService {
     /// Get the current password policy from the database.
     ///
     /// Returns sensible defaults if no policy row exists yet.
-    pub fn get_policy(conn: &mut SqliteConnection) -> PasswordPolicy {
+    pub async fn get_policy(
+        conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+    ) -> PasswordPolicy {
         match pp::password_policies
             .first::<PasswordPolicy>(conn)
+            .await
             .optional()
         {
             Ok(Some(policy)) => policy,
@@ -38,8 +41,11 @@ impl PasswordService {
     ///
     /// Returns `Ok(())` if the password passes all checks, or an
     /// `AppError::Validation` with a human-readable explanation on failure.
-    pub fn validate_password(conn: &mut SqliteConnection, password: &str) -> Result<(), AppError> {
-        let policy = Self::get_policy(conn);
+    pub async fn validate_password(
+        conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+        password: &str,
+    ) -> Result<(), AppError> {
+        let policy = Self::get_policy(conn).await;
 
         if (password.len() as i32) < policy.min_length {
             return Err(AppError::Validation(format!(

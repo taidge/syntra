@@ -1,8 +1,5 @@
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
-};
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -66,23 +63,30 @@ pub async fn get_stats(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    let total_users = u::users.count().get_result::<i64>(&mut conn).unwrap_or(0) as u64;
+    let total_users = u::users
+        .count()
+        .get_result::<i64>(&mut conn)
+        .await
+        .unwrap_or(0) as u64;
 
     let total_files = f::files
         .filter(f::is_trashed.eq(false))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0) as u64;
 
     let total_documents = d::documents
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0) as u64;
 
     // Use raw SQL for the SUM to avoid Numeric type mismatch with SQLite.
     let total_storage_used: i64 =
         diesel::sql_query("SELECT COALESCE(SUM(storage_used), 0) AS total FROM users")
             .get_result::<StorageSum>(&mut conn)
+            .await
             .map(|r| r.total)
             .unwrap_or(0);
 
@@ -157,6 +161,7 @@ pub async fn list_users(req: &mut Request, depot: &mut Depot, res: &mut Response
             String,
             Option<String>,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let user_list: Vec<serde_json::Value> = rows
@@ -238,6 +243,7 @@ pub async fn get_activity(req: &mut Request, depot: &mut Depot, res: &mut Respon
             Option<String>,
             String,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let logs: Vec<serde_json::Value> = rows
@@ -345,6 +351,7 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
             .filter(u::role.eq("admin"))
             .count()
             .get_result::<i64>(&mut conn)
+            .await
             .unwrap_or(0)
             > 0;
         if is_target_admin {
@@ -352,6 +359,7 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 .filter(u::role.eq("admin"))
                 .count()
                 .get_result::<i64>(&mut conn)
+                .await
                 .unwrap_or(0);
             if admin_count <= 1 {
                 res.status_code(StatusCode::BAD_REQUEST);
@@ -374,6 +382,7 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 u::updated_at.eq(&now),
             ))
             .execute(&mut conn)
+            .await
     } else if body.role.is_some() {
         diesel::update(u::users.filter(u::id.eq(&user_id_param)))
             .set((
@@ -381,6 +390,7 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 u::updated_at.eq(&now),
             ))
             .execute(&mut conn)
+            .await
     } else {
         diesel::update(u::users.filter(u::id.eq(&user_id_param)))
             .set((
@@ -388,6 +398,7 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 u::updated_at.eq(&now),
             ))
             .execute(&mut conn)
+            .await
     };
 
     match result {
@@ -410,7 +421,8 @@ pub async fn update_user(req: &mut Request, depot: &mut Depot, res: &mut Respons
                     ip_address: audit_ip.as_deref(),
                     user_agent: audit_ua.as_deref(),
                 },
-            );
+            )
+            .await;
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
                 serde_json::json!({ "message": "User updated" }),
@@ -449,7 +461,9 @@ pub async fn force_logout_user(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    match diesel::delete(sess::sessions.filter(sess::user_id.eq(&user_id_param))).execute(&mut conn)
+    match diesel::delete(sess::sessions.filter(sess::user_id.eq(&user_id_param)))
+        .execute(&mut conn)
+        .await
     {
         Ok(count) => {
             res.status_code(StatusCode::OK);
@@ -497,6 +511,7 @@ pub async fn disable_user(req: &mut Request, depot: &mut Depot, res: &mut Respon
     match diesel::update(u::users.filter(u::id.eq(&user_id_param)))
         .set((u::role.eq("disabled"), u::updated_at.eq(&now)))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -508,7 +523,8 @@ pub async fn disable_user(req: &mut Request, depot: &mut Depot, res: &mut Respon
             // Revoke active sessions so the disabled user cannot keep using a
             // server-side session, and record the action in the audit log.
             let _ = diesel::delete(sess::sessions.filter(sess::user_id.eq(&user_id_param)))
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
             crate::services::AuditService::log(
                 &mut conn,
                 &actor,
@@ -520,7 +536,8 @@ pub async fn disable_user(req: &mut Request, depot: &mut Depot, res: &mut Respon
                     ip_address: ip.as_deref(),
                     user_agent: ua.as_deref(),
                 },
-            );
+            )
+            .await;
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
                 serde_json::json!({ "message": "User disabled" }),
@@ -564,6 +581,7 @@ pub async fn activate_user(req: &mut Request, depot: &mut Depot, res: &mut Respo
     match diesel::update(u::users.filter(u::id.eq(&user_id_param)))
         .set((u::role.eq("editor"), u::updated_at.eq(&now)))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -634,6 +652,7 @@ pub async fn list_disabled_users(depot: &mut Depot, res: &mut Response) {
             String,
             Option<String>,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let user_list: Vec<serde_json::Value> = rows
@@ -693,18 +712,21 @@ pub async fn user_status_stats(depot: &mut Depot, res: &mut Response) {
         .filter(u::role.ne("disabled").and(u::role.ne("admin")))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
 
     let disabled_count = u::users
         .filter(u::role.eq("disabled"))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
 
     let admin_count = u::users
         .filter(u::role.eq("admin"))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
 
     res.status_code(StatusCode::OK);
@@ -774,6 +796,7 @@ pub async fn import_users(req: &mut Request, depot: &mut Depot, res: &mut Respon
             .filter(u::username.eq(&entry.username))
             .count()
             .get_result(&mut conn)
+            .await
             .unwrap_or(0);
 
         if username_exists > 0 {
@@ -790,6 +813,7 @@ pub async fn import_users(req: &mut Request, depot: &mut Depot, res: &mut Respon
             .filter(u::email.eq(&entry.email))
             .count()
             .get_result(&mut conn)
+            .await
             .unwrap_or(0);
 
         if email_exists > 0 {
@@ -802,19 +826,21 @@ pub async fn import_users(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
 
         // Hash password with Argon2.
-        let salt = SaltString::generate(&mut OsRng);
-        let password_hash = match Argon2::default().hash_password(entry.password.as_bytes(), &salt)
-        {
-            Ok(hash) => hash.to_string(),
-            Err(e) => {
-                failed += 1;
-                errors.push(serde_json::json!({
-                    "username": entry.username,
-                    "error": format!("Password hashing failed: {e}")
-                }));
-                continue;
-            }
-        };
+        let password_hash =
+            match crate::services::password_crypto::hash_password(entry.password.clone()).await {
+                Ok(hash) => hash,
+                Err(e) => {
+                    failed += 1;
+                    errors.push(serde_json::json!({
+                        "username": entry.username,
+                        "error": match e {
+                            AppError::Internal(message) => message,
+                            _ => "Password hashing failed".to_string(),
+                        }
+                    }));
+                    continue;
+                }
+            };
 
         let role_val = entry.role.as_deref().unwrap_or("editor").to_string();
 
@@ -836,6 +862,7 @@ pub async fn import_users(req: &mut Request, depot: &mut Depot, res: &mut Respon
         match diesel::insert_into(u::users)
             .values(&new_user)
             .execute(&mut conn)
+            .await
         {
             Ok(_) => {
                 created += 1;

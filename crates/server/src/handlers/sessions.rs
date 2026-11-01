@@ -3,15 +3,17 @@ use contrix_core::dto::{ApiResponse, SessionResponse};
 use contrix_core::error::AppError;
 use contrix_core::schema::sessions::dsl as s;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use crate::middleware::auth::{get_user_id, hash_token};
 
 /// Resolve the current session id from the Authorization header.
-fn resolve_current_session_id(
+async fn resolve_current_session_id(
     req: &Request,
     uid: &str,
-    conn: &mut diesel::SqliteConnection,
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
 ) -> Option<String> {
     let token = req
         .headers()
@@ -28,6 +30,7 @@ fn resolve_current_session_id(
         .filter(s::token_hash.eq(&token_hash_val))
         .select(s::id)
         .first::<String>(conn)
+        .await
         .optional()
         .unwrap_or(None)
 }
@@ -74,6 +77,7 @@ pub async fn list_sessions(depot: &mut Depot, res: &mut Response) {
             s::last_activity_at,
         ))
         .load::<(String, Option<String>, Option<String>, bool, String, String)>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let sessions: Vec<SessionResponse> = rows
@@ -130,7 +134,7 @@ pub async fn get_current_session(req: &mut Request, depot: &mut Depot, res: &mut
         }
     };
 
-    let current_id = match resolve_current_session_id(req, &uid, &mut conn) {
+    let current_id = match resolve_current_session_id(req, &uid, &mut conn).await {
         Some(id) => id,
         None => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -152,6 +156,7 @@ pub async fn get_current_session(req: &mut Request, depot: &mut Depot, res: &mut
             s::last_activity_at,
         ))
         .first::<(String, Option<String>, Option<String>, bool, String, String)>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some((sid, sip, sua, sactive, screated, slast))) => {
@@ -219,6 +224,7 @@ pub async fn revoke_session(req: &mut Request, depot: &mut Depot, res: &mut Resp
     )
     .set(s::is_active.eq(false))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -270,17 +276,20 @@ pub async fn revoke_all_sessions(req: &mut Request, depot: &mut Depot, res: &mut
         }
     };
 
-    let current_session_id = resolve_current_session_id(req, &uid, &mut conn);
+    let current_session_id = resolve_current_session_id(req, &uid, &mut conn).await;
 
     let result = match &current_session_id {
-        Some(current_id) => diesel::update(
-            s::sessions
-                .filter(s::user_id.eq(&uid))
-                .filter(s::is_active.eq(true))
-                .filter(s::id.ne(current_id)),
-        )
-        .set(s::is_active.eq(false))
-        .execute(&mut conn),
+        Some(current_id) => {
+            diesel::update(
+                s::sessions
+                    .filter(s::user_id.eq(&uid))
+                    .filter(s::is_active.eq(true))
+                    .filter(s::id.ne(current_id)),
+            )
+            .set(s::is_active.eq(false))
+            .execute(&mut conn)
+            .await
+        }
         None => {
             // This should be unreachable behind the JWT middleware, but fail
             // closed if the bearer token cannot be tied to a session.
@@ -291,6 +300,7 @@ pub async fn revoke_all_sessions(req: &mut Request, depot: &mut Depot, res: &mut
             )
             .set(s::is_active.eq(false))
             .execute(&mut conn)
+            .await
         }
     };
 

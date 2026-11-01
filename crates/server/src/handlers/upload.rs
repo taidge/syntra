@@ -1,5 +1,7 @@
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -48,8 +50,8 @@ fn session_is_expired(session: &UploadSession) -> bool {
         .unwrap_or(true)
 }
 
-fn check_room_access(
-    conn: &mut diesel::SqliteConnection,
+async fn check_room_access(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     user_id: &str,
     room_id: &str,
     required_role: &str,
@@ -61,6 +63,7 @@ fn check_room_access(
         .filter(rm::user_id.eq(user_id))
         .select(rm::role)
         .first::<String>(conn)
+        .await
         .optional()
         .map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -82,8 +85,8 @@ fn check_room_access(
     }
 }
 
-fn verify_upload_destination(
-    conn: &mut diesel::SqliteConnection,
+async fn verify_upload_destination(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     user_id: &str,
     parent_id: Option<&str>,
     room_id: Option<&str>,
@@ -94,12 +97,13 @@ fn verify_upload_destination(
             .filter(f::is_folder.eq(true))
             .filter(f::is_trashed.eq(false))
             .first::<File>(conn)
+            .await
             .optional()
             .map_err(|e| AppError::Database(e.to_string()))?
             .ok_or_else(|| AppError::NotFound("Parent folder not found".into()))?;
 
         if let Some(parent_room_id) = parent.room_id.as_deref() {
-            check_room_access(conn, user_id, parent_room_id, "editor")?;
+            check_room_access(conn, user_id, parent_room_id, "editor").await?;
         } else if parent.owner_id != user_id {
             return Err(AppError::NotFound("Parent folder not found".into()));
         }
@@ -114,7 +118,7 @@ fn verify_upload_destination(
 
         Ok(parent.room_id)
     } else if let Some(room_id) = room_id {
-        check_room_access(conn, user_id, room_id, "editor")?;
+        check_room_access(conn, user_id, room_id, "editor").await?;
         Ok(Some(room_id.to_string()))
     } else {
         Ok(None)
@@ -196,7 +200,9 @@ pub async fn create_upload_session(req: &mut Request, depot: &mut Depot, res: &m
         &uid,
         parent_id.as_deref(),
         requested_room_id.as_deref(),
-    ) {
+    )
+    .await
+    {
         Ok(room_id) => room_id,
         Err(e) => {
             render_app_error(res, e);
@@ -226,6 +232,7 @@ pub async fn create_upload_session(req: &mut Request, depot: &mut Depot, res: &m
     if let Err(e) = diesel::insert_into(us::upload_sessions)
         .values(&new_session)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -295,6 +302,7 @@ pub async fn upload_chunk(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .filter(us::id.eq(&session_id_param))
         .filter(us::user_id.eq(&uid))
         .first::<UploadSession>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(s)) => s,
@@ -387,6 +395,7 @@ pub async fn upload_chunk(req: &mut Request, depot: &mut Depot, res: &mut Respon
             us::uploaded_size.eq(new_uploaded_size),
         ))
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -439,6 +448,7 @@ pub async fn complete_upload(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(us::id.eq(&session_id_param))
         .filter(us::user_id.eq(&uid))
         .first::<UploadSession>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(s)) => s,
@@ -495,7 +505,9 @@ pub async fn complete_upload(req: &mut Request, depot: &mut Depot, res: &mut Res
         &uid,
         session.parent_id.as_deref(),
         session.room_id.as_deref(),
-    ) {
+    )
+    .await
+    {
         Ok(room_id) => room_id,
         Err(e) => {
             render_app_error(res, e);
@@ -582,6 +594,7 @@ pub async fn complete_upload(req: &mut Request, depot: &mut Depot, res: &mut Res
     if let Err(e) = diesel::insert_into(f::files)
         .values(&new_file)
         .execute(&mut conn)
+        .await
     {
         let _ = state.storage.delete_file(&storage_path).await;
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
@@ -594,12 +607,14 @@ pub async fn complete_upload(req: &mut Request, depot: &mut Depot, res: &mut Res
     // Update user storage_used.
     let _ = diesel::update(u_dsl::users.filter(u_dsl::id.eq(&uid)))
         .set(u_dsl::storage_used.eq(u_dsl::storage_used + size_val))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     // Mark the session as completed.
     let _ = diesel::update(us::upload_sessions.filter(us::id.eq(&session_id_param)))
         .set(us::status.eq("completed"))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     let file_resp = FileResponse {
         id: file_id_val,
@@ -659,6 +674,7 @@ pub async fn cancel_upload(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(us::id.eq(&session_id_param))
         .filter(us::user_id.eq(&uid))
         .first::<UploadSession>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(session)) => session,
@@ -689,6 +705,7 @@ pub async fn cancel_upload(req: &mut Request, depot: &mut Depot, res: &mut Respo
             .filter(us::user_id.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

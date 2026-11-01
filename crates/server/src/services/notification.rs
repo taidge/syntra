@@ -1,7 +1,5 @@
 use chrono::Utc;
-use diesel::SqliteConnection;
-use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
+use horme::prelude::*;
 use uuid::Uuid;
 
 use contrix_core::models::NewNotification;
@@ -13,7 +11,7 @@ pub struct NotificationService;
 
 impl NotificationService {
     pub async fn create(
-        pool: &Pool<ConnectionManager<SqliteConnection>>,
+        pool: &crate::state::DbPool,
         bus: &NotificationBus,
         user_id: &str,
         notification_type: &str,
@@ -47,6 +45,7 @@ impl NotificationService {
         if let Err(e) = diesel::insert_into(n::notifications)
             .values(&row)
             .execute(&mut conn)
+            .await
         {
             tracing::error!("NotificationService: failed to insert notification: {e}");
             return;

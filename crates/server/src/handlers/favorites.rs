@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -90,6 +91,7 @@ pub async fn add_favorite(req: &mut Request, depot: &mut Depot, res: &mut Respon
     match diesel::insert_into(fav::favorites)
         .values(&new_fav)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             res.status_code(StatusCode::CREATED);
@@ -143,6 +145,7 @@ pub async fn remove_favorite(req: &mut Request, depot: &mut Depot, res: &mut Res
             .filter(fav::file_id.eq(&file_id_param)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -200,6 +203,7 @@ pub async fn list_favorites(depot: &mut Depot, res: &mut Response) {
         .select(fav::file_id)
         .order(fav::created_at.desc())
         .load::<String>(&mut conn)
+        .await
     {
         Ok(ids) => ids,
         Err(e) => {
@@ -220,13 +224,15 @@ pub async fn list_favorites(depot: &mut Depot, res: &mut Response) {
     match f::files
         .filter(f::id.eq_any(&fav_file_ids))
         .load::<File>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let mut file_list: Vec<FileResponse> =
                 rows.into_iter().map(file_model_to_response).collect();
             for r in &mut file_list {
                 r.shared_with_count =
-                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string());
+                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string())
+                        .await;
             }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));

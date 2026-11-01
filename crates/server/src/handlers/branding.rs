@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -73,6 +75,7 @@ pub async fn get_branding(depot: &mut Depot, res: &mut Response) {
 
     match bs::branding_settings
         .first::<BrandingSettings>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => {
@@ -142,6 +145,7 @@ pub async fn update_branding(req: &mut Request, depot: &mut Depot, res: &mut Res
     // Check if branding settings already exist.
     let existing = bs::branding_settings
         .first::<BrandingSettings>(&mut conn)
+        .await
         .optional();
 
     match existing {
@@ -150,37 +154,44 @@ pub async fn update_branding(req: &mut Request, depot: &mut Depot, res: &mut Res
             if let Some(ref logo_url) = body.logo_url {
                 let _ = diesel::update(bs::branding_settings.filter(bs::id.eq(&row.id)))
                     .set(bs::logo_url.eq(Some(logo_url)))
-                    .execute(&mut conn);
+                    .execute(&mut conn)
+                    .await;
             }
             if let Some(ref favicon_url) = body.favicon_url {
                 let _ = diesel::update(bs::branding_settings.filter(bs::id.eq(&row.id)))
                     .set(bs::favicon_url.eq(Some(favicon_url)))
-                    .execute(&mut conn);
+                    .execute(&mut conn)
+                    .await;
             }
             if let Some(ref app_name) = body.app_name {
                 let _ = diesel::update(bs::branding_settings.filter(bs::id.eq(&row.id)))
                     .set(bs::app_name.eq(app_name))
-                    .execute(&mut conn);
+                    .execute(&mut conn)
+                    .await;
             }
             if let Some(ref primary_color) = body.primary_color {
                 let _ = diesel::update(bs::branding_settings.filter(bs::id.eq(&row.id)))
                     .set(bs::primary_color.eq(Some(primary_color)))
-                    .execute(&mut conn);
+                    .execute(&mut conn)
+                    .await;
             }
             if let Some(ref custom_css) = body.custom_css {
                 let _ = diesel::update(bs::branding_settings.filter(bs::id.eq(&row.id)))
                     .set(bs::custom_css.eq(Some(custom_css)))
-                    .execute(&mut conn);
+                    .execute(&mut conn)
+                    .await;
             }
 
             // Always update metadata.
             let _ = diesel::update(bs::branding_settings.filter(bs::id.eq(&row.id)))
                 .set((bs::updated_by.eq(&uid), bs::updated_at.eq(now.to_rfc3339())))
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
 
             // Return updated record.
             match bs::branding_settings
                 .first::<BrandingSettings>(&mut conn)
+                .await
                 .optional()
             {
                 Ok(Some(updated)) => {
@@ -214,6 +225,7 @@ pub async fn update_branding(req: &mut Request, depot: &mut Depot, res: &mut Res
             if let Err(e) = diesel::insert_into(bs::branding_settings)
                 .values(&new_branding)
                 .execute(&mut conn)
+                .await
             {
                 res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
                 res.render(Json(ApiResponse::<()>::err(
@@ -268,7 +280,9 @@ pub async fn reset_branding(depot: &mut Depot, res: &mut Response) {
     };
 
     // Delete all branding settings to reset to defaults.
-    let _ = diesel::delete(bs::branding_settings).execute(&mut conn);
+    let _ = diesel::delete(bs::branding_settings)
+        .execute(&mut conn)
+        .await;
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(default_branding())));

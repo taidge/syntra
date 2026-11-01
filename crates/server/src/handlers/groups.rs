@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -20,8 +22,8 @@ use crate::middleware::auth::get_user_id;
 // ---------------------------------------------------------------------------
 
 /// Whether `user_id` created `group_id` or is a member of it.
-fn is_group_participant(
-    conn: &mut diesel::SqliteConnection,
+async fn is_group_participant(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     group_id: &str,
     user_id: &str,
 ) -> bool {
@@ -30,6 +32,7 @@ fn is_group_participant(
         .filter(g::created_by.eq(user_id))
         .count()
         .get_result::<i64>(conn)
+        .await
         .unwrap_or(0)
         > 0;
     if is_creator {
@@ -40,6 +43,7 @@ fn is_group_participant(
         .filter(gm::user_id.eq(user_id))
         .count()
         .get_result::<i64>(conn)
+        .await
         .unwrap_or(0)
         > 0
 }
@@ -111,6 +115,7 @@ pub async fn create_group(req: &mut Request, depot: &mut Depot, res: &mut Respon
     if let Err(e) = diesel::insert_into(g::groups)
         .values(&new_group)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -166,19 +171,19 @@ pub async fn list_groups(depot: &mut Depot, res: &mut Response) {
         .filter(g::created_by.eq(&uid))
         .order(g::updated_at.desc())
         .load::<Group>(&mut conn)
+        .await
     {
         Ok(rows) => {
-            let group_list: Vec<GroupResponse> = rows
-                .into_iter()
-                .map(|group| {
-                    let count: i64 = gm::group_members
-                        .filter(gm::group_id.eq(&group.id))
-                        .count()
-                        .get_result(&mut conn)
-                        .unwrap_or(0);
-                    group_model_to_response(group, count as u32)
-                })
-                .collect();
+            let mut group_list = Vec::with_capacity(rows.len());
+            for group in rows {
+                let count: i64 = gm::group_members
+                    .filter(gm::group_id.eq(&group.id))
+                    .count()
+                    .get_result(&mut conn)
+                    .await
+                    .unwrap_or(0);
+                group_list.push(group_model_to_response(group, count as u32));
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(group_list)));
         }
@@ -225,10 +230,11 @@ pub async fn get_group(req: &mut Request, depot: &mut Depot, res: &mut Response)
     match g::groups
         .filter(g::id.eq(&group_id_param))
         .first::<Group>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(group)) => {
-            if !is_group_participant(&mut conn, &group_id_param, &uid) {
+            if !is_group_participant(&mut conn, &group_id_param, &uid).await {
                 res.status_code(StatusCode::FORBIDDEN);
                 res.render(Json(ApiResponse::<()>::err(
                     AppError::Forbidden("Not a member of this group".into()).to_response(),
@@ -239,6 +245,7 @@ pub async fn get_group(req: &mut Request, depot: &mut Depot, res: &mut Response)
                 .filter(gm::group_id.eq(&group.id))
                 .count()
                 .get_result(&mut conn)
+                .await
                 .unwrap_or(0);
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(group_model_to_response(
@@ -306,34 +313,43 @@ pub async fn update_group(req: &mut Request, depot: &mut Depot, res: &mut Respon
     };
 
     let result = match (&body.name, &body.description) {
-        (Some(name), Some(desc)) => diesel::update(
-            g::groups
-                .filter(g::id.eq(&group_id_param))
-                .filter(g::created_by.eq(&uid)),
-        )
-        .set((
-            g::name.eq(name),
-            g::description.eq(Some(desc)),
-            g::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn),
-        (Some(name), None) => diesel::update(
-            g::groups
-                .filter(g::id.eq(&group_id_param))
-                .filter(g::created_by.eq(&uid)),
-        )
-        .set((g::name.eq(name), g::updated_at.eq(now.to_rfc3339())))
-        .execute(&mut conn),
-        (None, Some(desc)) => diesel::update(
-            g::groups
-                .filter(g::id.eq(&group_id_param))
-                .filter(g::created_by.eq(&uid)),
-        )
-        .set((
-            g::description.eq(Some(desc)),
-            g::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn),
+        (Some(name), Some(desc)) => {
+            diesel::update(
+                g::groups
+                    .filter(g::id.eq(&group_id_param))
+                    .filter(g::created_by.eq(&uid)),
+            )
+            .set((
+                g::name.eq(name),
+                g::description.eq(Some(desc)),
+                g::updated_at.eq(now.to_rfc3339()),
+            ))
+            .execute(&mut conn)
+            .await
+        }
+        (Some(name), None) => {
+            diesel::update(
+                g::groups
+                    .filter(g::id.eq(&group_id_param))
+                    .filter(g::created_by.eq(&uid)),
+            )
+            .set((g::name.eq(name), g::updated_at.eq(now.to_rfc3339())))
+            .execute(&mut conn)
+            .await
+        }
+        (None, Some(desc)) => {
+            diesel::update(
+                g::groups
+                    .filter(g::id.eq(&group_id_param))
+                    .filter(g::created_by.eq(&uid)),
+            )
+            .set((
+                g::description.eq(Some(desc)),
+                g::updated_at.eq(now.to_rfc3339()),
+            ))
+            .execute(&mut conn)
+            .await
+        }
         (None, None) => {
             res.status_code(StatusCode::BAD_REQUEST);
             res.render(Json(ApiResponse::<()>::err(
@@ -398,7 +414,8 @@ pub async fn delete_group(req: &mut Request, depot: &mut Depot, res: &mut Respon
 
     // Delete group members first.
     let _ = diesel::delete(gm::group_members.filter(gm::group_id.eq(&group_id_param)))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     match diesel::delete(
         g::groups
@@ -406,6 +423,7 @@ pub async fn delete_group(req: &mut Request, depot: &mut Depot, res: &mut Respon
             .filter(g::created_by.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -476,6 +494,7 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
         .filter(g::created_by.eq(&uid))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -508,6 +527,7 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
     match diesel::insert_into(gm::group_members)
         .values(&new_member)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             // Fetch username for response.
@@ -515,6 +535,7 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
                 .filter(u::id.eq(body.user_id.to_string()))
                 .select((u::username, u::display_name))
                 .first::<(String, Option<String>)>(&mut conn)
+                .await
                 .unwrap_or(("unknown".to_string(), None));
 
             let resp = GroupMemberResponse {
@@ -575,6 +596,7 @@ pub async fn remove_member(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(g::created_by.eq(&uid))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -600,6 +622,7 @@ pub async fn remove_member(req: &mut Request, depot: &mut Depot, res: &mut Respo
             .filter(gm::user_id.eq(&user_id_param)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -653,7 +676,7 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
-    if !is_group_participant(&mut conn, &group_id_param, &uid) {
+    if !is_group_participant(&mut conn, &group_id_param, &uid).await {
         res.status_code(StatusCode::FORBIDDEN);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Forbidden("Not a member of this group".into()).to_response(),
@@ -673,6 +696,7 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
             gm::added_at,
         ))
         .load::<(String, String, String, String, Option<String>, String)>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let members: Vec<GroupMemberResponse> = rows

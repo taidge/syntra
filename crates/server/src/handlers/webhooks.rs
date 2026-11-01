@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -132,6 +134,7 @@ pub async fn create_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
     if let Err(e) = diesel::insert_into(w::webhooks)
         .values(&new_webhook)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -189,6 +192,7 @@ pub async fn list_webhooks(depot: &mut Depot, res: &mut Response) {
     match w::webhooks
         .order(w::created_at.desc())
         .load::<Webhook>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let webhook_list: Vec<WebhookResponse> =
@@ -242,6 +246,7 @@ pub async fn get_webhook(req: &mut Request, depot: &mut Depot, res: &mut Respons
     match w::webhooks
         .filter(w::id.eq(&webhook_id_param))
         .first::<Webhook>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => {
@@ -312,6 +317,7 @@ pub async fn update_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
     let existing = w::webhooks
         .filter(w::id.eq(&webhook_id_param))
         .first::<Webhook>(&mut conn)
+        .await
         .optional();
 
     match existing {
@@ -338,34 +344,40 @@ pub async fn update_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
     if let Some(ref name) = body.name {
         let _ = diesel::update(w::webhooks.filter(w::id.eq(&webhook_id_param)))
             .set(w::name.eq(name))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(ref url) = body.url {
         let _ = diesel::update(w::webhooks.filter(w::id.eq(&webhook_id_param)))
             .set(w::url.eq(url))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(ref events) = body.events {
         let events_str = events_to_string(events);
         let _ = diesel::update(w::webhooks.filter(w::id.eq(&webhook_id_param)))
             .set(w::events.eq(events_str))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(is_active) = body.is_active {
         let _ = diesel::update(w::webhooks.filter(w::id.eq(&webhook_id_param)))
             .set(w::is_active.eq(is_active))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
 
     // Always update the updated_at timestamp.
     let _ = diesel::update(w::webhooks.filter(w::id.eq(&webhook_id_param)))
         .set(w::updated_at.eq(now.to_rfc3339()))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     // Return the updated webhook.
     match w::webhooks
         .filter(w::id.eq(&webhook_id_param))
         .first::<Webhook>(&mut conn)
+        .await
     {
         Ok(row) => {
             res.status_code(StatusCode::OK);
@@ -407,9 +419,13 @@ pub async fn delete_webhook(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
     // Delete associated deliveries first.
     let _ = diesel::delete(wd::webhook_deliveries.filter(wd::webhook_id.eq(&webhook_id_param)))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
-    match diesel::delete(w::webhooks.filter(w::id.eq(&webhook_id_param))).execute(&mut conn) {
+    match diesel::delete(w::webhooks.filter(w::id.eq(&webhook_id_param)))
+        .execute(&mut conn)
+        .await
+    {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
@@ -470,6 +486,7 @@ pub async fn list_deliveries(req: &mut Request, depot: &mut Depot, res: &mut Res
         .filter(w::id.eq(&webhook_id_param))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -494,6 +511,7 @@ pub async fn list_deliveries(req: &mut Request, depot: &mut Depot, res: &mut Res
         .order(wd::delivered_at.desc())
         .limit(50)
         .load::<WebhookDelivery>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let delivery_list: Vec<WebhookDeliveryResponse> =
@@ -519,16 +537,18 @@ pub async fn retry_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
     let state = crate::require_app_state!(depot, res);
     let webhook_id: String = req.param("id").unwrap_or_default();
     let delivery_id: String = req.param("delivery_id").unwrap_or_default();
-    let belongs = state.db.get().ok().and_then(|mut conn| {
+    let mut conn = state.db.clone();
+    let belongs = {
         wd::webhook_deliveries
             .filter(wd::id.eq(&delivery_id))
             .filter(wd::webhook_id.eq(&webhook_id))
             .select(wd::id)
             .first::<String>(&mut conn)
+            .await
             .optional()
             .ok()
             .flatten()
-    });
+    };
     if belongs.is_none() {
         res.status_code(StatusCode::NOT_FOUND);
         res.render(Json(ApiResponse::<()>::err(
@@ -536,7 +556,7 @@ pub async fn retry_delivery(req: &mut Request, depot: &mut Depot, res: &mut Resp
         )));
         return;
     }
-    match WebhookService::retry_delivery(&state.db, &delivery_id) {
+    match WebhookService::retry_delivery(&state.db, &delivery_id).await {
         Ok(()) => {
             res.status_code(StatusCode::ACCEPTED);
             res.render(Json(ApiResponse::ok(

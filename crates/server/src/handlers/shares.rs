@@ -1,9 +1,7 @@
-use argon2::{
-    Argon2, PasswordHash, PasswordVerifier,
-    password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
-};
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -16,12 +14,12 @@ use contrix_core::schema::shares::dsl as s;
 use crate::middleware::auth::get_user_id;
 use crate::services::StorageService;
 
-fn hash_share_password(password: &str) -> Result<String, AppError> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|hash| hash.to_string())
-        .map_err(|e| AppError::Internal(format!("Failed to hash share password: {e}")))
+async fn hash_share_password(password: &str) -> Result<String, AppError> {
+    crate::services::password_crypto::hash_secret(
+        password.to_owned(),
+        "Failed to hash share password",
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +68,7 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .filter(f::owner_id.eq(&uid))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -102,7 +101,7 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
     let shared_with_group_str = body.shared_with_group_id.map(|g| g.to_string());
 
     let password_hash_val = match body.password.as_deref() {
-        Some(password) if !password.is_empty() => match hash_share_password(password) {
+        Some(password) if !password.is_empty() => match hash_share_password(password).await {
             Ok(hash) => Some(hash),
             Err(e) => {
                 res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
@@ -129,6 +128,7 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
     match diesel::insert_into(s::shares)
         .values(&new_share)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             crate::services::WebhookService::fire_event(
@@ -144,7 +144,8 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
                     "public_token": &pub_token,
                     "created_at": now.to_rfc3339(),
                 }),
-            );
+            )
+            .await;
 
             if let Some(target) = body.shared_with_user_id.map(|u| u.to_string())
                 && target != uid
@@ -153,6 +154,7 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
                     .filter(contrix_core::schema::users::dsl::id.eq(&uid))
                     .select(contrix_core::schema::users::dsl::username)
                     .first::<String>(&mut conn)
+                    .await
                     .unwrap_or_else(|_| "Someone".to_string());
                 let file_id = body.file_id.to_string();
                 crate::services::NotificationService::create(
@@ -249,6 +251,7 @@ pub async fn get_share(req: &mut Request, depot: &mut Depot, res: &mut Response)
             Option<String>,
             Option<String>,
         )>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some((sid, fid, sby, sw, perm, pt, exp, cat, swg, pwh))) => {
@@ -353,6 +356,7 @@ pub async fn update_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
             s::expires_at.eq(body.expires_at.as_ref()),
         ))
         .execute(&mut conn)
+        .await
     } else if body.permission.is_some() {
         diesel::update(
             s::shares
@@ -361,6 +365,7 @@ pub async fn update_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
         )
         .set(s::permission.eq(body.permission.as_ref().unwrap()))
         .execute(&mut conn)
+        .await
     } else {
         diesel::update(
             s::shares
@@ -369,6 +374,7 @@ pub async fn update_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
         )
         .set(s::expires_at.eq(body.expires_at.as_ref()))
         .execute(&mut conn)
+        .await
     };
 
     match result {
@@ -430,6 +436,7 @@ pub async fn delete_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
             .filter(s::shared_by.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -511,6 +518,7 @@ pub async fn list_file_shares(req: &mut Request, depot: &mut Depot, res: &mut Re
             Option<String>,
             Option<String>,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let share_list: Vec<ShareResponse> = rows
@@ -582,6 +590,7 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
         .filter(s::public_token.eq(&token))
         .select((s::file_id, s::expires_at, s::password_hash))
         .first::<(String, Option<String>, Option<String>)>(&mut conn)
+        .await
         .optional();
 
     let (file_id, expires_at, password_hash) = match share {
@@ -616,16 +625,14 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
 
     // Enforce the share password when one is set.
     if let Some(ref hash) = password_hash {
-        let ok = supplied_password
-            .as_deref()
-            .and_then(|pw| {
-                PasswordHash::new(hash).ok().map(|parsed| {
-                    Argon2::default()
-                        .verify_password(pw.as_bytes(), &parsed)
-                        .is_ok()
-                })
-            })
-            .unwrap_or(false);
+        let ok = match supplied_password.as_deref() {
+            Some(password) => {
+                crate::services::password_crypto::verify_password(password.to_owned(), hash.clone())
+                    .await
+                    .unwrap_or(false)
+            }
+            None => false,
+        };
         if !ok {
             res.status_code(StatusCode::UNAUTHORIZED);
             res.render(Json(ApiResponse::<()>::err(
@@ -640,6 +647,7 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
         .filter(f::id.eq(&file_id))
         .filter(f::is_trashed.eq(false))
         .first::<File>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => row,
@@ -668,6 +676,7 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
                 .filter(d::file_id.eq(&file_row.id))
                 .select(d::content)
                 .first::<Option<String>>(&mut conn)
+                .await
                 .optional()
                 .ok()
                 .flatten()

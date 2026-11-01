@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -29,8 +31,8 @@ fn tag_model_to_response(row: Tag) -> TagResponse {
 
 /// Verify the tag belongs to the user. Renders an error response and returns
 /// false when it does not.
-fn require_owned_tag(
-    conn: &mut diesel::SqliteConnection,
+async fn require_owned_tag(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     tag_id: &str,
     uid: &str,
     res: &mut Response,
@@ -40,6 +42,7 @@ fn require_owned_tag(
         .filter(t::owner_id.eq(uid))
         .select(t::id)
         .first::<String>(conn)
+        .await
         .optional()
     {
         Ok(Some(_)) => true,
@@ -62,14 +65,14 @@ fn require_owned_tag(
 
 /// Verify the user can access the file with `required_role`. Renders an error
 /// response and returns false when they cannot.
-fn require_accessible_file(
-    conn: &mut diesel::SqliteConnection,
+async fn require_accessible_file(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     file_id: &str,
     uid: &str,
     required_role: &str,
     res: &mut Response,
 ) -> bool {
-    match load_accessible_file(conn, file_id, uid, required_role) {
+    match load_accessible_file(conn, file_id, uid, required_role).await {
         Ok(Some(_)) => true,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -140,6 +143,7 @@ pub async fn create_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
     match diesel::insert_into(t::tags)
         .values(&new_tag)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             let resp = TagResponse {
@@ -193,6 +197,7 @@ pub async fn list_tags(depot: &mut Depot, res: &mut Response) {
         .filter(t::owner_id.eq(&uid))
         .order(t::name.asc())
         .load::<Tag>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let tag_list: Vec<TagResponse> = rows.into_iter().map(tag_model_to_response).collect();
@@ -251,27 +256,36 @@ pub async fn update_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
     };
 
     let result = match (&body.name, &body.color) {
-        (Some(name), Some(color)) => diesel::update(
-            t::tags
-                .filter(t::id.eq(&tag_id_param))
-                .filter(t::owner_id.eq(&uid)),
-        )
-        .set((t::name.eq(name), t::color.eq(Some(color))))
-        .execute(&mut conn),
-        (Some(name), None) => diesel::update(
-            t::tags
-                .filter(t::id.eq(&tag_id_param))
-                .filter(t::owner_id.eq(&uid)),
-        )
-        .set(t::name.eq(name))
-        .execute(&mut conn),
-        (None, Some(color)) => diesel::update(
-            t::tags
-                .filter(t::id.eq(&tag_id_param))
-                .filter(t::owner_id.eq(&uid)),
-        )
-        .set(t::color.eq(Some(color)))
-        .execute(&mut conn),
+        (Some(name), Some(color)) => {
+            diesel::update(
+                t::tags
+                    .filter(t::id.eq(&tag_id_param))
+                    .filter(t::owner_id.eq(&uid)),
+            )
+            .set((t::name.eq(name), t::color.eq(Some(color))))
+            .execute(&mut conn)
+            .await
+        }
+        (Some(name), None) => {
+            diesel::update(
+                t::tags
+                    .filter(t::id.eq(&tag_id_param))
+                    .filter(t::owner_id.eq(&uid)),
+            )
+            .set(t::name.eq(name))
+            .execute(&mut conn)
+            .await
+        }
+        (None, Some(color)) => {
+            diesel::update(
+                t::tags
+                    .filter(t::id.eq(&tag_id_param))
+                    .filter(t::owner_id.eq(&uid)),
+            )
+            .set(t::color.eq(Some(color)))
+            .execute(&mut conn)
+            .await
+        }
         (None, None) => {
             res.status_code(StatusCode::BAD_REQUEST);
             res.render(Json(ApiResponse::<()>::err(
@@ -335,7 +349,9 @@ pub async fn delete_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
     };
 
     // Delete associated file_tags first.
-    let _ = diesel::delete(ft::file_tags.filter(ft::tag_id.eq(&tag_id_param))).execute(&mut conn);
+    let _ = diesel::delete(ft::file_tags.filter(ft::tag_id.eq(&tag_id_param)))
+        .execute(&mut conn)
+        .await;
 
     match diesel::delete(
         t::tags
@@ -343,6 +359,7 @@ pub async fn delete_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
             .filter(t::owner_id.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -405,10 +422,10 @@ pub async fn assign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
 
-    if !require_owned_tag(&mut conn, &body.tag_id.to_string(), &uid, res) {
+    if !require_owned_tag(&mut conn, &body.tag_id.to_string(), &uid, res).await {
         return;
     }
-    if !require_accessible_file(&mut conn, &body.file_id.to_string(), &uid, "editor", res) {
+    if !require_accessible_file(&mut conn, &body.file_id.to_string(), &uid, "editor", res).await {
         return;
     }
 
@@ -425,6 +442,7 @@ pub async fn assign_tag(req: &mut Request, depot: &mut Depot, res: &mut Response
     match diesel::insert_into(ft::file_tags)
         .values(&new_file_tag)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             res.status_code(StatusCode::CREATED);
@@ -485,10 +503,10 @@ pub async fn unassign_tag(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
-    if !require_owned_tag(&mut conn, &tag_id_str, &uid, res) {
+    if !require_owned_tag(&mut conn, &tag_id_str, &uid, res).await {
         return;
     }
-    if !require_accessible_file(&mut conn, &file_id_str, &uid, "editor", res) {
+    if !require_accessible_file(&mut conn, &file_id_str, &uid, "editor", res).await {
         return;
     }
 
@@ -498,6 +516,7 @@ pub async fn unassign_tag(req: &mut Request, depot: &mut Depot, res: &mut Respon
             .filter(ft::tag_id.eq(&tag_id_str)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -551,7 +570,7 @@ pub async fn list_file_tags(req: &mut Request, depot: &mut Depot, res: &mut Resp
         }
     };
 
-    if !require_accessible_file(&mut conn, &file_id_param, &uid, "viewer", res) {
+    if !require_accessible_file(&mut conn, &file_id_param, &uid, "viewer", res).await {
         return;
     }
 
@@ -560,6 +579,7 @@ pub async fn list_file_tags(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(ft::file_id.eq(&file_id_param))
         .select((t::id, t::name, t::color, t::created_at))
         .load::<(String, String, Option<String>, String)>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let tags: Vec<TagResponse> = rows

@@ -1,9 +1,7 @@
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
-};
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use rand::RngExt;
 use salvo::prelude::*;
 use uuid::Uuid;
@@ -15,6 +13,7 @@ use contrix_core::schema::totp_secrets::dsl as ts;
 use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::get_user_id;
+use crate::services::password_crypto;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,19 +62,6 @@ fn generate_backup_codes() -> Vec<String> {
             let mut bytes = [0u8; 16];
             rng.fill(&mut bytes);
             bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-        })
-        .collect()
-}
-
-fn hash_backup_codes(codes: &[String]) -> Result<Vec<String>, AppError> {
-    codes
-        .iter()
-        .map(|code| {
-            let salt = SaltString::generate(&mut OsRng);
-            Argon2::default()
-                .hash_password(code.as_bytes(), &salt)
-                .map(|hash| hash.to_string())
-                .map_err(|e| AppError::Internal(format!("Failed to hash backup code: {e}")))
         })
         .collect()
 }
@@ -262,8 +248,8 @@ pub(crate) fn verify_totp_code(secret_b32: &str, code: &str) -> bool {
 ///
 /// Backup codes are stored as Argon2 hashes. The optimistic `backup_codes`
 /// predicate prevents two concurrent requests from consuming the same code.
-pub(crate) fn verify_second_factor(
-    conn: &mut diesel::SqliteConnection,
+pub(crate) async fn verify_second_factor(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     totp: &TotpSecret,
     code: &str,
 ) -> Result<bool, AppError> {
@@ -279,29 +265,10 @@ pub(crate) fn verify_second_factor(
     };
     let codes: Vec<String> = serde_json::from_str(serialized)
         .map_err(|e| AppError::Internal(format!("Invalid stored backup codes: {e}")))?;
-    let Some(matched_index) = codes.iter().position(|stored| {
-        PasswordHash::new(stored).is_ok_and(|hash| {
-            Argon2::default()
-                .verify_password(code.as_bytes(), &hash)
-                .is_ok()
-        }) || stored.eq_ignore_ascii_case(code)
-    }) else {
+    let Some(remaining) = password_crypto::consume_backup_code(code.to_owned(), codes).await?
+    else {
         return Ok(false);
     };
-
-    let mut remaining = Vec::with_capacity(codes.len().saturating_sub(1));
-    for (index, stored) in codes.into_iter().enumerate() {
-        if index == matched_index {
-            continue;
-        }
-        if PasswordHash::new(&stored).is_ok() {
-            remaining.push(stored);
-        } else {
-            // Transparently upgrade backup codes created by older versions,
-            // which stored the random codes in plaintext JSON.
-            remaining.extend(hash_backup_codes(&[stored])?);
-        }
-    }
     let updated = serde_json::to_string(&remaining)
         .map_err(|e| AppError::Internal(format!("Failed to serialize backup codes: {e}")))?;
     let changed = diesel::update(
@@ -314,6 +281,7 @@ pub(crate) fn verify_second_factor(
         ts::updated_at.eq(Utc::now().to_rfc3339()),
     ))
     .execute(conn)
+    .await
     .map_err(|e| AppError::Database(format!("Failed to consume backup code: {e}")))?;
     Ok(changed == 1)
 }
@@ -411,6 +379,7 @@ pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response
     let user_row: User = match u::users
         .filter(u::id.eq(&uid))
         .first::<User>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(usr)) => usr,
@@ -429,11 +398,10 @@ pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response
             return;
         }
     };
-    let password_valid = PasswordHash::new(&user_row.password_hash).is_ok_and(|hash| {
-        Argon2::default()
-            .verify_password(body.current_password.as_bytes(), &hash)
-            .is_ok()
-    });
+    let password_valid =
+        password_crypto::verify_password(body.current_password, user_row.password_hash)
+            .await
+            .unwrap_or(false);
     if !password_valid {
         res.status_code(StatusCode::UNAUTHORIZED);
         res.render(Json(ApiResponse::<()>::err(
@@ -450,6 +418,7 @@ pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response
             .filter(ts::is_enabled.eq(false)),
     )
     .execute(&mut conn)
+    .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -464,6 +433,7 @@ pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response
         .filter(ts::user_id.eq(&uid))
         .filter(ts::is_enabled.eq(true))
         .first::<TotpSecret>(&mut conn)
+        .await
         .optional()
     {
         Ok(existing) => existing,
@@ -486,7 +456,7 @@ pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response
 
     let secret = generate_totp_secret();
     let backup_codes = generate_backup_codes();
-    let backup_code_hashes = match hash_backup_codes(&backup_codes) {
+    let backup_code_hashes = match password_crypto::hash_backup_codes(backup_codes.clone()).await {
         Ok(hashes) => hashes,
         Err(error) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
@@ -510,6 +480,7 @@ pub async fn setup_totp(req: &mut Request, depot: &mut Depot, res: &mut Response
     match diesel::insert_into(ts::totp_secrets)
         .values(&new_totp)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             let resp = TotpSetupResponse {
@@ -574,6 +545,7 @@ pub async fn verify_totp(req: &mut Request, depot: &mut Depot, res: &mut Respons
         .filter(ts::user_id.eq(&uid))
         .filter(ts::is_enabled.eq(false))
         .first::<TotpSecret>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => row,
@@ -617,6 +589,7 @@ pub async fn verify_totp(req: &mut Request, depot: &mut Depot, res: &mut Respons
     match diesel::update(ts::totp_secrets.filter(ts::id.eq(&totp_row.id)))
         .set((ts::is_enabled.eq(true), ts::updated_at.eq(now.to_rfc3339())))
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             res.status_code(StatusCode::OK);
@@ -676,6 +649,7 @@ pub async fn disable_totp(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .filter(ts::user_id.eq(&uid))
         .filter(ts::is_enabled.eq(true))
         .first::<TotpSecret>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(totp)) => totp,
@@ -694,7 +668,7 @@ pub async fn disable_totp(req: &mut Request, depot: &mut Depot, res: &mut Respon
             return;
         }
     };
-    match verify_second_factor(&mut conn, &totp, &body.code) {
+    match verify_second_factor(&mut conn, &totp, &body.code).await {
         Ok(true) => {}
         Ok(false) => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -710,7 +684,10 @@ pub async fn disable_totp(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     }
 
-    match diesel::delete(ts::totp_secrets.filter(ts::user_id.eq(&uid))).execute(&mut conn) {
+    match diesel::delete(ts::totp_secrets.filter(ts::user_id.eq(&uid)))
+        .execute(&mut conn)
+        .await
+    {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
@@ -766,6 +743,7 @@ pub async fn totp_status(depot: &mut Depot, res: &mut Response) {
         .filter(ts::is_enabled.eq(true))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
     {
         Ok(count) => {
             let enabled = count > 0;

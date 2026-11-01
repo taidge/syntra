@@ -1,10 +1,10 @@
 use std::net::{IpAddr, SocketAddr};
+use std::result::Result;
+use std::time::Duration;
 
 use chrono::Utc;
-use diesel::SqliteConnection;
-use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
 use hmac::{Hmac, Mac};
+use horme::prelude::*;
 use sha2::Sha256;
 use uuid::Uuid;
 
@@ -21,6 +21,7 @@ const MAX_ATTEMPTS: usize = 4;
 /// Bound untrusted webhook responses before buffering them in memory and
 /// persisting them in SQLite.
 const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024;
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct WebhookService;
 
@@ -29,11 +30,7 @@ impl WebhookService {
     /// to the event, then spawns async tasks to deliver payloads with retry.
     ///
     /// Delivery is best-effort: errors are logged but never propagated to the caller.
-    pub fn fire_event(
-        pool: &Pool<ConnectionManager<SqliteConnection>>,
-        event: &str,
-        payload: &serde_json::Value,
-    ) {
+    pub async fn fire_event(pool: &crate::state::DbPool, event: &str, payload: &serde_json::Value) {
         let mut conn = match pool.get() {
             Ok(c) => c,
             Err(e) => {
@@ -46,6 +43,7 @@ impl WebhookService {
         let hooks: Vec<Webhook> = match w::webhooks
             .filter(w::is_active.eq(true))
             .load::<Webhook>(&mut conn)
+            .await
         {
             Ok(rows) => rows,
             Err(e) => {
@@ -87,6 +85,7 @@ impl WebhookService {
             if let Err(e) = diesel::insert_into(wd::webhook_deliveries)
                 .values(&delivery)
                 .execute(&mut conn)
+                .await
             {
                 tracing::error!(
                     "WebhookService: failed to record delivery for webhook {}: {e}",
@@ -109,14 +108,15 @@ impl WebhookService {
     /// Requeue one persisted failed delivery. The original event and payload
     /// are reused; webhook URL/secret are loaded fresh so configuration fixes
     /// take effect immediately.
-    pub fn retry_delivery(
-        pool: &Pool<ConnectionManager<SqliteConnection>>,
+    pub async fn retry_delivery(
+        pool: &crate::state::DbPool,
         delivery_id: &str,
     ) -> Result<(), String> {
         let mut conn = pool.get().map_err(|error| error.to_string())?;
         let delivery = wd::webhook_deliveries
             .filter(wd::id.eq(delivery_id))
             .first::<WebhookDelivery>(&mut conn)
+            .await
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "Webhook delivery not found".to_string())?;
@@ -126,6 +126,7 @@ impl WebhookService {
         let hook = w::webhooks
             .filter(w::id.eq(&delivery.webhook_id))
             .first::<Webhook>(&mut conn)
+            .await
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "Webhook not found".to_string())?;
@@ -137,6 +138,7 @@ impl WebhookService {
                 wd::delivered_at.eq(Utc::now().to_rfc3339()),
             ))
             .execute(&mut conn)
+            .await
             .map_err(|error| error.to_string())?;
         let pool = pool.clone();
         let id = delivery.id;
@@ -232,6 +234,9 @@ async fn client_for_webhook(raw: &str) -> Result<(reqwest::Client, reqwest::Url)
 
     let mut builder = reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none());
     if let Some(host) = pin_host {
         builder = builder.resolve(&host, addresses[0]);
@@ -242,7 +247,7 @@ async fn client_for_webhook(raw: &str) -> Result<(reqwest::Client, reqwest::Url)
     Ok((client, url))
 }
 
-async fn read_bounded_response_body(response: &mut reqwest::Response) -> String {
+async fn read_bounded_response_body(response: &mut reqwest::Response) -> Result<String, String> {
     let mut body = Vec::with_capacity(
         response
             .content_length()
@@ -272,7 +277,7 @@ async fn read_bounded_response_body(response: &mut reqwest::Response) -> String 
                 }
             }
             Ok(None) => break,
-            Err(e) => return format!("Failed to read response body: {e}"),
+            Err(e) => return Err(format!("Failed to read response body: {e}")),
         }
     }
 
@@ -280,7 +285,36 @@ async fn read_bounded_response_body(response: &mut reqwest::Response) -> String 
     if truncated {
         text.push_str("\n[response truncated at 65536 bytes]");
     }
-    text
+    Ok(text)
+}
+
+enum DeliveryError {
+    Refused(String),
+    Request(String),
+}
+
+async fn post_webhook(
+    client: &reqwest::Client,
+    target_url: reqwest::Url,
+    event: &str,
+    payload: &str,
+    secret: Option<&str>,
+) -> Result<(i32, String), String> {
+    let mut request = client
+        .post(target_url)
+        .header("Content-Type", "application/json")
+        .header("X-Webhook-Event", event);
+    if let Some(secret) = secret.filter(|secret| !secret.is_empty()) {
+        request = request.header("X-Webhook-Signature", compute_signature(secret, payload));
+    }
+    let mut response = request
+        .body(payload.to_owned())
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status().as_u16() as i32;
+    let body = read_bounded_response_body(&mut response).await?;
+    Ok((status, body))
 }
 
 /// Validate that a webhook target URL is safe to call: an http(s) URL whose
@@ -323,7 +357,7 @@ fn compute_signature(secret: &str, payload: &str) -> String {
 
 /// Attempt to deliver the webhook payload with exponential backoff retry.
 async fn deliver_with_retry(
-    pool: Pool<ConnectionManager<SqliteConnection>>,
+    pool: crate::state::DbPool,
     delivery_id: String,
     hook: Webhook,
     event: String,
@@ -334,7 +368,7 @@ async fn deliver_with_retry(
     if !is_safe_webhook_url(&hook.url) {
         let msg = format!("Refused delivery to unsafe webhook URL: {}", hook.url);
         tracing::warn!("WebhookService: {msg}");
-        update_delivery(&pool, &delivery_id, None, Some(&msg), false);
+        update_delivery(&pool, &delivery_id, None, Some(&msg), false).await;
         return;
     }
 
@@ -342,16 +376,6 @@ async fn deliver_with_retry(
         // Resolve again for every retry and pin the connection to the checked
         // address. This closes the DNS-rebinding gap between validation and
         // connection establishment.
-        let (client, target_url) = match client_for_webhook(&hook.url).await {
-            Ok(target) => target,
-            Err(e) => {
-                let message = format!("Refused webhook target: {e}");
-                update_delivery(&pool, &delivery_id, None, Some(&message), false);
-                tracing::warn!("WebhookService: {message}");
-                return;
-            }
-        };
-
         tracing::info!(
             "WebhookService: POST attempt {}/{} event={} to url={} (webhook={})",
             attempt + 1,
@@ -361,29 +385,30 @@ async fn deliver_with_retry(
             hook.id,
         );
 
-        let mut request = client
-            .post(target_url)
-            .header("Content-Type", "application/json")
-            .header("X-Webhook-Event", &event);
-
-        // Attach only the HMAC signature derived from the secret. The raw
-        // secret is never transmitted — receivers verify via the signature.
-        if let Some(ref secret) = hook.secret
-            && !secret.is_empty()
-        {
-            let signature = compute_signature(secret, &payload);
-            request = request.header("X-Webhook-Signature", signature);
-        }
-
-        let result = request.body(payload.clone()).send().await;
+        // Cover DNS validation, connection establishment and the complete body,
+        // so slow or never-ending responses still reach the existing retry path.
+        let result = tokio::time::timeout(ATTEMPT_TIMEOUT, async {
+            let (client, target_url) = client_for_webhook(&hook.url)
+                .await
+                .map_err(DeliveryError::Refused)?;
+            post_webhook(
+                &client,
+                target_url,
+                &event,
+                &payload,
+                hook.secret.as_deref(),
+            )
+            .await
+            .map_err(DeliveryError::Request)
+        })
+        .await
+        .unwrap_or_else(|_| Err(DeliveryError::Request("Webhook attempt timed out".into())));
 
         match result {
-            Ok(mut response) => {
-                let status = response.status().as_u16() as i32;
-                let body = read_bounded_response_body(&mut response).await;
+            Ok((status, body)) => {
                 let success = (200..300).contains(&status);
 
-                update_delivery(&pool, &delivery_id, Some(status), Some(&body), success);
+                update_delivery(&pool, &delivery_id, Some(status), Some(&body), success).await;
 
                 if success {
                     tracing::info!(
@@ -400,9 +425,15 @@ async fn deliver_with_retry(
                     MAX_ATTEMPTS,
                 );
             }
-            Err(e) => {
+            Err(DeliveryError::Refused(error)) => {
+                let message = format!("Refused webhook target: {error}");
+                update_delivery(&pool, &delivery_id, None, Some(&message), false).await;
+                tracing::warn!("WebhookService: {message}");
+                return;
+            }
+            Err(DeliveryError::Request(e)) => {
                 let error_msg = format!("Request error: {e}");
-                update_delivery(&pool, &delivery_id, None, Some(&error_msg), false);
+                update_delivery(&pool, &delivery_id, None, Some(&error_msg), false).await;
 
                 tracing::warn!(
                     "WebhookService: delivery {} attempt {}/{} error: {e}",
@@ -428,8 +459,8 @@ async fn deliver_with_retry(
 }
 
 /// Update the webhook_delivery record with the latest attempt results.
-fn update_delivery(
-    pool: &Pool<ConnectionManager<SqliteConnection>>,
+async fn update_delivery(
+    pool: &crate::state::DbPool,
     delivery_id: &str,
     response_status: Option<i32>,
     response_body: Option<&str>,
@@ -445,7 +476,8 @@ fn update_delivery(
                     wd::success.eq(success),
                     wd::delivered_at.eq(&now),
                 ))
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
         }
         Err(e) => {
             tracing::error!("WebhookService: failed to update delivery {delivery_id}: {e}");
@@ -457,6 +489,49 @@ fn update_delivery(
 mod tests {
     use super::{MAX_RESPONSE_BODY_BYTES, compute_signature, is_blocked_ip, is_safe_webhook_url};
     use std::net::IpAddr;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incomplete_success_response_is_a_retryable_body_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            assert!(connection.read(&mut request).await.unwrap() > 0);
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n")
+                .await
+                .unwrap();
+            // Intentionally omit the final chunk. A 200 status alone must not
+            // turn a response that stalls forever into a successful delivery.
+            std::future::pending::<()>().await;
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(150))
+            .build()
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::post_webhook(
+                &client,
+                format!("http://{address}/hook").parse().unwrap(),
+                "test.event",
+                "{}",
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert!(
+            result
+                .unwrap_err()
+                .starts_with("Failed to read response body:")
+        );
+    }
 
     #[test]
     fn webhook_signature_matches_hmac_sha256_test_vector() {

@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 description = "Shared types, models, and DTOs for Contrix Office"
 
+[features]
+async-db = ["dep:horme"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -13,3 +16,4 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 diesel = { workspace = true }
+horme = { workspace = true, optional = true }

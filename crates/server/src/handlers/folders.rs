@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -18,11 +20,15 @@ use crate::middleware::auth::get_user_id;
 // POST /folders
 // ---------------------------------------------------------------------------
 
-fn document_id_for_file(conn: &mut diesel::SqliteConnection, file_id: &str) -> Option<Uuid> {
+async fn document_id_for_file(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+    file_id: &str,
+) -> Option<Uuid> {
     d::documents
         .filter(d::file_id.eq(file_id))
         .select(d::id)
         .first::<String>(conn)
+        .await
         .optional()
         .ok()
         .flatten()
@@ -72,7 +78,7 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
     };
 
     let room_id_for_new_folder = if let Some(parent_id) = parent_id_str.as_deref() {
-        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor") {
+        match load_accessible_target_folder(&mut conn, parent_id, &uid, "editor").await {
             Ok(Some(parent)) => {
                 if let Some(requested_room_id) = requested_room_id.as_deref()
                     && parent.room_id.as_deref() != Some(requested_room_id)
@@ -100,7 +106,7 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
             }
         }
     } else if let Some(room_id) = requested_room_id.as_deref() {
-        match check_room_access(&mut conn, &uid, room_id, "editor") {
+        match check_room_access(&mut conn, &uid, room_id, "editor").await {
             Ok(()) => Some(room_id.to_string()),
             Err(e) => {
                 res.status_code(StatusCode::FORBIDDEN);
@@ -133,6 +139,7 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
     match diesel::insert_into(f::files)
         .values(&new_file)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             let resp = FileResponse {
@@ -193,10 +200,10 @@ pub async fn get_folder(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
 
-    match load_accessible_folder(&mut conn, &folder_id_param, &uid, "viewer") {
+    match load_accessible_folder(&mut conn, &folder_id_param, &uid, "viewer").await {
         Ok(Some(row)) => {
             let shared_with_count =
-                crate::handlers::access::count_shares_for_file(&mut conn, &row.id);
+                crate::handlers::access::count_shares_for_file(&mut conn, &row.id).await;
             let resp = FileResponse {
                 id: row.id.parse().unwrap_or_default(),
                 name: row.name,
@@ -264,7 +271,7 @@ pub async fn list_folder_children(req: &mut Request, depot: &mut Depot, res: &mu
         }
     };
 
-    let folder = match load_accessible_folder(&mut conn, &folder_id_param, &uid, "viewer") {
+    let folder = match load_accessible_folder(&mut conn, &folder_id_param, &uid, "viewer").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -290,35 +297,33 @@ pub async fn list_folder_children(req: &mut Request, depot: &mut Depot, res: &mu
         query = query.filter(f::owner_id.eq(&uid));
     }
 
-    match query.load::<File>(&mut conn) {
+    match query.load::<File>(&mut conn).await {
         Ok(rows) => {
-            let children: Vec<FileResponse> = rows
-                .into_iter()
-                .map(|row| {
-                    let document_id = document_id_for_file(&mut conn, &row.id);
-                    let shared_with_count =
-                        crate::handlers::access::count_shares_for_file(&mut conn, &row.id);
-                    FileResponse {
-                        id: row.id.parse().unwrap_or_default(),
-                        name: row.name,
-                        mime_type: row.mime_type,
-                        size: row.size,
-                        owner_id: row.owner_id.parse().unwrap_or_default(),
-                        parent_id: row.parent_id.as_deref().and_then(|s| s.parse().ok()),
-                        is_folder: row.is_folder,
-                        is_trashed: row.is_trashed,
-                        trashed_at: row
-                            .trashed_at
-                            .as_deref()
-                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                            .map(|d| d.with_timezone(&Utc)),
-                        created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
-                        updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
-                        shared_with_count,
-                        document_id,
-                    }
-                })
-                .collect();
+            let mut children = Vec::with_capacity(rows.len());
+            for row in rows {
+                let document_id = document_id_for_file(&mut conn, &row.id).await;
+                let shared_with_count =
+                    crate::handlers::access::count_shares_for_file(&mut conn, &row.id).await;
+                children.push(FileResponse {
+                    id: row.id.parse().unwrap_or_default(),
+                    name: row.name,
+                    mime_type: row.mime_type,
+                    size: row.size,
+                    owner_id: row.owner_id.parse().unwrap_or_default(),
+                    parent_id: row.parent_id.as_deref().and_then(|s| s.parse().ok()),
+                    is_folder: row.is_folder,
+                    is_trashed: row.is_trashed,
+                    trashed_at: row
+                        .trashed_at
+                        .as_deref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|d| d.with_timezone(&Utc)),
+                    created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
+                    updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
+                    shared_with_count,
+                    document_id,
+                });
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(children)));
         }
@@ -380,7 +385,7 @@ pub async fn update_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    let folder = match load_accessible_folder(&mut conn, &folder_id_param, &uid, "editor") {
+    let folder = match load_accessible_folder(&mut conn, &folder_id_param, &uid, "editor").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -399,6 +404,7 @@ pub async fn update_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
     match diesel::update(f::files.filter(f::id.eq(&folder.id)))
         .set((f::name.eq(&body.name), f::updated_at.eq(now.to_rfc3339())))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -453,7 +459,7 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    let folder = match load_accessible_folder(&mut conn, &folder_id_param, &uid, "editor") {
+    let folder = match load_accessible_folder(&mut conn, &folder_id_param, &uid, "editor").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -477,7 +483,8 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 f::trashed_at.eq(Some(now.to_rfc3339())),
                 f::updated_at.eq(now.to_rfc3339()),
             ))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     } else {
         let _ = diesel::update(
             f::files
@@ -489,7 +496,8 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
             f::trashed_at.eq(Some(now.to_rfc3339())),
             f::updated_at.eq(now.to_rfc3339()),
         ))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
     }
 
     // Soft-delete the folder itself.
@@ -500,6 +508,7 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
             f::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -561,11 +570,15 @@ pub async fn get_folder_path(req: &mut Request, depot: &mut Depot, res: &mut Res
             .filter(f::id.eq(cid))
             .filter(f::is_folder.eq(true))
             .first::<File>(&mut conn)
+            .await
             .optional();
 
         match folder {
             Ok(Some(row)) => {
-                if authorize_file_access(&mut conn, &row, &uid, "viewer").is_err() {
+                if authorize_file_access(&mut conn, &row, &uid, "viewer")
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 let fid = row.id;

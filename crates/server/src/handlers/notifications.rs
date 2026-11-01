@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use contrix_core::dto::{ApiResponse, NotificationResponse};
@@ -60,6 +61,7 @@ pub async fn list_notifications(depot: &mut Depot, res: &mut Response) {
             bool,
             String,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let notifs: Vec<NotificationResponse> = rows
@@ -126,6 +128,7 @@ pub async fn mark_read(req: &mut Request, depot: &mut Depot, res: &mut Response)
     )
     .set(n::is_read.eq(true))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -184,6 +187,7 @@ pub async fn mark_all_read(depot: &mut Depot, res: &mut Response) {
     )
     .set(n::is_read.eq(true))
     .execute(&mut conn)
+    .await
     {
         Ok(count) => {
             res.status_code(StatusCode::OK);
@@ -238,6 +242,7 @@ pub async fn delete_notification(req: &mut Request, depot: &mut Depot, res: &mut
             .filter(n::user_id.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

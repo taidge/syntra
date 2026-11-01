@@ -2,6 +2,8 @@ use std::io::{Cursor, Write as IoWrite};
 
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -23,7 +25,7 @@ use crate::services::StorageBackend;
 // ---------------------------------------------------------------------------
 
 async fn read_file_with_document_fallback(
-    conn: &mut diesel::SqliteConnection,
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     storage: &StorageBackend,
     file_id: &str,
     file_path: &str,
@@ -35,6 +37,7 @@ async fn read_file_with_document_fallback(
                 .filter(d::file_id.eq(file_id))
                 .select(d::content)
                 .first::<Option<String>>(conn)
+                .await
                 .optional()
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
@@ -146,6 +149,7 @@ pub async fn batch_delete(req: &mut Request, depot: &mut Depot, res: &mut Respon
             f::updated_at.eq(now.to_rfc3339()),
         ))
         .execute(&mut conn)
+        .await
         {
             Ok(n) => deleted_count += n,
             Err(e) => {
@@ -213,29 +217,35 @@ pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
 
-    let target_folder =
-        match load_accessible_target_folder(&mut conn, &body.target_folder_id, &uid, "editor") {
-            Ok(Some(folder)) => folder,
-            Ok(None) => {
-                res.status_code(StatusCode::NOT_FOUND);
-                res.render(Json(ApiResponse::<()>::err(
-                    AppError::NotFound("Target folder not found".into()).to_response(),
-                )));
-                return;
-            }
-            Err(e) => {
-                res.status_code(StatusCode::FORBIDDEN);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
-                return;
-            }
-        };
+    let target_folder = match load_accessible_target_folder(
+        &mut conn,
+        &body.target_folder_id,
+        &uid,
+        "editor",
+    )
+    .await
+    {
+        Ok(Some(folder)) => folder,
+        Ok(None) => {
+            res.status_code(StatusCode::NOT_FOUND);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::NotFound("Target folder not found".into()).to_response(),
+            )));
+            return;
+        }
+        Err(e) => {
+            res.status_code(StatusCode::FORBIDDEN);
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            return;
+        }
+    };
 
     let now = Utc::now();
     let mut moved_count: usize = 0;
 
     for file_id in &body.file_ids {
         // Skip files the user cannot edit; move the rest.
-        match load_accessible_file(&mut conn, file_id, &uid, "editor") {
+        match load_accessible_file(&mut conn, file_id, &uid, "editor").await {
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => continue,
         }
@@ -247,6 +257,7 @@ pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response
                 f::updated_at.eq(now.to_rfc3339()),
             ))
             .execute(&mut conn)
+            .await
         {
             Ok(n) => moved_count += n,
             Err(e) => {
@@ -320,6 +331,7 @@ pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response)
         .filter(t::owner_id.eq(&uid))
         .select(t::id)
         .first::<String>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(_)) => {}
@@ -344,7 +356,7 @@ pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response)
 
     for file_id in &body.file_ids {
         // Skip files the user cannot edit.
-        match load_accessible_file(&mut conn, file_id, &uid, "editor") {
+        match load_accessible_file(&mut conn, file_id, &uid, "editor").await {
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => continue,
         }
@@ -359,6 +371,7 @@ pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response)
         match diesel::insert_into(ft::file_tags)
             .values(&new_file_tag)
             .execute(&mut conn)
+            .await
         {
             Ok(n) => tagged_count += n,
             Err(_) => {
@@ -435,6 +448,7 @@ pub async fn batch_download(req: &mut Request, depot: &mut Depot, res: &mut Resp
             .filter(f::is_folder.eq(false))
             .select((f::id, f::name, f::path))
             .first::<(String, String, String)>(&mut conn)
+            .await
             .optional();
 
         let (resolved_file_id, file_name, file_path) = match file_row {
@@ -544,7 +558,8 @@ pub async fn batch_mark_read(req: &mut Request, depot: &mut Depot, res: &mut Res
                 .filter(frs::file_id.eq(file_id)),
         )
         .set(frs::read_at.eq(now.to_rfc3339()))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
         match updated {
             Ok(0) => {
@@ -559,6 +574,7 @@ pub async fn batch_mark_read(req: &mut Request, depot: &mut Depot, res: &mut Res
                 match diesel::insert_into(frs::file_read_status)
                     .values(&new_status)
                     .execute(&mut conn)
+                    .await
                 {
                     Ok(n) => marked_count += n,
                     Err(_) => {
@@ -661,6 +677,7 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
                 Option<String>,
                 Option<String>,
             )>(&mut conn)
+            .await
             .optional();
 
         let (resolved_file_id, original_name, original_path, mime_type, _size, parent_id, room_id) =
@@ -717,6 +734,7 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
         match diesel::insert_into(f::files)
             .values(&new_file)
             .execute(&mut conn)
+            .await
         {
             Ok(_) => {
                 duplicated_ids.push(new_file_id.to_string());

@@ -1,7 +1,7 @@
-use argon2::Argon2;
-use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -108,6 +108,7 @@ pub async fn create_invitation(req: &mut Request, depot: &mut Depot, res: &mut R
     if let Err(e) = diesel::insert_into(inv::invitations)
         .values(&new_invitation)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -133,13 +134,14 @@ pub async fn create_invitation(req: &mut Request, depot: &mut Depot, res: &mut R
                 format!("<p>{custom}</p>")
             }
         );
-        tokio::task::spawn_blocking(move || {
+        tokio::spawn(async move {
             crate::services::EmailService::send_notification(
                 &pool,
                 &to,
                 "You have been invited",
                 &body_html,
-            );
+            )
+            .await;
         });
     }
 
@@ -195,11 +197,13 @@ pub async fn list_invitations(depot: &mut Depot, res: &mut Response) {
         inv::invitations
             .order(inv::created_at.desc())
             .load::<Invitation>(&mut conn)
+            .await
     } else {
         inv::invitations
             .filter(inv::invited_by.eq(&uid))
             .order(inv::created_at.desc())
             .load::<Invitation>(&mut conn)
+            .await
     };
 
     match result {
@@ -252,6 +256,7 @@ pub async fn get_invitation(req: &mut Request, depot: &mut Depot, res: &mut Resp
     match inv::invitations
         .filter(inv::id.eq(&invitation_id_param))
         .first::<Invitation>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => {
@@ -308,7 +313,9 @@ pub async fn cancel_invitation(req: &mut Request, depot: &mut Depot, res: &mut R
     let is_admin = get_user_role(depot) == Some("admin".to_string());
 
     let result = if is_admin {
-        diesel::delete(inv::invitations.filter(inv::id.eq(&invitation_id_param))).execute(&mut conn)
+        diesel::delete(inv::invitations.filter(inv::id.eq(&invitation_id_param)))
+            .execute(&mut conn)
+            .await
     } else {
         diesel::delete(
             inv::invitations
@@ -316,6 +323,7 @@ pub async fn cancel_invitation(req: &mut Request, depot: &mut Depot, res: &mut R
                 .filter(inv::invited_by.eq(&uid)),
         )
         .execute(&mut conn)
+        .await
     };
 
     match result {
@@ -388,6 +396,7 @@ pub async fn accept_invitation_with_depot(
         .filter(inv::token.eq(&token_param))
         .filter(inv::is_accepted.eq(false))
         .first::<Invitation>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(row)) => row,
@@ -430,7 +439,7 @@ pub async fn accept_invitation_with_depot(
         return;
     }
 
-    if let Err(e) = PasswordService::validate_password(&mut conn, &body.password) {
+    if let Err(e) = PasswordService::validate_password(&mut conn, &body.password).await {
         res.status_code(StatusCode::BAD_REQUEST);
         res.render(Json(ApiResponse::<()>::err(e.to_response())));
         return;
@@ -443,6 +452,7 @@ pub async fn accept_invitation_with_depot(
         .filter(u_dsl::email.eq(&body.email))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -462,7 +472,8 @@ pub async fn accept_invitation_with_depot(
                 inv::is_accepted.eq(true),
                 inv::accepted_at.eq(Some(now.to_rfc3339())),
             ))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
 
         res.status_code(StatusCode::OK);
         res.render(Json(ApiResponse::ok(serde_json::json!({
@@ -475,6 +486,7 @@ pub async fn accept_invitation_with_depot(
         .filter(u_dsl::username.eq(&body.username))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -494,14 +506,11 @@ pub async fn accept_invitation_with_depot(
         return;
     }
 
-    let salt = SaltString::generate(&mut OsRng);
-    let password_hash = match Argon2::default().hash_password(body.password.as_bytes(), &salt) {
-        Ok(hash) => hash.to_string(),
+    let password_hash = match crate::services::password_crypto::hash_password(body.password).await {
+        Ok(hash) => hash,
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Internal(format!("Password hashing failed: {e}")).to_response(),
-            )));
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
             return;
         }
     };
@@ -529,6 +538,7 @@ pub async fn accept_invitation_with_depot(
     if let Err(e) = diesel::insert_into(u_dsl::users)
         .values(&new_user)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -543,7 +553,8 @@ pub async fn accept_invitation_with_depot(
             inv::is_accepted.eq(true),
             inv::accepted_at.eq(Some(now.to_rfc3339())),
         ))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     res.status_code(StatusCode::CREATED);
     res.render(Json(ApiResponse::ok(serde_json::json!({

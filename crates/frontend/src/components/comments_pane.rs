@@ -100,9 +100,8 @@ pub fn CommentsPane(
                 text()
                     .kind(TextKind::Heading(2))
                     .content(crate::i18n::t("comments.title")),
-                action("×", move || set(open, false))
-                    .name("Close comments")
-                    .class("btn-icon"),
+                icon_button("Close comments", Icon::Close, move || set(open, false))
+                    .class("btn-icon icon-button"),
             )),
             col().class("comments-list").fill((
                 when(items.map(|items| items.is_empty()), || {

@@ -2,22 +2,17 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use diesel::SqliteConnection;
-use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::result::Error as DieselError;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
+use horme::prelude::*;
 use salvo::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 use contrix_collab::CollabManager;
 use contrix_core::config::AppConfig;
 
-mod handlers;
-mod middleware;
-mod routes;
-mod services;
-mod state;
+use contrix_server::{database, handlers, routes, services, state};
 
 use state::AppState;
 
@@ -39,7 +34,7 @@ fn run_migration_file(
         if trimmed.is_empty() {
             continue;
         }
-        match diesel::sql_query(trimmed).execute(conn) {
+        match diesel::RunQueryDsl::execute(diesel::sql_query(trimmed), conn) {
             Ok(_) => {}
             Err(e) if is_idempotent_migration_error(&e, trimmed) => {
                 tracing::debug!("Ignoring idempotent migration statement in {migration_path}: {e}");
@@ -198,12 +193,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // -----------------------------------------------------------------------
-    // 4. Create Diesel r2d2 connection pool
+    // 4. Create an on-demand Horme / Diesel-async SQLite provider
     // -----------------------------------------------------------------------
-    let manager = ConnectionManager::<SqliteConnection>::new(db_path.to_string_lossy());
-    let db = Pool::builder()
-        .max_size(config.database.max_connections)
-        .build(manager)?;
+    let db = database::Database::connect(&config.database)?;
 
     tracing::info!("Database pool created");
 
@@ -237,15 +229,21 @@ async fn main() -> anyhow::Result<()> {
         "migrations/024_remove_integration_settings.sql",
     ];
 
-    let mut conn = db.get()?;
+    let mut migrations = Vec::new();
     for migration_path in &migration_files {
         let sql = tokio::fs::read_to_string(migration_path)
             .await
             .with_context(|| format!("Could not read required migration file {migration_path}"))?;
-        run_migration_file(&mut conn, migration_path, &sql)?;
-        tracing::info!("Migration applied: {migration_path}");
+        migrations.push((migration_path.to_string(), sql));
     }
-    drop(conn);
+    db.run(move |conn| {
+        for (migration_path, sql) in migrations {
+            run_migration_file(conn, &migration_path, &sql)?;
+            tracing::info!("Migration applied: {migration_path}");
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?;
     tracing::info!("All migrations applied successfully");
 
     // -----------------------------------------------------------------------
@@ -258,7 +256,7 @@ async fn main() -> anyhow::Result<()> {
         services::StorageBackend::from_config(&config.storage)
             .context("Failed to initialize storage backend")?,
     );
-    handlers::convert::resume_pending_conversions(&db, storage_backend.clone());
+    handlers::convert::resume_pending_conversions(&db, storage_backend.clone()).await;
 
     // Ensure the database-specific backup directory exists.
     if services::database_backup::is_file_backed(&db_path) {
@@ -311,7 +309,8 @@ async fn main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
             loop {
                 interval.tick().await;
-                if let Ok(mut conn) = cleanup_db.get() {
+                {
+                    let mut conn = cleanup_db.clone();
                     let cutoff = (chrono::Utc::now() - chrono::Duration::days(cleanup_days as i64))
                         .to_rfc3339();
                     use contrix_core::schema::files::dsl as f;
@@ -319,6 +318,7 @@ async fn main() -> anyhow::Result<()> {
                         .filter(f::is_trashed.eq(true))
                         .filter(f::trashed_at.lt(&cutoff))
                         .load(&mut conn)
+                        .await
                         .unwrap_or_default();
                     for file in &old_files {
                         if !file.is_folder {
@@ -330,7 +330,8 @@ async fn main() -> anyhow::Result<()> {
                             .filter(f::is_trashed.eq(true))
                             .filter(f::trashed_at.lt(&cutoff)),
                     )
-                    .execute(&mut conn);
+                    .execute(&mut conn)
+                    .await;
                     if !old_files.is_empty() {
                         tracing::info!("Trash cleanup: removed {} expired items", old_files.len());
                     }

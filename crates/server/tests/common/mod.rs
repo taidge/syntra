@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use diesel::SqliteConnection;
-use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
+use horme::prelude::*;
 
 use contrix_collab::CollabManager;
 use contrix_core::config::{
@@ -11,7 +9,7 @@ use contrix_core::config::{
 };
 use contrix_server::routes::create_router;
 use contrix_server::services::{AiService, NotificationBus, StorageBackend, WopiSessionStore};
-use contrix_server::state::AppState;
+use contrix_server::state::{AppState, DbPool};
 use salvo::conn::Acceptor;
 use salvo::prelude::*;
 
@@ -22,7 +20,7 @@ use salvo::prelude::*;
 pub struct TestServer {
     pub base_url: String,
     pub client: reqwest::Client,
-    pub db: Pool<ConnectionManager<SqliteConnection>>,
+    pub db: DbPool,
     pub notifications: Arc<NotificationBus>,
     // Hold the tempdir so it is not deleted until the TestServer is dropped.
     pub _temp_dir: tempfile::TempDir,
@@ -42,12 +40,17 @@ impl TestServer {
         std::fs::create_dir_all(&storage_path).unwrap();
 
         let db_url = db_path.to_string_lossy().to_string();
-        let manager = ConnectionManager::<SqliteConnection>::new(&db_url);
-        let db = Pool::builder().max_size(2).build(manager).unwrap();
+        let db = DbPool::with_timeouts(
+            &db_url,
+            2,
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(3),
+        )
+        .unwrap();
 
         // Run migrations by splitting the SQL file on semicolons.
-        {
-            let mut conn = db.get().unwrap();
+        db.run(move |conn| {
             let migration_sql = std::fs::read_to_string(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../migrations/001_init.sql"),
@@ -66,11 +69,13 @@ impl TestServer {
                 if trimmed.is_empty() {
                     continue;
                 }
-                diesel::sql_query(trimmed)
-                    .execute(&mut conn)
+                diesel::RunQueryDsl::execute(diesel::sql_query(trimmed), conn)
                     .unwrap_or_else(|e| panic!("migration failed on:\n{trimmed}\nerror: {e}"));
             }
-        }
+            Ok::<_, diesel::result::Error>(())
+        })
+        .await
+        .unwrap();
 
         let config = AppConfig {
             server: ServerConfig {
@@ -81,6 +86,9 @@ impl TestServer {
             database: DatabaseConfig {
                 url: db_url,
                 max_connections: 2,
+                checkout_timeout_ms: 3_000,
+                operation_timeout_ms: 15_000,
+                busy_timeout_ms: 3_000,
             },
             auth: AuthConfig {
                 jwt_secret: "test-secret-key-for-testing-only".to_string(),
@@ -104,8 +112,7 @@ impl TestServer {
         };
 
         // Run additional migrations for new tables.
-        {
-            let mut conn = db.get().unwrap();
+        db.run(move |conn| {
             let migration_dir =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
             let additional_migrations = [
@@ -145,11 +152,14 @@ impl TestServer {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        let _ = diesel::sql_query(trimmed).execute(&mut conn);
+                        let _ = diesel::RunQueryDsl::execute(diesel::sql_query(trimmed), conn);
                     }
                 }
             }
-        }
+            Ok::<_, diesel::result::Error>(())
+        })
+        .await
+        .unwrap();
 
         let db_clone = db.clone();
         let storage = Arc::new(StorageBackend::from_config(&config.storage).unwrap());
@@ -332,11 +342,12 @@ impl TestServer {
 
     /// Promote a user to admin role directly via SQL.
     pub async fn make_admin(&self, user_id_val: &str) {
-        let mut conn = self.db.get().unwrap();
+        let mut conn = self.db.clone();
         use contrix_core::schema::users::dsl::*;
         diesel::update(users.filter(id.eq(user_id_val)))
             .set(role.eq("admin"))
             .execute(&mut conn)
+            .await
             .unwrap();
     }
 
@@ -349,7 +360,7 @@ impl TestServer {
     ) -> String {
         let notification_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
-        let mut conn = self.db.get().unwrap();
+        let mut conn = self.db.clone();
 
         use contrix_core::models::NewNotification;
         use contrix_core::schema::notifications::dsl::*;
@@ -368,6 +379,7 @@ impl TestServer {
         diesel::insert_into(notifications)
             .values(&new_notif)
             .execute(&mut conn)
+            .await
             .unwrap();
 
         notification_id

@@ -1,5 +1,7 @@
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -13,14 +15,14 @@ use crate::middleware::auth::get_user_id;
 
 /// Authorize the caller for `required_role` on a file, rendering the proper
 /// error and returning `false` when access is denied or the file is missing.
-fn ensure_file_access(
-    conn: &mut diesel::SqliteConnection,
+async fn ensure_file_access(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     file_id: &str,
     user_id: &str,
     required_role: &str,
     res: &mut Response,
 ) -> bool {
-    match load_accessible_file(conn, file_id, user_id, required_role) {
+    match load_accessible_file(conn, file_id, user_id, required_role).await {
         Ok(Some(_)) => true,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -74,7 +76,7 @@ pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
     };
 
     // Verify the file exists and the caller may edit it (locking is a write).
-    if !ensure_file_access(&mut conn, &file_id_param, &uid, "editor", res) {
+    if !ensure_file_access(&mut conn, &file_id_param, &uid, "editor", res).await {
         return;
     }
 
@@ -82,6 +84,7 @@ pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
     match fl::file_locks
         .filter(fl::file_id.eq(&file_id_param))
         .first::<FileLock>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(existing)) => {
@@ -111,8 +114,9 @@ pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
                 return;
             }
             // Lock is expired — remove it and proceed.
-            let _ =
-                diesel::delete(fl::file_locks.filter(fl::id.eq(&existing.id))).execute(&mut conn);
+            let _ = diesel::delete(fl::file_locks.filter(fl::id.eq(&existing.id)))
+                .execute(&mut conn)
+                .await;
         }
         Ok(None) => {}
         Err(e) => {
@@ -142,6 +146,7 @@ pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
     if let Err(e) = diesel::insert_into(fl::file_locks)
         .values(&new_lock)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -199,6 +204,7 @@ pub async fn release_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
             .filter(fl::locked_by.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -253,13 +259,14 @@ pub async fn check_lock(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
 
-    if !ensure_file_access(&mut conn, &file_id_param, &uid, "viewer", res) {
+    if !ensure_file_access(&mut conn, &file_id_param, &uid, "viewer", res).await {
         return;
     }
 
     match fl::file_locks
         .filter(fl::file_id.eq(&file_id_param))
         .first::<FileLock>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(lock)) => {
@@ -337,6 +344,7 @@ pub async fn refresh_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
     )
     .set(fl::expires_at.eq(&new_expires))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

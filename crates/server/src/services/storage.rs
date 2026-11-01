@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -43,7 +44,14 @@ impl StorageBackend {
         data: &[u8],
     ) -> Result<String, AppError> {
         match self {
-            Self::Local(storage) => storage.save_file(owner_id, file_name, data),
+            Self::Local(_) => {
+                let file_name = StorageService::sanitize_file_name(file_name);
+                let rel_path =
+                    unique_relative_path(self, &format!("{owner_id}/{file_name}")).await?;
+                self.write_file(&rel_path, data, "application/octet-stream")
+                    .await?;
+                Ok(rel_path)
+            }
             Self::S3(storage) => {
                 let file_name = StorageService::sanitize_file_name(file_name);
                 let rel_path =
@@ -66,14 +74,26 @@ impl StorageBackend {
             .to_string_lossy()
             .replace('\\', "/");
         match self {
-            Self::Local(storage) => storage.write_file(&path, data),
+            Self::Local(storage) => {
+                let full_path = storage.resolve_path(&path)?;
+                if let Some(parent) = full_path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|error| AppError::Storage(error.to_string()))?;
+                }
+                tokio::fs::write(full_path, data)
+                    .await
+                    .map_err(|error| AppError::Storage(error.to_string()))
+            }
             Self::S3(storage) => storage.put_object(&path, data, content_type).await,
         }
     }
 
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>, AppError> {
         match self {
-            Self::Local(storage) => storage.read_file(path),
+            Self::Local(storage) => tokio::fs::read(storage.resolve_path(path)?)
+                .await
+                .map_err(|error| AppError::Storage(error.to_string())),
             Self::S3(storage) => {
                 let path = StorageService::checked_relative_path(path)?
                     .to_string_lossy()
@@ -85,7 +105,12 @@ impl StorageBackend {
 
     pub async fn delete_file(&self, path: &str) -> Result<(), AppError> {
         match self {
-            Self::Local(storage) => storage.delete_file(path),
+            Self::Local(storage) => match tokio::fs::remove_file(storage.resolve_path(path)?).await
+            {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(AppError::Storage(error.to_string())),
+            },
             Self::S3(storage) => {
                 let path = StorageService::checked_relative_path(path)?
                     .to_string_lossy()
@@ -97,7 +122,9 @@ impl StorageBackend {
 
     async fn exists(&self, path: &str) -> Result<bool, AppError> {
         match self {
-            Self::Local(storage) => storage.file_exists(path),
+            Self::Local(storage) => tokio::fs::try_exists(storage.resolve_path(path)?)
+                .await
+                .map_err(|error| AppError::Storage(error.to_string())),
             Self::S3(storage) => {
                 let path = StorageService::checked_relative_path(path)?
                     .to_string_lossy()
@@ -190,17 +217,9 @@ impl StorageService {
         Ok(self.base_path.join(Self::checked_relative_path(path)?))
     }
 
-    /// Write `data` to an already chosen relative storage path.
-    pub fn write_file(&self, path: &str, data: &[u8]) -> Result<(), AppError> {
-        let full_path = self.resolve_path(path)?;
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| AppError::Storage(e.to_string()))?;
-        }
-        fs::write(&full_path, data).map_err(|e| AppError::Storage(e.to_string()))
-    }
-
     /// Persist `data` to disk under `<base>/<owner_id>/<file_name>` and return
     /// the relative storage path.
+    #[cfg(test)]
     pub fn save_file(
         &self,
         owner_id: &Uuid,
@@ -242,12 +261,14 @@ impl StorageService {
     }
 
     /// Read the contents of the file at the given relative `path`.
+    #[cfg(test)]
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, AppError> {
         let full_path = self.resolve_path(path)?;
         fs::read(&full_path).map_err(|e| AppError::Storage(e.to_string()))
     }
 
     /// Delete the file at the given relative `path`.
+    #[cfg(test)]
     pub fn delete_file(&self, path: &str) -> Result<(), AppError> {
         let full_path = self.resolve_path(path)?;
         if full_path.exists() {
@@ -256,11 +277,8 @@ impl StorageService {
         Ok(())
     }
 
-    pub fn file_exists(&self, path: &str) -> Result<bool, AppError> {
-        Ok(self.resolve_path(path)?.exists())
-    }
-
     /// Ensure the per-user directory exists.
+    #[cfg(test)]
     pub fn ensure_user_dir(&self, owner_id: &Uuid) -> Result<(), AppError> {
         let dir = self.base_path.join(owner_id.to_string());
         if !dir.exists() {
@@ -348,6 +366,47 @@ fn is_reserved_windows_name(file_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_local_files_preserve_collisions_and_path_validation() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage = StorageBackend::Local(StorageService::new(temp_dir.path().to_str().unwrap()));
+        let owner = Uuid::new_v4();
+        let first = storage
+            .save_file(&owner, "../secret\r\n.txt", b"first")
+            .await
+            .unwrap();
+        let second = storage
+            .save_file(&owner, "../secret\r\n.txt", b"second")
+            .await
+            .unwrap();
+        assert_eq!(first, format!("{owner}/secret__.txt"));
+        assert_ne!(first, second);
+        assert_eq!(storage.read_file(&first).await.unwrap(), b"first");
+        assert_eq!(storage.read_file(&second).await.unwrap(), b"second");
+
+        storage
+            .write_file("nested/output.bin", b"output", "application/octet-stream")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.read_file("nested/output.bin").await.unwrap(),
+            b"output"
+        );
+        assert!(storage.exists("nested/output.bin").await.unwrap());
+        assert!(
+            storage
+                .write_file("../outside", b"bad", "text/plain")
+                .await
+                .is_err()
+        );
+        assert!(storage.read_file("../outside").await.is_err());
+        assert!(storage.delete_file("../outside").await.is_err());
+        assert!(storage.exists("../outside").await.is_err());
+        storage.delete_file("nested/output.bin").await.unwrap();
+        storage.delete_file("nested/output.bin").await.unwrap();
+        assert!(!storage.exists("nested/output.bin").await.unwrap());
+    }
 
     #[test]
     fn save_file_sanitizes_upload_name() {

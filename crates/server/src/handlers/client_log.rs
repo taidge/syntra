@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -29,7 +30,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// POST /client-log  (Submit client log entries)
+// POST /client-log  (Submit client log entries).await
 // ---------------------------------------------------------------------------
 
 #[handler]
@@ -126,6 +127,7 @@ pub async fn submit_client_logs(req: &mut Request, depot: &mut Depot, res: &mut 
         if diesel::insert_into(cl::client_logs)
             .values(&new_log)
             .execute(&mut conn)
+            .await
             .is_ok()
         {
             inserted_count += 1;
@@ -178,12 +180,14 @@ pub async fn list_client_logs(req: &mut Request, depot: &mut Depot, res: &mut Re
             .limit(limit_val)
             .offset(offset_val)
             .load::<ClientLog>(&mut conn)
+            .await
     } else {
         cl::client_logs
             .order(cl::created_at.desc())
             .limit(limit_val)
             .offset(offset_val)
             .load::<ClientLog>(&mut conn)
+            .await
     };
 
     match result {
@@ -248,9 +252,11 @@ pub async fn clear_client_logs(req: &mut Request, depot: &mut Depot, res: &mut R
 
     let result = if let Some(days) = older_than_days {
         let cutoff = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
-        diesel::delete(cl::client_logs.filter(cl::created_at.lt(&cutoff))).execute(&mut conn)
+        diesel::delete(cl::client_logs.filter(cl::created_at.lt(&cutoff)))
+            .execute(&mut conn)
+            .await
     } else {
-        diesel::delete(cl::client_logs).execute(&mut conn)
+        diesel::delete(cl::client_logs).execute(&mut conn).await
     };
 
     match result {

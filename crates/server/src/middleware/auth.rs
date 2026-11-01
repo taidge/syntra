@@ -4,6 +4,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use contrix_core::schema::api_keys::dsl as ak;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -205,7 +207,7 @@ pub async fn jwt_auth_middleware(
             let mut conn = match state.db.get() {
                 Ok(conn) => conn,
                 Err(_) => {
-                    reject(res, ctrl, "Authentication service unavailable");
+                    database_unavailable(res, ctrl);
                     return;
                 }
             };
@@ -219,20 +221,22 @@ pub async fn jwt_auth_middleware(
                 .filter(s::expires_at.gt(&now))
                 .select((s::id, u::role))
                 .first::<(String, String)>(&mut conn)
+                .await
                 .optional();
 
             match active_session {
                 Ok(Some((session_id, current_role))) if current_role != "disabled" => {
                     let _ = diesel::update(s::sessions.filter(s::id.eq(session_id)))
                         .set(s::last_activity_at.eq(&now))
-                        .execute(&mut conn);
+                        .execute(&mut conn)
+                        .await;
                     depot.insert(USER_ID_KEY, data.claims.sub);
                     // The database role is authoritative; the JWT copy can be
                     // stale after an administrator changes permissions.
                     depot.insert(USER_ROLE_KEY, current_role);
                 }
                 Ok(_) => reject(res, ctrl, "Session has been revoked or expired"),
-                Err(_) => reject(res, ctrl, "Authentication service unavailable"),
+                Err(_) => database_unavailable(res, ctrl),
             }
         }
         Err(_) if token_from_header => {
@@ -242,7 +246,7 @@ pub async fn jwt_auth_middleware(
             let mut conn = match state.db.get() {
                 Ok(conn) => conn,
                 Err(_) => {
-                    reject(res, ctrl, "Authentication service unavailable");
+                    database_unavailable(res, ctrl);
                     return;
                 }
             };
@@ -259,6 +263,7 @@ pub async fn jwt_auth_middleware(
                     ak::expires_at,
                 ))
                 .first::<(String, String, String, String, Option<String>)>(&mut conn)
+                .await
                 .optional();
 
             match api_key {
@@ -298,18 +303,28 @@ pub async fn jwt_auth_middleware(
 
                     let _ = diesel::update(ak::api_keys.filter(ak::id.eq(key_id)))
                         .set(ak::last_used_at.eq(Some(Utc::now().to_rfc3339())))
-                        .execute(&mut conn);
+                        .execute(&mut conn)
+                        .await;
                     depot.insert(USER_ID_KEY, user_id);
                     depot.insert(USER_ROLE_KEY, role);
                 }
                 Ok(_) => reject(res, ctrl, "Invalid or expired token"),
-                Err(_) => reject(res, ctrl, "Authentication service unavailable"),
+                Err(_) => database_unavailable(res, ctrl),
             }
         }
         Err(_) => reject(res, ctrl, "Invalid or expired token"),
     }
 }
 
+// Capacity and database failures are retryable service errors, not bad tokens.
+fn database_unavailable(res: &mut Response, ctrl: &mut FlowCtrl) {
+    res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+    res.render(Json(serde_json::json!({
+        "success": false,
+        "error": {"code": 503, "message": "Authentication service temporarily unavailable"}
+    })));
+    ctrl.skip_rest();
+}
 fn reject(res: &mut Response, ctrl: &mut FlowCtrl, message: &str) {
     res.status_code(StatusCode::UNAUTHORIZED);
     res.render(Json(serde_json::json!({

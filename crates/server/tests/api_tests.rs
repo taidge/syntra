@@ -1,5 +1,56 @@
 mod common;
 
+/// Exhausting the tiny test pool must apply backpressure without invalidating
+/// a valid login. The same token works again as soon as leases are returned.
+#[tokio::test]
+async fn database_backpressure_preserves_sessions_and_recovers() {
+    use horme::GetConnection;
+
+    let server = common::TestServer::new().await;
+    let (token, _) = server
+        .register("pool_probe", "pool_probe@example.test", "PoolProbe!2026")
+        .await;
+    let mut first = server.db.clone();
+    let mut second = server.db.clone();
+    let first_lease = first.get_mut_conn().await.unwrap();
+    let second_lease = second.get_mut_conn().await.unwrap();
+
+    let response = server
+        .client
+        .get(server.url("/api/v1/auth/me"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 503, "capacity is not an auth failure");
+    drop(first_lease);
+    drop(second_lease);
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while server.db.state().admitted_operations != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cleanup returns all admitted capacity");
+
+    // Repeated concurrent requests exercise auth and handler SQL with only two
+    // real connections, including lease release between their separate queries.
+    for _ in 0..8 {
+        let request = || {
+            server
+                .client
+                .get(server.url("/api/v1/auth/me"))
+                .bearer_auth(&token)
+                .send()
+        };
+        let (first, second) = tokio::join!(request(), request());
+        assert_eq!(first.unwrap().status(), 200);
+        assert_eq!(second.unwrap().status(), 200);
+    }
+    assert!(server.db.state().connections <= 2);
+}
+
 use common::TestServer;
 use contrix_core::config::AiConfig;
 use contrix_server::handlers::totp::current_totp_code;
@@ -1293,13 +1344,14 @@ async fn test_ai_assistant_calls_provider_sanitizes_output_and_audits() {
     assert_eq!(body["data"]["answer"], "safe answer");
 
     use contrix_core::schema::activity_logs::dsl as logs;
-    use diesel::prelude::*;
-    let mut connection = server.db.get().unwrap();
+    use horme::prelude::*;
+    let mut connection = server.db.clone();
     let details: String = logs::activity_logs
         .filter(logs::user_id.eq(user_id))
         .filter(logs::action.eq("ai.assist"))
         .select(logs::details)
         .first::<Option<String>>(&mut connection)
+        .await
         .unwrap()
         .unwrap();
     assert!(!details.contains("Explain this"));
@@ -2532,7 +2584,7 @@ async fn test_room_member_can_access_room_files_and_upload_inherits_room_id() {
     use contrix_core::models::{NewFile, NewRoomMember};
     use contrix_core::schema::files::dsl as f;
     use contrix_core::schema::room_members::dsl as rm;
-    use diesel::prelude::*;
+    use horme::prelude::*;
 
     let server = TestServer::new().await;
     let (owner_token, owner_body) = server
@@ -2568,7 +2620,7 @@ async fn test_room_member_can_access_room_files_and_upload_inherits_room_id() {
     let room_id = create_room_body["data"]["id"].as_str().unwrap().to_string();
 
     {
-        let mut conn = server.db.get().unwrap();
+        let mut conn = server.db.clone();
         let now = chrono::Utc::now().to_rfc3339();
 
         let room_member = NewRoomMember {
@@ -2581,6 +2633,7 @@ async fn test_room_member_can_access_room_files_and_upload_inherits_room_id() {
         diesel::insert_into(rm::room_members)
             .values(&room_member)
             .execute(&mut conn)
+            .await
             .unwrap();
 
         let folder_id = uuid::Uuid::new_v4().to_string();
@@ -2604,6 +2657,7 @@ async fn test_room_member_can_access_room_files_and_upload_inherits_room_id() {
         diesel::insert_into(f::files)
             .values(&room_folder)
             .execute(&mut conn)
+            .await
             .unwrap();
 
         drop(conn);
@@ -2629,11 +2683,12 @@ async fn test_room_member_can_access_room_files_and_upload_inherits_room_id() {
         let upload_body: serde_json::Value = upload_resp.json().await.unwrap();
         let file_id = upload_body["data"]["id"].as_str().unwrap().to_string();
 
-        let mut conn = server.db.get().unwrap();
+        let mut conn = server.db.clone();
         let uploaded_room_id = f::files
             .filter(f::id.eq(&file_id))
             .select(f::room_id)
             .first::<Option<String>>(&mut conn)
+            .await
             .unwrap();
         assert_eq!(uploaded_room_id.as_deref(), Some(room_id.as_str()));
 
@@ -2671,7 +2726,7 @@ async fn test_room_member_can_create_room_root_folder_and_upload_root_file() {
     use contrix_core::models::NewRoomMember;
     use contrix_core::schema::files::dsl as f;
     use contrix_core::schema::room_members::dsl as rm;
-    use diesel::prelude::*;
+    use horme::prelude::*;
 
     let server = TestServer::new().await;
     let (owner_token, _) = server
@@ -2703,7 +2758,7 @@ async fn test_room_member_can_create_room_root_folder_and_upload_root_file() {
     let room_id = create_room_body["data"]["id"].as_str().unwrap().to_string();
 
     {
-        let mut conn = server.db.get().unwrap();
+        let mut conn = server.db.clone();
         let room_member = NewRoomMember {
             id: uuid::Uuid::new_v4().to_string(),
             room_id: room_id.clone(),
@@ -2714,6 +2769,7 @@ async fn test_room_member_can_create_room_root_folder_and_upload_root_file() {
         diesel::insert_into(rm::room_members)
             .values(&room_member)
             .execute(&mut conn)
+            .await
             .unwrap();
     }
 
@@ -2737,11 +2793,12 @@ async fn test_room_member_can_create_room_root_folder_and_upload_root_file() {
         .to_string();
 
     {
-        let mut conn = server.db.get().unwrap();
+        let mut conn = server.db.clone();
         let created_folder_room_id = f::files
             .filter(f::id.eq(&folder_id))
             .select(f::room_id)
             .first::<Option<String>>(&mut conn)
+            .await
             .unwrap();
         assert_eq!(created_folder_room_id.as_deref(), Some(room_id.as_str()));
     }
@@ -2768,11 +2825,12 @@ async fn test_room_member_can_create_room_root_folder_and_upload_root_file() {
     let root_file_id = root_upload_body["data"]["id"].as_str().unwrap().to_string();
 
     {
-        let mut conn = server.db.get().unwrap();
+        let mut conn = server.db.clone();
         let uploaded_room_id = f::files
             .filter(f::id.eq(&root_file_id))
             .select(f::room_id)
             .first::<Option<String>>(&mut conn)
+            .await
             .unwrap();
         assert_eq!(uploaded_room_id.as_deref(), Some(room_id.as_str()));
     }
@@ -2814,7 +2872,7 @@ async fn test_document_creation_requires_parent_access_and_supports_room_root() 
     use contrix_core::models::NewRoomMember;
     use contrix_core::schema::files::dsl as f;
     use contrix_core::schema::room_members::dsl as rm;
-    use diesel::prelude::*;
+    use horme::prelude::*;
 
     let server = TestServer::new().await;
     let (owner_token, _) = server
@@ -2863,7 +2921,7 @@ async fn test_document_creation_requires_parent_access_and_supports_room_root() 
     let room_id = create_room_body["data"]["id"].as_str().unwrap().to_string();
 
     {
-        let mut conn = server.db.get().unwrap();
+        let mut conn = server.db.clone();
         let room_member = NewRoomMember {
             id: uuid::Uuid::new_v4().to_string(),
             room_id: room_id.clone(),
@@ -2874,6 +2932,7 @@ async fn test_document_creation_requires_parent_access_and_supports_room_root() 
         diesel::insert_into(rm::room_members)
             .values(&room_member)
             .execute(&mut conn)
+            .await
             .unwrap();
     }
 
@@ -2897,16 +2956,18 @@ async fn test_document_creation_requires_parent_access_and_supports_room_root() 
         .to_string();
 
     {
-        let mut conn = server.db.get().unwrap();
+        let mut conn = server.db.clone();
         let created_owner_id = f::files
             .filter(f::id.eq(&room_file_id))
             .select(f::owner_id)
             .first::<String>(&mut conn)
+            .await
             .unwrap();
         let created_room_id = f::files
             .filter(f::id.eq(&room_file_id))
             .select(f::room_id)
             .first::<Option<String>>(&mut conn)
+            .await
             .unwrap();
         assert_eq!(created_owner_id, member_id);
         assert_eq!(created_room_id.as_deref(), Some(room_id.as_str()));
@@ -3979,12 +4040,13 @@ async fn test_totp_enabled_login_requires_valid_second_factor() {
         .to_string();
     {
         use contrix_core::schema::totp_secrets::dsl as ts;
-        use diesel::prelude::*;
+        use horme::prelude::*;
 
-        let mut conn = server.db.get().unwrap();
+        let mut conn = server.db.clone();
         let stored: String = ts::totp_secrets
             .select(ts::backup_codes)
             .first::<Option<String>>(&mut conn)
+            .await
             .unwrap()
             .unwrap();
         let hashes: Vec<String> = serde_json::from_str(&stored).unwrap();
@@ -4399,6 +4461,13 @@ async fn test_openapi_and_prometheus_metrics() {
     let metrics = response.text().await.unwrap();
     assert!(metrics.contains("# TYPE contrix_uptime_seconds gauge"));
     assert!(metrics.contains("contrix_conversion_jobs"));
+    assert!(metrics.contains("# TYPE contrix_database_admitted_operations gauge"));
+    assert!(metrics.contains("# TYPE contrix_database_checkouts_total counter"));
+    let checkouts = metrics
+        .lines()
+        .find_map(|line| line.strip_prefix("contrix_database_checkouts_total "))
+        .unwrap();
+    assert!(checkouts.parse::<u64>().unwrap() > 0);
 }
 
 // ===========================================================================
@@ -4478,6 +4547,11 @@ async fn test_admin_monitoring() {
     assert!(body["data"]["total_users"].is_number());
     assert!(body["data"]["total_documents"].is_number());
     assert!(body["data"]["total_files"].is_number());
+    let database = &body["data"]["database"];
+    let connections = database["connections"].as_u64().unwrap();
+    assert!(database["idle_connections"].as_u64().unwrap() <= connections);
+    assert!(database["admitted_operations"].as_u64().unwrap() <= 4);
+    assert!(database["checkouts"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@ use contrix_core::models::File;
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::recent_files::dsl as rf;
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use crate::middleware::auth::get_user_id;
@@ -71,6 +72,7 @@ pub async fn list_recent(depot: &mut Depot, res: &mut Response) {
         .limit(50)
         .select(rf::file_id)
         .load::<String>(&mut conn)
+        .await
     {
         Ok(ids) => ids,
         Err(e) => {
@@ -91,6 +93,7 @@ pub async fn list_recent(depot: &mut Depot, res: &mut Response) {
     match f::files
         .filter(f::id.eq_any(&recent_file_ids))
         .load::<File>(&mut conn)
+        .await
     {
         Ok(rows) => {
             // Preserve the recent ordering by building a lookup and sorting.
@@ -103,7 +106,8 @@ pub async fn list_recent(depot: &mut Depot, res: &mut Response) {
                 .collect();
             for r in &mut file_list {
                 r.shared_with_count =
-                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string());
+                    crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string())
+                        .await;
             }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(file_list)));
@@ -146,7 +150,10 @@ pub async fn clear_recent(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    match diesel::delete(rf::recent_files.filter(rf::user_id.eq(&uid))).execute(&mut conn) {
+    match diesel::delete(rf::recent_files.filter(rf::user_id.eq(&uid)))
+        .execute(&mut conn)
+        .await
+    {
         Ok(count) => {
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(

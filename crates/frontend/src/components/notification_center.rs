@@ -72,7 +72,7 @@ pub fn NotificationCenter(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     view().class("notification-center notifications").fill((
         sapid::button()
             .theme(theme())
-            .class("notification-button")
+            .class("notification-button icon-button")
             .name(scope.bond(move || {
                 format!(
                     "{} ({})",
@@ -80,7 +80,8 @@ pub fn NotificationCenter(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     items.get().iter().filter(|item| !item.is_read).count()
                 )
             }))
-            .label("🔔")
+            .label("")
+            .fill(icon(Icon::Bell))
             .unstyled()
             .on_press(move || set(open, !open.get())),
         when(open, move || {

@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -43,6 +45,7 @@ pub async fn list_settings(depot: &mut Depot, res: &mut Response) {
         .filter(us::user_id.eq(&uid))
         .order(us::setting_key.asc())
         .load::<UserSetting>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let settings: Vec<serde_json::Value> = rows
@@ -104,6 +107,7 @@ pub async fn get_setting(req: &mut Request, depot: &mut Depot, res: &mut Respons
         .filter(us::user_id.eq(&uid))
         .filter(us::setting_key.eq(&key_param))
         .first::<UserSetting>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(s)) => {
@@ -185,6 +189,7 @@ pub async fn set_setting(req: &mut Request, depot: &mut Depot, res: &mut Respons
         .filter(us::user_id.eq(&uid))
         .filter(us::setting_key.eq(&key_param))
         .first::<UserSetting>(&mut conn)
+        .await
         .optional();
 
     match existing {
@@ -196,6 +201,7 @@ pub async fn set_setting(req: &mut Request, depot: &mut Depot, res: &mut Respons
                     us::updated_at.eq(now.to_rfc3339()),
                 ))
                 .execute(&mut conn)
+                .await
             {
                 res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
                 res.render(Json(ApiResponse::<()>::err(
@@ -227,6 +233,7 @@ pub async fn set_setting(req: &mut Request, depot: &mut Depot, res: &mut Respons
             if let Err(e) = diesel::insert_into(us::user_settings)
                 .values(&new_setting)
                 .execute(&mut conn)
+                .await
             {
                 res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
                 res.render(Json(ApiResponse::<()>::err(
@@ -290,6 +297,7 @@ pub async fn delete_setting(req: &mut Request, depot: &mut Depot, res: &mut Resp
             .filter(us::setting_key.eq(&key_param)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -341,7 +349,10 @@ pub async fn delete_all_settings(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    match diesel::delete(us::user_settings.filter(us::user_id.eq(&uid))).execute(&mut conn) {
+    match diesel::delete(us::user_settings.filter(us::user_id.eq(&uid)))
+        .execute(&mut conn)
+        .await
+    {
         Ok(count) => {
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(serde_json::json!({

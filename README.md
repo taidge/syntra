@@ -144,7 +144,7 @@ office/
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.95+ (edition 2024)
+- [Rust](https://rustup.rs/) 1.96+ (edition 2024)
 - SQLite 3 (bundled with Diesel)
 - [Git](https://git-scm.com/) to initialize the pinned [Glory](https://github.com/glory-rs/glory) and [Sapid](https://github.com/sapid-ui/sapid) source submodules
 - `wasm32-unknown-unknown` and wasm-bindgen-cli matching the version in `Cargo.lock`
@@ -153,7 +153,7 @@ office/
 
 ```powershell
 # Clone the repository
-git clone --recurse-submodules https://github.com/contrix-org/office.git
+git clone --recurse-submodules https://github.com/arkret-org/office.git
 cd office
 
 # Build the Glory + Sapid browser app, then start the backend
@@ -197,6 +197,17 @@ CI initializes the recorded submodule revisions without `--remote`, so a build r
 reproducible as upstream `main` advances. Local edits in other Glory/Sapid checkouts are unaffected.
 
 ### Configuration
+
+Database queries use Diesel, Diesel-async's SQLite adapter, and Horme. Request handlers
+keep cheap provider handles; each SQL operation leases a connection only while it runs.
+Explicit transactions share one lease. SQLite work runs on blocking workers, and cancelled
+or timed-out work retains its bounded admission until cleanup finishes.
+
+The `[database]` settings default to `max_connections = 5`, `checkout_timeout_ms = 3000`,
+`operation_timeout_ms = 15000`, and `busy_timeout_ms = 3000`. Admission is bounded to twice
+the connection count, including waiters and cleanup. SQLite connections use WAL.
+The admin monitoring JSON and Prometheus endpoint expose connection, idle, admission,
+and cumulative checkout metrics.
 
 Configuration is loaded from layered sources:
 

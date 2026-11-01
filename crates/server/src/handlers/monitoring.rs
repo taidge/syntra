@@ -1,4 +1,5 @@
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use contrix_core::dto::ApiResponse;
@@ -39,17 +40,23 @@ pub async fn get_monitoring(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    let total_users = u::users.count().get_result::<i64>(&mut conn).unwrap_or(0);
+    let total_users = u::users
+        .count()
+        .get_result::<i64>(&mut conn)
+        .await
+        .unwrap_or(0);
 
     let total_documents = d::documents
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
 
     let total_files = f::files
         .filter(f::is_trashed.eq(false))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
 
     let active_users = up::user_presence
@@ -58,6 +65,7 @@ pub async fn get_monitoring(depot: &mut Depot, res: &mut Response) {
         .distinct()
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
 
     let active_documents = up::user_presence
@@ -66,6 +74,7 @@ pub async fn get_monitoring(depot: &mut Depot, res: &mut Response) {
         .distinct()
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
 
     // Try to read memory info from /proc/self/status on Linux
@@ -97,6 +106,7 @@ pub async fn get_monitoring(depot: &mut Depot, res: &mut Response) {
 
     // Compute uptime from AppState.started_at.
     let uptime_seconds = (chrono::Utc::now() - state.started_at).num_seconds();
+    let database = state.db.state();
 
     let metrics = serde_json::json!({
         "total_users": total_users,
@@ -106,6 +116,12 @@ pub async fn get_monitoring(depot: &mut Depot, res: &mut Response) {
         "active_documents": active_documents,
         "memory": memory_info,
         "uptime_seconds": uptime_seconds,
+        "database": {
+            "connections": database.connections,
+            "idle_connections": database.idle_connections,
+            "admitted_operations": database.admitted_operations,
+            "checkouts": database.checkouts,
+        },
     });
 
     res.status_code(StatusCode::OK);
@@ -144,6 +160,7 @@ pub async fn get_document_stats(depot: &mut Depot, res: &mut Response) {
         .filter(up::is_active.eq(true))
         .select((up::document_id, up::user_id, up::last_seen_at))
         .load::<(String, String, String)>(&mut conn)
+        .await
     {
         Ok(rows) => {
             // Group by document_id.
@@ -201,39 +218,57 @@ pub async fn prometheus_metrics(depot: &mut Depot, res: &mut Response) {
             return;
         }
     };
-    let users = u::users.count().get_result::<i64>(&mut conn).unwrap_or(0);
+    let users = u::users
+        .count()
+        .get_result::<i64>(&mut conn)
+        .await
+        .unwrap_or(0);
     let documents = d::documents
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
     let active = up::user_presence
         .filter(up::is_active.eq(true))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
     let pending = cj::conversion_jobs
         .filter(cj::status.eq_any(["pending", "processing"]))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
     let failed = cj::conversion_jobs
         .filter(cj::status.eq("failed"))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
     let webhook_failed = wd::webhook_deliveries
         .filter(wd::success.eq(false))
         .count()
         .get_result::<i64>(&mut conn)
+        .await
         .unwrap_or(0);
     let uptime = (chrono::Utc::now() - state.started_at).num_seconds().max(0);
+    let database = state.db.state();
+    let db_connections = database.connections;
+    let db_idle = database.idle_connections;
+    let db_admitted = database.admitted_operations;
+    let db_checkouts = database.checkouts;
     let body = format!(
         "# HELP contrix_uptime_seconds Server uptime in seconds\n# TYPE contrix_uptime_seconds gauge\ncontrix_uptime_seconds {uptime}\n\
 # HELP contrix_users_total Registered users\n# TYPE contrix_users_total gauge\ncontrix_users_total {users}\n\
 # HELP contrix_documents_total Stored documents\n# TYPE contrix_documents_total gauge\ncontrix_documents_total {documents}\n\
 # HELP contrix_active_presence Active collaborative presence records\n# TYPE contrix_active_presence gauge\ncontrix_active_presence {active}\n\
 # HELP contrix_conversion_jobs Durable conversion jobs by status\n# TYPE contrix_conversion_jobs gauge\ncontrix_conversion_jobs{{status=\"pending\"}} {pending}\ncontrix_conversion_jobs{{status=\"failed\"}} {failed}\n\
-# HELP contrix_webhook_deliveries_failed Failed webhook deliveries available for retry\n# TYPE contrix_webhook_deliveries_failed gauge\ncontrix_webhook_deliveries_failed {webhook_failed}\n"
+# HELP contrix_webhook_deliveries_failed Failed webhook deliveries available for retry\n# TYPE contrix_webhook_deliveries_failed gauge\ncontrix_webhook_deliveries_failed {webhook_failed}\n\
+# HELP contrix_database_connections Current SQLite pool connections\n# TYPE contrix_database_connections gauge\ncontrix_database_connections {db_connections}\n\
+# HELP contrix_database_idle_connections SQLite connections available for a query lease\n# TYPE contrix_database_idle_connections gauge\ncontrix_database_idle_connections {db_idle}\n\
+# HELP contrix_database_admitted_operations Admitted SQL operations including waiters and pending blocking cleanup\n# TYPE contrix_database_admitted_operations gauge\ncontrix_database_admitted_operations {db_admitted}\n\
+# HELP contrix_database_checkouts_total SQL and transaction leases acquired since startup\n# TYPE contrix_database_checkouts_total counter\ncontrix_database_checkouts_total {db_checkouts}\n"
     );
     res.status_code(StatusCode::OK);
     res.headers_mut().insert(

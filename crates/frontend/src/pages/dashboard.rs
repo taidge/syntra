@@ -28,19 +28,13 @@ pub fn Dashboard(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     let quick = ["writer", "calc", "slides", "whiteboard"]
         .into_iter()
         .map(|kind| {
-            let icon = match kind {
-                "writer" => "W",
-                "calc" => "C",
-                "slides" => "S",
-                _ => "B",
-            };
             create_document(&scope, auth, kind, None, feedback, busy)
                 .unstyled()
                 .class(format!("quick-action-btn {kind}"))
                 .name(crate::i18n::t(&format!("dashboard.new_{kind}")))
                 .label("")
                 .fill((
-                    label(icon).class("qa-icon"),
+                    icon_sized(Icon::document(kind), 20.).class("ui-icon qa-icon"),
                     label(crate::i18n::t(&format!("dashboard.new_{kind}"))),
                 ))
         })
@@ -53,7 +47,7 @@ pub fn Dashboard(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 .class("quick-action-btn")
                 .name(crate::i18n::t("dashboard.from_template"))
                 .fill((
-                    label("T").class("qa-icon"),
+                    icon_sized(Icon::Template, 20.).class("ui-icon qa-icon"),
                     label(crate::i18n::t("dashboard.from_template")),
                 )),
         ),
@@ -63,12 +57,6 @@ pub fn Dashboard(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
         widget(move |scope| {
             let doc = item.get();
             let kind = document_kind(&doc);
-            let icon = match kind {
-                "calc" => "C",
-                "slides" => "S",
-                "whiteboard" => "B",
-                _ => "W",
-            };
             link()
                 .class("doc-card")
                 .target(
@@ -80,7 +68,7 @@ pub fn Dashboard(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 .fill((
                     view()
                         .class(format!("doc-card-preview {kind}-preview"))
-                        .fill(label(icon)),
+                        .fill(icon_sized(Icon::document(kind), 20.)),
                     view().class("doc-card-info").fill((
                         text()
                             .kind(TextKind::Heading(4))

@@ -86,9 +86,8 @@ pub fn AiAssist(scope: Scope, auth: Cage<AuthState>, doc_id: String) -> impl Wid
                     text()
                         .kind(TextKind::Heading(2))
                         .content(crate::i18n::t("ai.title")),
-                    action("×", move || set(open, false))
-                        .name("Close AI assistant")
-                        .class("btn-icon"),
+                    icon_button("Close AI assistant", Icon::Close, move || set(open, false))
+                        .class("btn-icon icon-button"),
                 )),
                 row().class("ai-modes").fill(modes),
                 sapid::text_field()
@@ -103,9 +102,10 @@ pub fn AiAssist(scope: Scope, auth: Cage<AuthState>, doc_id: String) -> impl Wid
             ))
         });
         group().fill((
-            action("✦", move || set(open, !open.get()))
-                .name(crate::i18n::t("ai.title"))
-                .class("ai-fab"),
+            icon_button(crate::i18n::t("ai.title"), Icon::Sparkles, move || {
+                set(open, !open.get())
+            })
+            .class("ai-fab icon-button"),
             panel,
         ))
     })

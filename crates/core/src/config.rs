@@ -43,6 +43,25 @@ pub struct DatabaseConfig {
     pub url: String,
     /// Maximum number of connections in the pool
     pub max_connections: u32,
+    /// Maximum wait for a short-lived query lease.
+    #[serde(default = "database_checkout_timeout_ms")]
+    pub checkout_timeout_ms: u64,
+    /// Deadline for a query's blocking work; cleanup keeps its admission until done.
+    #[serde(default = "database_operation_timeout_ms")]
+    pub operation_timeout_ms: u64,
+    /// SQLite's maximum wait for a database lock.
+    #[serde(default = "database_busy_timeout_ms")]
+    pub busy_timeout_ms: u64,
+}
+
+fn database_checkout_timeout_ms() -> u64 {
+    3_000
+}
+fn database_operation_timeout_ms() -> u64 {
+    15_000
+}
+fn database_busy_timeout_ms() -> u64 {
+    3_000
 }
 
 /// JWT authentication parameters.

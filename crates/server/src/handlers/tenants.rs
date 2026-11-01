@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -84,6 +85,7 @@ pub async fn create_tenant(req: &mut Request, depot: &mut Depot, res: &mut Respo
             .filter(t::domain.eq(domain))
             .count()
             .get_result(&mut conn)
+            .await
             .unwrap_or(0);
         if existing > 0 {
             res.status_code(StatusCode::CONFLICT);
@@ -114,11 +116,13 @@ pub async fn create_tenant(req: &mut Request, depot: &mut Depot, res: &mut Respo
     match diesel::insert_into(t::tenants)
         .values(&new_tenant)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             let tenant: Tenant = t::tenants
                 .filter(t::id.eq(&tenant_id))
                 .first(&mut conn)
+                .await
                 .unwrap();
             res.status_code(StatusCode::CREATED);
             res.render(Json(ApiResponse::ok(tenant_to_json(&tenant))));
@@ -164,6 +168,7 @@ pub async fn list_tenants(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .limit(limit_val)
         .offset(offset_val)
         .load::<Tenant>(&mut conn)
+        .await
     {
         Ok(tenants) => {
             let list: Vec<serde_json::Value> = tenants.iter().map(tenant_to_json).collect();
@@ -206,12 +211,13 @@ pub async fn get_tenant(req: &mut Request, depot: &mut Depot, res: &mut Response
     match t::tenants
         .filter(t::id.eq(&tenant_id))
         .first::<Tenant>(&mut conn)
+        .await
     {
         Ok(tenant) => {
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(tenant_to_json(&tenant))));
         }
-        Err(diesel::result::Error::NotFound) => {
+        Err(horme::Error::Query(diesel::result::Error::NotFound)) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::NotFound("Tenant not found".into()).to_response(),
@@ -281,7 +287,8 @@ pub async fn update_tenant(req: &mut Request, depot: &mut Depot, res: &mut Respo
     // Always update `updated_at`.
     let base_result = diesel::update(target)
         .set(t::updated_at.eq(&now))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
     if let Err(e) = base_result {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -295,54 +302,63 @@ pub async fn update_tenant(req: &mut Request, depot: &mut Depot, res: &mut Respo
     if let Some(ref name) = body.name {
         let _ = diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
             .set(t::name.eq(name))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(ref domain) = body.domain {
         let _ = diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
             .set(t::domain.eq(domain))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(ref owner_id) = body.owner_id {
         let _ = diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
             .set(t::owner_id.eq(owner_id))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(ref plan) = body.plan {
         let _ = diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
             .set(t::plan.eq(plan))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(max_users) = body.max_users {
         let _ = diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
             .set(t::max_users.eq(max_users))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(max_storage) = body.max_storage_bytes {
         let _ = diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
             .set(t::max_storage_bytes.eq(max_storage))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(active) = body.is_active {
         let _ = diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
             .set(t::is_active.eq(if active { 1 } else { 0 }))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
     if let Some(ref settings) = body.settings {
         let _ = diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
             .set(t::settings.eq(settings.to_string()))
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
 
     // Return the updated tenant.
     match t::tenants
         .filter(t::id.eq(&tenant_id))
         .first::<Tenant>(&mut conn)
+        .await
     {
         Ok(tenant) => {
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(tenant_to_json(&tenant))));
         }
-        Err(diesel::result::Error::NotFound) => {
+        Err(horme::Error::Query(diesel::result::Error::NotFound)) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::NotFound("Tenant not found".into()).to_response(),
@@ -386,6 +402,7 @@ pub async fn deactivate_tenant(req: &mut Request, depot: &mut Depot, res: &mut R
     match diesel::update(t::tenants.filter(t::id.eq(&tenant_id)))
         .set((t::is_active.eq(0), t::updated_at.eq(&now)))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -437,6 +454,7 @@ pub async fn list_tenant_users(req: &mut Request, depot: &mut Depot, res: &mut R
         .filter(t::id.eq(&tenant_id))
         .count()
         .get_result(&mut conn)
+        .await
         .unwrap_or(0);
     if tenant_exists == 0 {
         res.status_code(StatusCode::NOT_FOUND);
@@ -472,6 +490,7 @@ pub async fn list_tenant_users(req: &mut Request, depot: &mut Depot, res: &mut R
     )
     .bind::<diesel::sql_types::Text, _>(&tenant_id)
     .load::<TenantUser>(&mut conn)
+    .await
     {
         Ok(users) => {
             let user_list: Vec<serde_json::Value> = users
@@ -528,9 +547,10 @@ pub async fn tenant_stats(req: &mut Request, depot: &mut Depot, res: &mut Respon
     let tenant: Tenant = match t::tenants
         .filter(t::id.eq(&tenant_id))
         .first::<Tenant>(&mut conn)
+        .await
     {
         Ok(ten) => ten,
-        Err(diesel::result::Error::NotFound) => {
+        Err(horme::Error::Query(diesel::result::Error::NotFound)) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::NotFound("Tenant not found".into()).to_response(),
@@ -561,6 +581,7 @@ pub async fn tenant_stats(req: &mut Request, depot: &mut Depot, res: &mut Respon
     )
     .bind::<diesel::sql_types::Text, _>(&tenant_id)
     .get_result::<TenantStatRow>(&mut conn)
+    .await
     .ok();
 
     let (user_count, total_storage) = match stats {

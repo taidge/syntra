@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -14,14 +16,14 @@ use crate::middleware::auth::get_user_id;
 
 /// Authorize the caller for `required_role` on the document, rendering the
 /// appropriate error and returning `false` when access is denied.
-fn ensure_document_access(
-    conn: &mut diesel::SqliteConnection,
+async fn ensure_document_access(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     document_id: &str,
     user_id: &str,
     required_role: &str,
     res: &mut Response,
 ) -> bool {
-    match load_accessible_document(conn, document_id, user_id, required_role) {
+    match load_accessible_document(conn, document_id, user_id, required_role).await {
         Ok(Some(_)) => true,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -74,7 +76,7 @@ pub async fn list_presence(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res) {
+    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res).await {
         return;
     }
 
@@ -106,6 +108,7 @@ pub async fn list_presence(req: &mut Request, depot: &mut Depot, res: &mut Respo
             String,
             String,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let presence_list: Vec<serde_json::Value> = rows
@@ -194,7 +197,7 @@ pub async fn join_presence(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res) {
+    if !ensure_document_access(&mut conn, &doc_id_param, &uid, "viewer", res).await {
         return;
     }
 
@@ -203,6 +206,7 @@ pub async fn join_presence(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .filter(up::document_id.eq(&doc_id_param))
         .filter(up::user_id.eq(&uid))
         .first::<UserPresence>(&mut conn)
+        .await
         .optional();
 
     match existing {
@@ -216,6 +220,7 @@ pub async fn join_presence(req: &mut Request, depot: &mut Depot, res: &mut Respo
                     up::session_id.eq(&body.session_id),
                 ))
                 .execute(&mut conn)
+                .await
             {
                 res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
                 res.render(Json(ApiResponse::<()>::err(
@@ -253,6 +258,7 @@ pub async fn join_presence(req: &mut Request, depot: &mut Depot, res: &mut Respo
             if let Err(e) = diesel::insert_into(up::user_presence)
                 .values(&new_presence)
                 .execute(&mut conn)
+                .await
             {
                 res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
                 res.render(Json(ApiResponse::<()>::err(
@@ -324,6 +330,7 @@ pub async fn leave_presence(req: &mut Request, depot: &mut Depot, res: &mut Resp
         up::last_seen_at.eq(now.to_rfc3339()),
     ))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -386,6 +393,7 @@ pub async fn heartbeat(req: &mut Request, depot: &mut Depot, res: &mut Response)
     )
     .set(up::last_seen_at.eq(now.to_rfc3339()))
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

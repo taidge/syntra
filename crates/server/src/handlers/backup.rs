@@ -29,13 +29,17 @@ fn require_admin(depot: &Depot, res: &mut Response) -> bool {
 
 /// Keep SQLite's non-Send serialized buffer inside a synchronous scope so the
 /// Salvo handler never carries it across an await point.
-fn serialize_database(state: &AppState) -> Result<Vec<u8>, AppError> {
-    let mut conn = state
+async fn serialize_database(state: &AppState) -> Result<Vec<u8>, AppError> {
+    state
         .db
-        .get()
-        .map_err(|error| AppError::Database(error.to_string()))?;
-    let snapshot = conn.serialize_database_to_buffer();
-    Ok(snapshot.as_slice().to_vec())
+        .run(|conn| {
+            let snapshot = conn.serialize_database_to_buffer();
+            snapshot
+                .try_as_slice()
+                .map(|bytes| bytes.to_vec())
+                .map_err(AppError::from)
+        })
+        .await
 }
 
 fn file_backed_database_path(state: &AppState, res: &mut Response) -> Option<std::path::PathBuf> {
@@ -99,7 +103,7 @@ pub async fn create_backup(depot: &mut Depot, res: &mut Response) {
 
     // Serialize through a live SQLite connection so committed WAL data is part
     // of one consistent snapshot.
-    let snapshot_bytes = match serialize_database(&state) {
+    let snapshot_bytes = match serialize_database(&state).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);

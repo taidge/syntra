@@ -48,14 +48,18 @@ pub fn ToastRack(_scope: Scope, bus: Cage<Vec<Toast>>) -> impl Widget {
                 row()
                     .class(class)
                     .fill((
+                        view().class("toast-icon").fill(icon(match toast.kind {
+                            ToastKind::Success => Icon::Check,
+                            ToastKind::Warning | ToastKind::Error => Icon::Warning,
+                            ToastKind::Info => Icon::Info,
+                        })),
                         text()
                             .class("toast-msg")
                             .content_fn(move || item.get().message),
-                        action("×", move || {
+                        icon_button("Dismiss", Icon::Close, move || {
                             let _ = bus.try_revise(|items| items.retain(|toast| toast.id != id));
                         })
-                        .name("Dismiss")
-                        .class("toast-close"),
+                        .class("toast-close icon-button"),
                     ))
                     .build(scope)
             })

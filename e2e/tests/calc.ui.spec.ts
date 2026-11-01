@@ -32,7 +32,7 @@ async function createCalcDoc(request: APIRequestContext): Promise<CalcFixture> {
             password: 'Test1234!',
         },
     });
-    expect(reg.ok()).toBeTruthy();
+    expect(reg.ok(), reg.ok() ? undefined : `Registration failed (${reg.status()}): ${await reg.text()}`).toBeTruthy();
     const regBody = await reg.json();
     const token: string = regBody.data.token;
 

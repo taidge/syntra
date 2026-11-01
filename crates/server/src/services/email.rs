@@ -1,6 +1,5 @@
-use diesel::SqliteConnection;
-use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
+use horme::prelude::*;
+use std::result::Result;
 
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
@@ -16,21 +15,23 @@ impl EmailService {
     /// describing any failure (no SMTP configured, bad address, transport/send
     /// error). Use this when the caller needs to know the outcome (e.g. an
     /// admin "test SMTP" action).
-    pub fn send(
-        pool: &Pool<ConnectionManager<SqliteConnection>>,
+    pub async fn send(
+        pool: &crate::state::DbPool,
         to_email: &str,
         subject: &str,
         body_html: &str,
     ) -> Result<(), String> {
-        let mut conn = pool
-            .get()
-            .map_err(|e| format!("failed to get db connection: {e}"))?;
-
-        let cfg: SmtpSettings = smtp::smtp_settings
-            .first::<SmtpSettings>(&mut conn)
-            .optional()
-            .map_err(|e| format!("failed to query smtp_settings: {e}"))?
-            .ok_or_else(|| "no SMTP settings configured".to_string())?;
+        let cfg = {
+            let mut conn = pool
+                .get()
+                .map_err(|e| format!("failed to get db connection: {e}"))?;
+            smtp::smtp_settings
+                .first::<SmtpSettings>(&mut conn)
+                .await
+                .optional()
+                .map_err(|e| format!("failed to query smtp_settings: {e}"))?
+                .ok_or_else(|| "no SMTP settings configured".to_string())?
+        };
 
         let from_addr = format!("{} <{}>", cfg.from_name, cfg.from_email);
         let from = from_addr
@@ -49,44 +50,50 @@ impl EmailService {
             .body(body_html.to_string())
             .map_err(|e| format!("failed to build email: {e}"))?;
 
-        let creds = match (cfg.username.as_deref(), cfg.password.as_deref()) {
-            (Some(user), Some(pass)) if !user.is_empty() => {
-                Some(Credentials::new(user.to_string(), pass.to_string()))
-            }
-            _ => None,
-        };
+        // SMTP transport setup, DNS/TLS and send are synchronous in lettre.
+        // Only owned settings/message enter the blocking worker, never a DB lease.
+        tokio::task::spawn_blocking(move || {
+            let creds = match (cfg.username.as_deref(), cfg.password.as_deref()) {
+                (Some(user), Some(pass)) if !user.is_empty() => {
+                    Some(Credentials::new(user.to_string(), pass.to_string()))
+                }
+                _ => None,
+            };
 
-        let transport = if cfg.use_tls {
-            let mut b = SmtpTransport::relay(&cfg.host)
-                .map_err(|e| format!("failed to create SMTP transport to {}: {e}", cfg.host))?
-                .port(cfg.port as u16);
-            if let Some(creds) = creds {
-                b = b.credentials(creds);
-            }
-            b.build()
-        } else {
-            let mut b = SmtpTransport::builder_dangerous(&cfg.host).port(cfg.port as u16);
-            if let Some(creds) = creds {
-                b = b.credentials(creds);
-            }
-            b.build()
-        };
+            let transport = if cfg.use_tls {
+                let mut b = SmtpTransport::relay(&cfg.host)
+                    .map_err(|e| format!("failed to create SMTP transport to {}: {e}", cfg.host))?
+                    .port(cfg.port as u16);
+                if let Some(creds) = creds {
+                    b = b.credentials(creds);
+                }
+                b.build()
+            } else {
+                let mut b = SmtpTransport::builder_dangerous(&cfg.host).port(cfg.port as u16);
+                if let Some(creds) = creds {
+                    b = b.credentials(creds);
+                }
+                b.build()
+            };
 
-        transport
-            .send(&email)
-            .map(|_| ())
-            .map_err(|e| format!("failed to send email via {}:{} — {e}", cfg.host, cfg.port))
+            transport
+                .send(&email)
+                .map(|_| ())
+                .map_err(|e| format!("failed to send email via {}:{} — {e}", cfg.host, cfg.port))
+        })
+        .await
+        .map_err(|error| format!("SMTP worker failed: {error}"))?
     }
 
     /// Best-effort notification email: when SMTP is unconfigured or sending
     /// fails, the error is logged but never propagated to callers.
-    pub fn send_notification(
-        pool: &Pool<ConnectionManager<SqliteConnection>>,
+    pub async fn send_notification(
+        pool: &crate::state::DbPool,
         to_email: &str,
         subject: &str,
         body_html: &str,
     ) {
-        match Self::send(pool, to_email, subject, body_html) {
+        match Self::send(pool, to_email, subject, body_html).await {
             Ok(()) => {
                 tracing::info!("EmailService: email sent to={to_email} subject=\"{subject}\"")
             }

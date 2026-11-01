@@ -1,6 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
 use diesel::sql_types::{Bool, Text};
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use contrix_core::dto::{ApiResponse, SearchResponse, SearchResult};
@@ -80,6 +81,7 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .filter(count_matches)
             .count()
             .get_result(&mut conn)
+            .await
             .unwrap_or(0);
 
         let row_matches = diesel::dsl::sql::<Bool>("(files.name LIKE ")
@@ -97,7 +99,8 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .limit(limit_val)
             .offset(offset_val)
             .select((d::id, f::name, d::doc_type, d::content, d::updated_at))
-            .load::<(String, String, String, Option<String>, String)>(&mut conn);
+            .load::<(String, String, String, Option<String>, String)>(&mut conn)
+            .await;
 
         (results, count_val as u64)
     } else {
@@ -113,6 +116,7 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .filter(count_matches)
             .count()
             .get_result(&mut conn)
+            .await
             .unwrap_or(0);
 
         let row_matches = diesel::dsl::sql::<Bool>("(files.name LIKE ")
@@ -129,7 +133,8 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .limit(limit_val)
             .offset(offset_val)
             .select((d::id, f::name, d::doc_type, d::content, d::updated_at))
-            .load::<(String, String, String, Option<String>, String)>(&mut conn);
+            .load::<(String, String, String, Option<String>, String)>(&mut conn)
+            .await;
 
         (results, count_val as u64)
     };

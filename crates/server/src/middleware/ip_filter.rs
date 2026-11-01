@@ -2,6 +2,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use contrix_core::schema::ip_restrictions::dsl as ip;
@@ -101,8 +102,8 @@ impl IpFilter {
         let state = match depot.obtain::<Arc<AppState>>() {
             Ok(s) => s.clone(),
             Err(_) => {
-                // If state is unavailable, let the request through rather
-                // than blocking all traffic due to a misconfiguration.
+                res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+                ctrl.skip_rest();
                 return;
             }
         };
@@ -110,8 +111,8 @@ impl IpFilter {
         let mut conn = match state.db.get() {
             Ok(c) => c,
             Err(_) => {
-                // Cannot verify IP restrictions without a DB connection.
-                // Fail open to avoid a full outage.
+                res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+                ctrl.skip_rest();
                 return;
             }
         };
@@ -128,10 +129,13 @@ impl IpFilter {
         let rules: Vec<(String, String)> = match ip::ip_restrictions
             .select((ip::ip_range, ip::restriction_type))
             .load::<(String, String)>(&mut conn)
+            .await
         {
             Ok(rows) => rows,
             Err(_) => {
-                // On query failure, fail open.
+                // Backpressure must not silently bypass configured IP rules.
+                res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+                ctrl.skip_rest();
                 return;
             }
         };

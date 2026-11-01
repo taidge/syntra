@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -92,6 +94,7 @@ pub async fn create_ip_restriction(req: &mut Request, depot: &mut Depot, res: &m
     match diesel::insert_into(ip::ip_restrictions)
         .values(&new_restriction)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             let resp = IpRestrictionResponse {
@@ -146,6 +149,7 @@ pub async fn list_ip_restrictions(depot: &mut Depot, res: &mut Response) {
             ip::created_at,
         ))
         .load::<(String, String, String, Option<String>, String)>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let restrictions: Vec<IpRestrictionResponse> = rows
@@ -204,6 +208,7 @@ pub async fn get_ip_restriction(req: &mut Request, depot: &mut Depot, res: &mut 
             ip::created_at,
         ))
         .first::<(String, String, String, Option<String>, String)>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some((rid, rip, rtype, rdesc, rcreated))) => {
@@ -258,6 +263,7 @@ pub async fn delete_ip_restriction(req: &mut Request, depot: &mut Depot, res: &m
 
     match diesel::delete(ip::ip_restrictions.filter(ip::id.eq(&restriction_id_param)))
         .execute(&mut conn)
+        .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);

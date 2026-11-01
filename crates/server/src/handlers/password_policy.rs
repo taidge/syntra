@@ -1,5 +1,5 @@
 use chrono::Utc;
-use diesel::prelude::*;
+use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
@@ -48,7 +48,7 @@ pub async fn get_policy(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    let policy = PasswordService::get_policy(&mut conn);
+    let policy = PasswordService::get_policy(&mut conn).await;
 
     let resp = PasswordPolicyResponse {
         min_length: policy.min_length,
@@ -108,7 +108,7 @@ pub async fn update_policy(req: &mut Request, depot: &mut Depot, res: &mut Respo
     };
 
     // Fetch existing policy to merge partial updates.
-    let existing = PasswordService::get_policy(&mut conn);
+    let existing = PasswordService::get_policy(&mut conn).await;
     let now = Utc::now().to_rfc3339();
 
     let new_min_length = body.min_length.unwrap_or(existing.min_length);
@@ -123,7 +123,9 @@ pub async fn update_policy(req: &mut Request, depot: &mut Depot, res: &mut Respo
     };
 
     // Delete existing policy row(s) and insert a fresh one (upsert).
-    let _ = diesel::delete(pp::password_policies).execute(&mut conn);
+    let _ = diesel::delete(pp::password_policies)
+        .execute(&mut conn)
+        .await;
 
     let new_policy = NewPasswordPolicy {
         id: Uuid::new_v4().to_string(),
@@ -140,6 +142,7 @@ pub async fn update_policy(req: &mut Request, depot: &mut Depot, res: &mut Respo
     match diesel::insert_into(pp::password_policies)
         .values(&new_policy)
         .execute(&mut conn)
+        .await
     {
         Ok(_) => {
             let resp = PasswordPolicyResponse {

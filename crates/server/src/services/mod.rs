@@ -5,6 +5,7 @@ pub mod email;
 pub mod notification;
 pub mod notification_bus;
 pub mod password;
+pub mod password_crypto;
 pub mod s3_storage;
 pub mod storage;
 pub mod thumbnail;

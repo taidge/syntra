@@ -1,9 +1,7 @@
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
-};
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::OptionalExtension;
+use horme::RunQueryDsl;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use salvo::prelude::*;
 use uuid::Uuid;
@@ -27,6 +25,7 @@ use contrix_core::schema::users::dsl as u;
 
 use crate::middleware::auth::{JwtClaims, get_user_id, hash_token};
 use crate::services::password::PasswordService;
+use crate::services::password_crypto;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -53,8 +52,8 @@ fn generate_jwt(
     .map_err(|e| AppError::Internal(format!("JWT generation failed: {e}")))
 }
 
-fn create_session(
-    conn: &mut diesel::SqliteConnection,
+async fn create_session(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     user_id: &str,
     token: &str,
     ip_address: Option<String>,
@@ -76,18 +75,23 @@ fn create_session(
     diesel::insert_into(sess::sessions)
         .values(&session)
         .execute(conn)
+        .await
         .map(|_| ())
         .map_err(|e| AppError::Database(format!("Failed to create session: {e}")))
 }
 
-fn revoke_user_sessions(conn: &mut diesel::SqliteConnection, user_id: &str) {
+async fn revoke_user_sessions(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+    user_id: &str,
+) {
     let _ = diesel::update(
         sess::sessions
             .filter(sess::user_id.eq(user_id))
             .filter(sess::is_active.eq(true)),
     )
     .set(sess::is_active.eq(false))
-    .execute(conn);
+    .execute(conn)
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +130,7 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         .filter(u::email.eq(&body.email))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -150,6 +155,7 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         .filter(u::username.eq(&body.username))
         .count()
         .get_result(&mut conn)
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -170,21 +176,18 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     }
 
     // Enforce the configured password policy before accepting the account.
-    if let Err(e) = PasswordService::validate_password(&mut conn, &body.password) {
+    if let Err(e) = PasswordService::validate_password(&mut conn, &body.password).await {
         res.status_code(StatusCode::BAD_REQUEST);
         res.render(Json(ApiResponse::<()>::err(e.to_response())));
         return;
     }
 
     // Hash password.
-    let salt = SaltString::generate(&mut OsRng);
-    let password_hash = match Argon2::default().hash_password(body.password.as_bytes(), &salt) {
-        Ok(h) => h.to_string(),
+    let password_hash = match password_crypto::hash_password(body.password).await {
+        Ok(hash) => hash,
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Internal(format!("Password hashing failed: {e}")).to_response(),
-            )));
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
             return;
         }
     };
@@ -229,10 +232,11 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         .get("user-agent")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let registration = conn.transaction::<_, AppError, _>(|conn| {
+    let registration = horme::transaction(&mut conn, async |conn| {
         diesel::insert_into(u::users)
             .values(&new_user)
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
         create_session(
             conn,
             &user_id_val.to_string(),
@@ -241,7 +245,9 @@ pub async fn register(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             session_user_agent,
             state.config.auth.jwt_expiry_hours,
         )
-    });
+        .await
+    })
+    .await;
     if let Err(e) = registration {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(e.to_response())));
@@ -307,6 +313,7 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         .filter(la::attempted_at.gt(&cutoff))
         .count()
         .get_result(&mut conn)
+        .await
         .unwrap_or(0);
 
     if failed_count >= 5 {
@@ -322,6 +329,7 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let user_row: User = match u::users
         .filter(u::email.eq(&body.email))
         .first::<User>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(usr)) => usr,
@@ -335,7 +343,8 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                     success: false,
                     attempted_at: Utc::now().to_rfc3339(),
                 })
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
             res.status_code(StatusCode::UNAUTHORIZED);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::Auth("Invalid email or password".into()).to_response(),
@@ -352,21 +361,17 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     };
 
     // Verify password.
-    let parsed_hash = match PasswordHash::new(&user_row.password_hash) {
-        Ok(h) => h,
-        Err(_) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Internal("Password hash corrupt".into()).to_response(),
-            )));
-            return;
-        }
-    };
+    let password_valid =
+        match password_crypto::verify_password(body.password, user_row.password_hash).await {
+            Ok(valid) => valid,
+            Err(error) => {
+                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                res.render(Json(ApiResponse::<()>::err(error.to_response())));
+                return;
+            }
+        };
 
-    if Argon2::default()
-        .verify_password(body.password.as_bytes(), &parsed_hash)
-        .is_err()
-    {
+    if !password_valid {
         // Record failed attempt
         let _ = diesel::insert_into(la::login_attempts)
             .values(&NewLoginAttempt {
@@ -376,7 +381,8 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                 success: false,
                 attempted_at: Utc::now().to_rfc3339(),
             })
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
         res.status_code(StatusCode::UNAUTHORIZED);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Auth("Invalid email or password".into()).to_response(),
@@ -399,6 +405,7 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         .filter(ts::user_id.eq(&user_row.id))
         .filter(ts::is_enabled.eq(true))
         .first::<TotpSecret>(&mut conn)
+        .await
         .optional()
     {
         Ok(value) => value,
@@ -413,7 +420,7 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     if let Some(totp) = enabled_totp {
         let code = body.totp_code.as_deref().unwrap_or_default();
         let second_factor_valid =
-            match crate::handlers::totp::verify_second_factor(&mut conn, &totp, code) {
+            match crate::handlers::totp::verify_second_factor(&mut conn, &totp, code).await {
                 Ok(valid) => valid,
                 Err(error) => {
                     res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
@@ -430,7 +437,8 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
                     success: false,
                     attempted_at: Utc::now().to_rfc3339(),
                 })
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
             res.status_code(StatusCode::UNAUTHORIZED);
             let message = if code.is_empty() {
                 "TOTP code required"
@@ -453,7 +461,8 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             success: true,
             attempted_at: Utc::now().to_rfc3339(),
         })
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     // Audit the successful authentication.
     let user_agent = req
@@ -472,13 +481,15 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             ip_address: Some(&ip_address),
             user_agent: user_agent.as_deref(),
         },
-    );
+    )
+    .await;
 
     // Update last_login_at.
     let now = Utc::now();
     let _ = diesel::update(u::users.filter(u::id.eq(&user_row.id)))
         .set(u::last_login_at.eq(Some(now.to_rfc3339())))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     let user_id_uuid: Uuid = user_row.id.parse().unwrap_or_default();
     let role = UserRole::parse_lossy(&user_row.role);
@@ -504,7 +515,9 @@ pub async fn login(req: &mut Request, depot: &mut Depot, res: &mut Response) {
         Some(ip_address.clone()),
         user_agent.clone(),
         state.config.auth.jwt_expiry_hours,
-    ) {
+    )
+    .await
+    {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(e.to_response())));
         return;
@@ -561,6 +574,7 @@ pub async fn me(depot: &mut Depot, res: &mut Response) {
     match u::users
         .filter(u::id.eq(&uid))
         .first::<User>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(user_row)) => {
@@ -645,6 +659,7 @@ pub async fn update_me(req: &mut Request, depot: &mut Depot, res: &mut Response)
             u::updated_at.eq(&now),
         ))
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -656,6 +671,7 @@ pub async fn update_me(req: &mut Request, depot: &mut Depot, res: &mut Response)
     match u::users
         .filter(u::id.eq(&uid))
         .first::<User>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(user_row)) => {
@@ -745,6 +761,7 @@ pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Res
     let user_row: User = match u::users
         .filter(u::id.eq(&uid))
         .first::<User>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(usr)) => usr,
@@ -764,21 +781,18 @@ pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let parsed_hash = match PasswordHash::new(&user_row.password_hash) {
-        Ok(h) => h,
-        Err(_) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Internal("Password hash corrupt".into()).to_response(),
-            )));
-            return;
-        }
-    };
+    let password_valid =
+        match password_crypto::verify_password(body.current_password, user_row.password_hash).await
+        {
+            Ok(valid) => valid,
+            Err(error) => {
+                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                res.render(Json(ApiResponse::<()>::err(error.to_response())));
+                return;
+            }
+        };
 
-    if Argon2::default()
-        .verify_password(body.current_password.as_bytes(), &parsed_hash)
-        .is_err()
-    {
+    if !password_valid {
         res.status_code(StatusCode::UNAUTHORIZED);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Auth("Current password is incorrect".into()).to_response(),
@@ -786,14 +800,11 @@ pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
-    let salt = SaltString::generate(&mut OsRng);
-    let new_hash = match Argon2::default().hash_password(body.new_password.as_bytes(), &salt) {
-        Ok(h) => h.to_string(),
+    let new_hash = match password_crypto::hash_password(body.new_password).await {
+        Ok(hash) => hash,
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Internal(format!("Password hashing failed: {e}")).to_response(),
-            )));
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
             return;
         }
     };
@@ -802,6 +813,7 @@ pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Res
     if let Err(e) = diesel::update(u::users.filter(u::id.eq(&uid)))
         .set((u::password_hash.eq(&new_hash), u::updated_at.eq(&now)))
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -811,7 +823,7 @@ pub async fn change_password(req: &mut Request, depot: &mut Depot, res: &mut Res
     }
     // Changing a password invalidates every previously issued access token,
     // including the token used for this request.
-    revoke_user_sessions(&mut conn, &uid);
+    revoke_user_sessions(&mut conn, &uid).await;
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(
@@ -854,6 +866,7 @@ pub async fn forgot_password(req: &mut Request, depot: &mut Depot, res: &mut Res
     let user_opt: Option<User> = u::users
         .filter(u::email.eq(&body.email))
         .first::<User>(&mut conn)
+        .await
         .optional()
         .unwrap_or(None);
 
@@ -874,6 +887,7 @@ pub async fn forgot_password(req: &mut Request, depot: &mut Depot, res: &mut Res
         if diesel::insert_into(prt::password_reset_tokens)
             .values(&new_token)
             .execute(&mut conn)
+            .await
             .is_ok()
         {
             // Deliver the reset link by email (best-effort, off the async
@@ -886,13 +900,14 @@ pub async fn forgot_password(req: &mut Request, depot: &mut Depot, res: &mut Res
                  <p><code>{token_val}</code></p>\
                  <p>If you did not request this, you can ignore this email.</p>"
             );
-            tokio::task::spawn_blocking(move || {
+            tokio::spawn(async move {
                 crate::services::EmailService::send_notification(
                     &pool,
                     &to,
                     "Password reset",
                     &body_html,
-                );
+                )
+                .await;
             });
         }
     }
@@ -938,6 +953,7 @@ pub async fn reset_password(req: &mut Request, depot: &mut Depot, res: &mut Resp
     let token_row: PasswordResetToken = match prt::password_reset_tokens
         .filter(prt::token.eq(&body.token))
         .first::<PasswordResetToken>(&mut conn)
+        .await
         .optional()
     {
         Ok(Some(t)) => t,
@@ -987,21 +1003,18 @@ pub async fn reset_password(req: &mut Request, depot: &mut Depot, res: &mut Resp
     }
 
     // Enforce the configured password policy on the new password.
-    if let Err(e) = PasswordService::validate_password(&mut conn, &body.password) {
+    if let Err(e) = PasswordService::validate_password(&mut conn, &body.password).await {
         res.status_code(StatusCode::BAD_REQUEST);
         res.render(Json(ApiResponse::<()>::err(e.to_response())));
         return;
     }
 
     // Hash the new password with Argon2.
-    let salt = SaltString::generate(&mut OsRng);
-    let new_hash = match Argon2::default().hash_password(body.password.as_bytes(), &salt) {
-        Ok(h) => h.to_string(),
+    let new_hash = match password_crypto::hash_password(body.password).await {
+        Ok(hash) => hash,
         Err(e) => {
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Internal(format!("Password hashing failed: {e}")).to_response(),
-            )));
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
             return;
         }
     };
@@ -1010,6 +1023,7 @@ pub async fn reset_password(req: &mut Request, depot: &mut Depot, res: &mut Resp
     if let Err(e) = diesel::update(u::users.filter(u::id.eq(&token_row.user_id)))
         .set(u::password_hash.eq(&new_hash))
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -1017,12 +1031,13 @@ pub async fn reset_password(req: &mut Request, depot: &mut Depot, res: &mut Resp
         )));
         return;
     }
-    revoke_user_sessions(&mut conn, &token_row.user_id);
+    revoke_user_sessions(&mut conn, &token_row.user_id).await;
 
     // Mark token as used.
     let _ = diesel::update(prt::password_reset_tokens.filter(prt::id.eq(&token_row.id)))
         .set(prt::used.eq(true))
-        .execute(&mut conn);
+        .execute(&mut conn)
+        .await;
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(

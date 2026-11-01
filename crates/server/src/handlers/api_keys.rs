@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use horme::RunQueryDsl;
 use rand::Rng;
 use salvo::prelude::*;
 use sha2::{Digest, Sha256};
@@ -149,6 +150,7 @@ pub async fn create_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
     if let Err(e) = diesel::insert_into(ak::api_keys)
         .values(&new_key)
         .execute(&mut conn)
+        .await
     {
         res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
         res.render(Json(ApiResponse::<()>::err(
@@ -222,6 +224,7 @@ pub async fn list_api_keys(depot: &mut Depot, res: &mut Response) {
             bool,
             String,
         )>(&mut conn)
+        .await
     {
         Ok(rows) => {
             let keys: Vec<serde_json::Value> = rows
@@ -291,6 +294,7 @@ pub async fn revoke_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
             .filter(ak::user_id.eq(&uid)),
     )
     .execute(&mut conn)
+    .await
     {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -401,15 +405,24 @@ pub async fn update_api_key(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .filter(ak::user_id.eq(&uid));
 
     let result = match (name.as_deref(), permissions.as_deref()) {
-        (Some(name), Some(permissions)) => diesel::update(target)
-            .set((ak::name.eq(name), ak::permissions.eq(permissions)))
-            .execute(&mut conn),
-        (Some(name), None) => diesel::update(target)
-            .set(ak::name.eq(name))
-            .execute(&mut conn),
-        (None, Some(permissions)) => diesel::update(target)
-            .set(ak::permissions.eq(permissions))
-            .execute(&mut conn),
+        (Some(name), Some(permissions)) => {
+            diesel::update(target)
+                .set((ak::name.eq(name), ak::permissions.eq(permissions)))
+                .execute(&mut conn)
+                .await
+        }
+        (Some(name), None) => {
+            diesel::update(target)
+                .set(ak::name.eq(name))
+                .execute(&mut conn)
+                .await
+        }
+        (None, Some(permissions)) => {
+            diesel::update(target)
+                .set(ak::permissions.eq(permissions))
+                .execute(&mut conn)
+                .await
+        }
         (None, None) => unreachable!("empty updates are rejected above"),
     };
 

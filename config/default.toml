@@ -6,6 +6,9 @@ cors_origins = ["http://localhost:8080", "http://localhost:3000"]
 [database]
 url = "sqlite://data/contrix.db?mode=rwc"
 max_connections = 5
+checkout_timeout_ms = 3000
+operation_timeout_ms = 15000
+busy_timeout_ms = 3000
 
 [auth]
 jwt_secret = "change-me-in-production-use-a-long-random-string"
