@@ -1,6 +1,10 @@
 //! Application-owned workbook state and semantic Glory/Sapid presentation.
 use super::*;
 
+#[cfg(target_arch = "wasm32")]
+#[path = "cell_events.rs"]
+mod cell_events;
+
 #[derive(Clone)]
 struct Book {
     snapshot: CalcSnapshot,
@@ -137,6 +141,7 @@ struct Editor {
     additive: Cage<bool>,
     filter: Cage<Option<(u32, String)>>,
     formula: Cage<String>,
+    editing: Cage<Option<(usize, u32, u32)>>,
     status: Cage<String>,
     layout: Cage<u64>,
 }
@@ -149,7 +154,68 @@ impl Editor {
             &self.extra.get(),
         )
     }
+    fn step(self, dr: i32, dc: i32, extend: bool) {
+        let si = self.sheet.get();
+        let current = self.active.get();
+        let range = self
+            .book
+            .with(|b| merged_range_at(&b.snapshot.merged_cells, si, current));
+        let origin = range
+            .map(|range| {
+                (
+                    if dr > 0 { range.end.0 } else { range.start.0 },
+                    if dc > 0 { range.end.1 } else { range.start.1 },
+                )
+            })
+            .unwrap_or(current);
+        let mut target = (
+            (origin.0 as i32 + dr).clamp(0, NUM_ROWS as i32 - 1) as u32,
+            (origin.1 as i32 + dc).clamp(0, NUM_COLS as i32 - 1) as u32,
+        );
+        // Filtered-out rows must never receive an invisible active cell.
+        while dr != 0
+            && self.filter.with(|filter| {
+                filter.as_ref().is_some_and(|(col, query)| {
+                    target.0 > 0
+                        && self.book.with(|b| {
+                            !b.snapshot
+                                .cells
+                                .get(&(si, target.0, *col))
+                                .is_some_and(|v| v.to_lowercase().contains(&query.to_lowercase()))
+                        })
+                })
+            })
+        {
+            let next = (target.0 as i32 + dr.signum()).clamp(0, NUM_ROWS as i32 - 1) as u32;
+            if next == target.0 {
+                return;
+            }
+            target.0 = next;
+        }
+        if extend || self.extend.get() {
+            let target = self.book.with(|b| {
+                merged_range_at(&b.snapshot.merged_cells, si, target)
+                    .map(|range| range.start)
+                    .unwrap_or(target)
+            });
+            self.active.revise(|v| *v = target);
+            self.end.revise(|v| *v = target);
+            let raw = self.book.with(|b| {
+                b.snapshot
+                    .cells
+                    .get(&(si, target.0, target.1))
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            self.formula.revise(|v| *v = raw);
+        } else {
+            self.activate(target);
+        }
+    }
     fn activate(self, point: (u32, u32)) {
+        if !self.finish_edit(false) {
+            return;
+        }
         let sheet = self.sheet.get();
         let point = self.book.with(|book| {
             merged_range_at(&book.snapshot.merged_cells, sheet, point)
@@ -172,12 +238,15 @@ impl Editor {
     fn commit(self, value: String) {
         let si = self.sheet.get();
         let (r, c) = self.active.get();
+        self.commit_at((si, r, c), value);
+    }
+    fn commit_at(self, (si, r, c): (usize, u32, u32), value: String) -> bool {
         let error = self
             .book
             .with(|b| validation_error_for(&b.content, si, r, c, &value));
         if let Some(error) = error {
             self.status.revise(|v| *v = error);
-            return;
+            return false;
         }
         self.book.revise(|b| {
             if b.snapshot
@@ -196,6 +265,31 @@ impl Editor {
                 b.snapshot.cells.insert((si, r, c), value);
             }
         });
+        true
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn begin_edit(self, point: (u32, u32), replacement: Option<String>) {
+        if !self.finish_edit(false) {
+            return;
+        }
+        self.activate(point);
+        let (r, c) = self.active.get();
+        if let Some(value) = replacement {
+            self.formula.revise(|v| *v = value);
+        }
+        self.editing.revise(|v| *v = Some((self.sheet.get(), r, c)));
+    }
+    fn finish_edit(self, cancel: bool) -> bool {
+        let Some(target) = self.editing.get() else {
+            return true;
+        };
+        if !cancel && !self.commit_at(target, self.formula.get()) {
+            return false;
+        }
+        // Clear the session before unmounting its input: a subsequent blur must
+        // never commit a cancelled draft or write it into the next active cell.
+        self.editing.revise(|v| *v = None);
+        true
     }
     fn format(self, update: impl Fn(&mut CellStyle)) {
         let si = self.sheet.get();
@@ -512,6 +606,14 @@ fn action(label: &str, callback: impl FnMut() + 'static) -> Box<dyn Widget> {
             .on_press(callback),
     )
 }
+fn toolbar_action(
+    label: &'static str,
+    callback: impl FnMut() + Clone + 'static,
+) -> sapid::OverflowItem {
+    sapid::overflow_item(label.replace(' ', "-").to_ascii_lowercase())
+        .content(move || action(label, callback.clone()))
+}
+
 fn control(
     name: &str,
     value: impl Into<Vary<String>>,
@@ -563,9 +665,12 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         additive: scope.cage(false),
         filter: scope.cage(None),
         formula: scope.cage(String::new()),
+        editing: scope.cage(None),
         status: scope.cage("Loading document…".to_owned()),
         layout: scope.cage(0),
     };
+    #[cfg(target_arch = "wasm32")]
+    cell_events::install(&scope, ed);
     let loaded = scope.cage(false);
     let title = scope.cage("Spreadsheet".to_owned());
     let connected = scope.cage(ConnectionState::Connecting);
@@ -736,6 +841,18 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     let address = scope.cage("A1".to_owned());
     let selection = scope.cage("A1:A1".to_owned());
     let sheet_name = scope.cage("Sheet1".to_owned());
+    let last_sheet_name = scope.cage(None::<(usize, String)>);
+    scope.effect(move || {
+        let index = ed.sheet.get();
+        let name = ed
+            .book
+            .with(|book| book.snapshot.sheets.get(index).cloned().unwrap_or_default());
+        let current = (index, name);
+        if last_sheet_name.get_untracked().as_ref() != Some(&current) {
+            sheet_name.revise(|value| *value = current.1.clone());
+            last_sheet_name.revise(|value| *value = Some(current));
+        }
+    });
     let find = scope.cage(String::new());
     let replace = scope.cage(String::new());
     let clipboard = scope.cage(String::new());
@@ -773,36 +890,46 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             scope.bond(move || collaborators.with(|v| format!("{} collaborators", v.len()))),
         )),
     ];
-    let toolbar: Vec<Box<dyn Widget>> = vec![
-        action("Bold", move || ed.format(|s| s.bold = !s.bold)),
-        action("Italic", move || ed.format(|s| s.italic = !s.italic)),
-        action("Underline", move || {
+    let copy_text = scope.bond(move || {
+        let value = selection_text(ed);
+        if value.len() <= glory::render::MAX_CLIPBOARD_BYTES {
+            value
+        } else {
+            String::new()
+        }
+    });
+    let copy_enabled =
+        scope.bond(move || selection_text(ed).len() <= glory::render::MAX_CLIPBOARD_BYTES);
+    let toolbar: Vec<sapid::OverflowItem> = vec![
+        toolbar_action("Bold", move || ed.format(|s| s.bold = !s.bold)),
+        toolbar_action("Italic", move || ed.format(|s| s.italic = !s.italic)),
+        toolbar_action("Underline", move || {
             ed.format(|s| s.underline = !s.underline)
         }),
-        action("Align left", move || ed.format(|s| s.align = "left".into())),
-        action("Align center", move || {
+        toolbar_action("Align left", move || ed.format(|s| s.align = "left".into())),
+        toolbar_action("Align center", move || {
             ed.format(|s| s.align = "center".into())
         }),
-        action("Align right", move || {
+        toolbar_action("Align right", move || {
             ed.format(|s| s.align = "right".into())
         }),
-        action("Currency", move || {
+        toolbar_action("Currency", move || {
             ed.format(|s| s.number_format = "currency".into())
         }),
-        action("Percent", move || {
+        toolbar_action("Percent", move || {
             ed.format(|s| s.number_format = "percent".into())
         }),
-        action("Merge cells", move || ed.merge(false)),
-        action("Unmerge cells", move || ed.merge(true)),
-        action("Insert row", move || ed.row_column(false, false)),
-        action("Delete row", move || ed.row_column(false, true)),
-        action("Insert column", move || ed.row_column(true, false)),
-        action("Delete column", move || ed.row_column(true, true)),
-        action("Sort ascending", move || ed.sort(false)),
-        action("Sort descending", move || ed.sort(true)),
-        action("Fill down", move || ed.fill(true)),
-        action("Fill right", move || ed.fill(false)),
-        action("Clear cells", move || {
+        toolbar_action("Merge cells", move || ed.merge(false)),
+        toolbar_action("Unmerge cells", move || ed.merge(true)),
+        toolbar_action("Insert row", move || ed.row_column(false, false)),
+        toolbar_action("Delete row", move || ed.row_column(false, true)),
+        toolbar_action("Insert column", move || ed.row_column(true, false)),
+        toolbar_action("Delete column", move || ed.row_column(true, true)),
+        toolbar_action("Sort ascending", move || ed.sort(false)),
+        toolbar_action("Sort descending", move || ed.sort(true)),
+        toolbar_action("Fill down", move || ed.fill(true)),
+        toolbar_action("Fill right", move || ed.fill(false)),
+        toolbar_action("Clear cells", move || {
             let si = ed.sheet.get();
             let cells = ed.selected();
             ed.book.revise(|b| {
@@ -814,23 +941,12 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             });
             ed.formula.revise(String::clear);
         }),
-        Box::new(
+        sapid::overflow_item("copy-selection").content(move || {
             sapid::copy_button()
                 .theme(crate::components::ui::theme())
                 .label("Copy selection")
-                .source(scope.bond(move || {
-                    let value = selection_text(ed);
-                    if value.len() <= glory::render::MAX_CLIPBOARD_BYTES {
-                        value
-                    } else {
-                        String::new()
-                    }
-                }))
-                .enabled(
-                    scope.bond(move || {
-                        selection_text(ed).len() <= glory::render::MAX_CLIPBOARD_BYTES
-                    }),
-                )
+                .source(copy_text)
+                .enabled(copy_enabled)
                 .on_result(move |outcome| {
                     clipboard.revise(|v| *v = selection_text(ed));
                     ed.status.revise(|v| {
@@ -840,9 +956,9 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                                 .into(),
                         }
                     });
-                }),
-        ),
-        action("Paste selection", move || {
+                })
+        }),
+        toolbar_action("Paste selection", move || {
             let si = ed.sheet.get();
             let (r, c) = ed.active.get();
             let value = clipboard.get();
@@ -859,7 +975,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 }
             });
         }),
-        action("Chart selection", move || {
+        toolbar_action("Chart selection", move || {
             ed.metadata(|content, si, range| {
                 append_array_entry(
                     &mut content["sheets"][si],
@@ -875,7 +991,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             });
             show_chart.revise(|v| *v = !*v);
         }),
-        action("All borders", move || {
+        toolbar_action("All borders", move || {
             ed.format(|s| {
                 s.borders = CellBorders {
                     top: true,
@@ -885,7 +1001,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 }
             })
         }),
-        action("Clear borders", move || {
+        toolbar_action("Clear borders", move || {
             ed.format(|s| s.borders = CellBorders::default())
         }),
     ];
@@ -1078,11 +1194,10 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 sapid::menu_item("sheet")
                     .label(crate::i18n::t("menu.insert.sheet"))
                     .on_activate(move || {
-                        ed.book.revise(|book| {
-                            book.checkpoint();
-                            let n = book.snapshot.sheets.len() + 1;
-                            book.snapshot.sheets.push(format!("Sheet{n}"));
-                        })
+                        let index = ed.book.revise(add_blank_sheet);
+                        ed.sheet.revise(|value| *value = index);
+                        ed.activate((0, 0));
+                        ed.layout.revise(|value| *value += 1);
                     }),
             ),
         sapid::dropdown_menu("calc-format")
@@ -1138,7 +1253,14 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         .fill(menu_bar)
         .fill((
         row().class("calc-ribbon").fill((row().class("calc-format-toolbar").fill(formats),
-        row().class("calc-toolbar").fill(toolbar))),
+        sapid::overflow_list("calc-toolbar")
+            .theme(crate::components::ui::theme())
+            .size(sapid::Size::Small)
+            .class("calc-toolbar")
+            .initial_visible(8)
+            .gap(3.)
+            .overflow_label("More tools")
+            .items(toolbar))),
         row().class("metadata-toolbar").style(advanced_open.map(|open|Style::new().display(if *open { Display::Flex } else { Display::None }))).fill((
             row().class("calc-advanced-formats").fill(extra_formats),
             control("Named range name",metadata_name,move|v|metadata_name.revise(|s|*s=v)),
@@ -1346,11 +1468,10 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                     })
                 }),
             sapid::button().theme(crate::components::ui::theme()).name("Add sheet").label("+").class("sheet-tab-add").on_press(move || {
-                ed.book.revise(|b| {
-                    b.checkpoint();
-                    let count = b.snapshot.sheets.len();
-                    b.snapshot.sheets.push(format!("Sheet{}", count + 1));
-                });
+                let index = ed.book.revise(add_blank_sheet);
+                ed.sheet.revise(|value| *value = index);
+                ed.activate((0, 0));
+                ed.layout.revise(|value| *value += 1);
             }),
             row().class("sheet-management").style(sheets_open.map(|open|Style::new().display(if *open { Display::Flex } else { Display::None }))).fill((
             sapid::button().theme(crate::components::ui::theme()).label("Duplicate sheet").on_press(move||ed.duplicate_sheet()),
@@ -1520,6 +1641,44 @@ fn color(value: &str) -> Option<Color> {
     let n = u32::from_str_radix(value, 16).ok()?;
     Some(Color((n >> 16) as u8, (n >> 8) as u8, n as u8, 255))
 }
+fn add_blank_sheet(book: &mut Book) -> usize {
+    book.checkpoint();
+    book.content = book.serialize();
+    let index = book.snapshot.sheets.len();
+    let mut suffix = index + 1;
+    let name = loop {
+        let name = format!("Sheet{suffix}");
+        if !book.snapshot.sheets.contains(&name) {
+            break name;
+        }
+        suffix += 1;
+    };
+    book.snapshot.sheets.push(name.clone());
+    append_array_entry(
+        &mut book.content,
+        "sheets",
+        serde_json::json!({
+            "id": uuid::Uuid::new_v4(), "name": name, "cells": [],
+            "column_widths": {}, "row_heights": {}, "frozen_rows": 0, "frozen_cols": 0,
+            "conditional_formats": [], "data_validations": [], "charts": [], "merged_cells": []
+        }),
+    );
+    index
+}
+
+fn sheet_axis_size(sheet: &serde_json::Value, column: bool, index: u32) -> f64 {
+    let (key, default, maximum) = if column {
+        ("column_widths", 80.0, 800.0)
+    } else {
+        ("row_heights", 24.0, 400.0)
+    };
+    sheet[key][index.to_string()]
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
+        .clamp(24.0, maximum)
+}
+
 fn cell_style(style: &CellStyle) -> Style {
     let mut out = Style::new()
         .width(Length::Percent(100.0))
@@ -1563,6 +1722,24 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
     for c in 0..NUM_COLS {
         head = head.cell(
             sapid::table_header_cell(format!("h{c}"))
+                .style(scope.bond(move || {
+                    ed.book.with(|book| {
+                        let sheet = &book.content["sheets"][si];
+                        let width = sheet_axis_size(sheet, true, c);
+                        let mut style = Style::new()
+                            .width(Length::Px(width))
+                            .min_width(Length::Px(width));
+                        if (c as u64) < sheet["frozen_cols"].as_u64().unwrap_or(0) {
+                            style.position = Some(Position::Sticky);
+                            style.left = Some(Length::Px(
+                                80.0 + (0..c)
+                                    .map(|prior| sheet_axis_size(sheet, true, prior))
+                                    .sum::<f64>(),
+                            ));
+                        }
+                        style
+                    })
+                }))
                 .class("col-header")
                 .text(col_letter(c).to_string()),
         );
@@ -1587,6 +1764,36 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
         let mut row = sapid::table_row(format!("r{r}")).cell(
             sapid::table_row_header(format!("rh{r}"))
                 .class("row-header")
+                .style(scope.bond(move || {
+                    ed.book.with(|book| {
+                        let sheet = &book.content["sheets"][si];
+                        let mut style = Style::new();
+                        if (r as u64) < sheet["frozen_rows"].as_u64().unwrap_or(0) {
+                            let preceding_height: f64 = (0..r)
+                                .filter(|prior| {
+                                    *prior == 0
+                                        || !ed.filter.with(|filter| {
+                                            filter.as_ref().is_some_and(|(column, query)| {
+                                                !book
+                                                    .snapshot
+                                                    .cells
+                                                    .get(&(si, *prior, *column))
+                                                    .is_some_and(|value| {
+                                                        value
+                                                            .to_lowercase()
+                                                            .contains(&query.to_lowercase())
+                                                    })
+                                            })
+                                        })
+                                })
+                                .map(|prior| sheet_axis_size(sheet, false, prior))
+                                .sum();
+                            style.position = Some(Position::Sticky);
+                            style.top = Some(Length::Px(24.0 + preceding_height));
+                        }
+                        style
+                    })
+                }))
                 .text((r + 1).to_string()),
         );
         for c in 0..NUM_COLS {
@@ -1602,20 +1809,40 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                 .style(scope.bond(move || {
                     ed.book.with(|b| {
                         let sheet = &b.content["sheets"][si];
-                        let width = sheet["column_widths"][c.to_string()]
-                            .as_f64()
-                            .unwrap_or(80.0);
-                        let height = sheet["row_heights"][r.to_string()].as_f64().unwrap_or(24.0);
+                        let width = sheet_axis_size(sheet, true, c);
+                        let height = sheet_axis_size(sheet, false, r);
                         let mut style = Style::new()
-                            .width(Length::Px(width.clamp(24.0, 800.0)))
-                            .height(Length::Px(height.clamp(18.0, 400.0)));
+                            .width(Length::Px(width))
+                            .min_width(Length::Px(width))
+                            .height(Length::Px(height));
                         if (r as u64) < sheet["frozen_rows"].as_u64().unwrap_or(0) {
                             style.position = Some(Position::Sticky);
-                            style.top = Some(Length::Px((r + 1) as f64 * 24.0));
+                            let preceding_height: f64 = (0..r)
+                                .filter(|prior| {
+                                    *prior == 0
+                                        || !ed.filter.with(|filter| {
+                                            filter.as_ref().is_some_and(|(col, query)| {
+                                                !b.snapshot
+                                                    .cells
+                                                    .get(&(si, *prior, *col))
+                                                    .is_some_and(|value| {
+                                                        value
+                                                            .to_lowercase()
+                                                            .contains(&query.to_lowercase())
+                                                    })
+                                            })
+                                        })
+                                })
+                                .map(|prior| sheet_axis_size(sheet, false, prior))
+                                .sum();
+                            style.top = Some(Length::Px(24.0 + preceding_height));
                         }
                         if (c as u64) < sheet["frozen_cols"].as_u64().unwrap_or(0) {
                             style.position = Some(Position::Sticky);
-                            style.left = Some(Length::Px(c as f64 * 80.0 + 80.0));
+                            let preceding_width: f64 = (0..c)
+                                .map(|prior| sheet_axis_size(sheet, true, prior))
+                                .sum();
+                            style.left = Some(Length::Px(80.0 + preceding_width));
                         }
                         style
                     })
@@ -1683,55 +1910,113 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                             format_number(&value, &style.number_format)
                         })
                     });
-                    glory::ui::button()
-                        .label(value)
-                        .name(name.clone())
-                        .class("cell-button")
-                        .node_ref(node)
-                        .style(scope.bond(move || {
-                            ed.book.with(|b| {
-                                let base = b
-                                    .snapshot
-                                    .styles
-                                    .get(&(si, r, c))
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let raw = b
-                                    .snapshot
-                                    .cells
-                                    .get(&(si, r, c))
-                                    .map(String::as_str)
-                                    .unwrap_or("");
-                                let style = conditional_style_for(&b.content, si, r, c, raw)
-                                    .unwrap_or(base);
-                                cell_style(&style)
-                            })
-                        }))
-                        .on(EventKind::Activate, move |_| {
-                            if ed.extend.get() {
-                                ed.end.revise(|v| *v = (r, c));
-                                ed.active.revise(|v| *v = (r, c));
-                            } else if ed.additive.get() {
-                                let old = ed.active.get();
-                                ed.extra.revise(|v| {
-                                    if !v.contains(&old) {
-                                        v.push(old)
+                    let input_name = format!("Edit {name}");
+                    let name = name.clone();
+                    when(
+                        ed.editing.map(move |target| *target == Some((si, r, c))),
+                        move || {
+                            let input_name = input_name.clone();
+                            widget(move |scope| {
+                                let edit_node = scope.cage(None);
+                                let weak = scope.downgrade();
+                                scope.effect(move || {
+                                    if let (Some(scope), Some(node)) =
+                                        (weak.upgrade(), edit_node.get())
+                                    {
+                                        // Focus in the same host commit that mounts the input,
+                                        // so fast typing never falls between two focus targets.
+                                        let _ = scope.action(glory::render::Action::Focus(node));
+                                        let end = ed.formula.get_untracked().encode_utf16().count();
+                                        let _ = scope.set_input_selection(
+                                            node,
+                                            glory::render::TextSelection {
+                                                start: end,
+                                                end,
+                                                ..Default::default()
+                                            },
+                                        );
                                     }
                                 });
-                                ed.active.revise(|v| *v = (r, c));
-                            } else {
-                                ed.activate((r, c));
-                            }
-                            let (row, col) = ed.active.get();
-                            let value = ed.book.with(|b| {
-                                b.snapshot
-                                    .cells
-                                    .get(&(si, row, col))
-                                    .cloned()
-                                    .unwrap_or_default()
-                            });
-                            ed.formula.revise(|v| *v = value);
-                        })
+                                input()
+                                    .name(input_name.clone())
+                                    .node_ref(edit_node)
+                                    .class("calc-cell-input")
+                                    .value(ed.formula)
+                                    .on(EventKind::ValueChanged, move |event| {
+                                        if let glory::render::Event::ValueChanged { value, .. } =
+                                            event
+                                            && ed.editing.get() == Some((si, r, c))
+                                        {
+                                            ed.formula.revise(|v| *v = value);
+                                        }
+                                    })
+                                    .on(EventKind::Commit, move |event| {
+                                        if ed.editing.get() == Some((si, r, c))
+                                            && let glory::render::Event::Commit { value, .. } =
+                                                event
+                                        {
+                                            ed.formula.revise(|v| *v = value);
+                                            ed.finish_edit(false);
+                                        }
+                                    })
+                                    .build(scope)
+                            })
+                        },
+                    )
+                    .otherwise(move || {
+                        glory::ui::button()
+                            .label(value)
+                            .name(name.clone())
+                            .class("cell-button")
+                            .node_ref(node)
+                            .style(scope.bond(move || {
+                                ed.book.with(|b| {
+                                    let base = b
+                                        .snapshot
+                                        .styles
+                                        .get(&(si, r, c))
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let raw = b
+                                        .snapshot
+                                        .cells
+                                        .get(&(si, r, c))
+                                        .map(String::as_str)
+                                        .unwrap_or("");
+                                    let style = conditional_style_for(&b.content, si, r, c, raw)
+                                        .unwrap_or(base);
+                                    cell_style(&style)
+                                })
+                            }))
+                            .on(EventKind::Activate, move |_| {
+                                if !ed.finish_edit(false) {
+                                    return;
+                                }
+                                if ed.extend.get() {
+                                    ed.end.revise(|v| *v = (r, c));
+                                    ed.active.revise(|v| *v = (r, c));
+                                } else if ed.additive.get() {
+                                    let old = ed.active.get();
+                                    ed.extra.revise(|v| {
+                                        if !v.contains(&old) {
+                                            v.push(old)
+                                        }
+                                    });
+                                    ed.active.revise(|v| *v = (r, c));
+                                } else {
+                                    ed.activate((r, c));
+                                }
+                                let (row, col) = ed.active.get();
+                                let value = ed.book.with(|b| {
+                                    b.snapshot
+                                        .cells
+                                        .get(&(si, row, col))
+                                        .cloned()
+                                        .unwrap_or_default()
+                                });
+                                ed.formula.revise(|v| *v = value);
+                            })
+                    })
                 });
             if let Some(range) = merged {
                 cell = cell
@@ -1753,6 +2038,13 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
         .on(EventKind::GridNavigate, move |event| {
             if let glory::render::Event::GridNavigate { command, .. } = event {
                 let (r, c) = ed.active.get();
+                let step = match command {
+                    GridCommand::Left => Some((0, -1)),
+                    GridCommand::Right => Some((0, 1)),
+                    GridCommand::Up => Some((-1, 0)),
+                    GridCommand::Down => Some((1, 0)),
+                    _ => None,
+                };
                 let target = match command {
                     GridCommand::Left => (r, c.saturating_sub(1)),
                     GridCommand::Right => (r, (c + 1).min(NUM_COLS - 1)),
@@ -1765,7 +2057,11 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                     GridCommand::PreviousLargePage => (0, c),
                     GridCommand::NextLargePage => (NUM_ROWS - 1, c),
                 };
-                ed.activate(target);
+                if let Some((dr, dc)) = step {
+                    ed.step(dr, dc, false);
+                } else {
+                    ed.activate(target);
+                }
                 if let (Some(scope), Some(node)) = (
                     weak.upgrade(),
                     nodes.get(&ed.active.get()).and_then(|n| n.get()),
@@ -1780,6 +2076,16 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
             sapid::table("workbook")
                 .theme(crate::components::ui::theme())
                 .class("sheet-grid")
+                .style(scope.bond(move || {
+                    ed.book.with(|book| {
+                        let sheet = &book.content["sheets"][si];
+                        let width: f64 = 80.0
+                            + (0..NUM_COLS)
+                                .map(|column| sheet_axis_size(sheet, true, column))
+                                .sum::<f64>();
+                        Style::new().width(Length::Px(width))
+                    })
+                }))
                 .name("Spreadsheet")
                 .bordered(true)
                 .head(sapid::table_head().row(head))
@@ -1857,6 +2163,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blank_sheet_keeps_ids_stable_and_uses_an_available_name() {
+        let mut book = Book::default();
+        book.snapshot.sheets = vec!["Sheet1".into(), "Sheet3".into()];
+        let index = add_blank_sheet(&mut book);
+        assert_eq!(index, 2);
+        assert_eq!(book.snapshot.sheets[index], "Sheet4");
+        let ids = book.serialize()["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sheet| sheet["id"].clone())
+            .collect::<Vec<_>>();
+        assert!(ids.iter().all(|id| {
+            id.as_str()
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        }));
+        book.snapshot
+            .cells
+            .insert((index, 0, 0), "New value".into());
+        let after = book.serialize()["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|sheet| sheet["id"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, after);
+        assert_eq!(book.undo.len(), 1);
+        assert!(book.dirty);
+    }
+
+    #[test]
+    fn frozen_dimensions_follow_resized_axes_and_clamp_invalid_sizes() {
+        let sheet = serde_json::json!({"column_widths":{"0":125,"1":64,"2":-4},"row_heights":{"0":47,"1":29,"2":8}});
+        let left = 80.0
+            + (0..2)
+                .map(|column| sheet_axis_size(&sheet, true, column))
+                .sum::<f64>();
+        let top = 24.0
+            + (0..2)
+                .map(|row| sheet_axis_size(&sheet, false, row))
+                .sum::<f64>();
+        assert_eq!(left, 269.0);
+        assert_eq!(top, 100.0);
+        assert_eq!(sheet_axis_size(&sheet, true, 2), 24.0);
+        assert_eq!(sheet_axis_size(&sheet, false, 2), 24.0);
+        assert_eq!(sheet_axis_size(&sheet, true, 3), 80.0);
+        assert_eq!(sheet_axis_size(&sheet, false, 3), 24.0);
+    }
+
+    #[test]
     fn workbook_save_preserves_ids_metadata_and_format_only_cells() {
         let mut book = Book::default();
         book.hydrate(serde_json::json!({
@@ -1908,6 +2264,7 @@ mod tests {
                 additive: scope.cage(false),
                 filter: scope.cage(None),
                 formula: scope.cage(String::new()),
+                editing: scope.cage(None),
                 status: scope.cage(String::new()),
                 layout: scope.cage(0),
             };

@@ -57,10 +57,10 @@ pub fn NotificationCenter(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 },
                 move |value| {
                     set(connection, value);
-                    if value == NotificationConnectionState::Connected {
-                        if let Some(scope) = state_weak.upgrade() {
-                            refresh(&scope, auth, items, feedback);
-                        }
+                    if value == NotificationConnectionState::Connected
+                        && let Some(scope) = state_weak.upgrade()
+                    {
+                        refresh(&scope, auth, items, feedback);
                     }
                 },
             );

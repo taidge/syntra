@@ -2,21 +2,59 @@
 use crate::state::AuthState;
 use glory::prelude::*;
 
-/// Sapid resolves colors when a widget mounts, using the persisted app scheme.
-pub fn theme() -> sapid::Theme {
+/// Explicit application preferences take precedence over the operating system.
+pub fn current_theme() -> &'static str {
     #[cfg(target_arch = "wasm32")]
-    let scheme = if web_sys::window()
-        .and_then(|window| window.local_storage().ok().flatten())
-        .and_then(|storage| storage.get_item("theme").ok().flatten())
-        .as_deref()
-        == Some("dark")
     {
+        web_sys::window()
+            .map(|window| {
+                let explicit = |value: String| match value.as_str() {
+                    "dark" => Some("dark"),
+                    "light" => Some("light"),
+                    _ => None,
+                };
+                window
+                    .document()
+                    .and_then(|document| document.document_element())
+                    .and_then(|root| root.get_attribute("data-theme"))
+                    .and_then(explicit)
+                    .or_else(|| {
+                        window
+                            .local_storage()
+                            .ok()
+                            .flatten()
+                            .and_then(|storage| storage.get_item("theme").ok().flatten())
+                            .and_then(explicit)
+                    })
+                    .unwrap_or_else(|| {
+                        if window
+                            .match_media("(prefers-color-scheme: dark)")
+                            .ok()
+                            .flatten()
+                            .is_some_and(|query| query.matches())
+                        {
+                            "dark"
+                        } else {
+                            "light"
+                        }
+                    })
+            })
+            .unwrap_or("light")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        "light"
+    }
+}
+
+/// Sapid uses mount-time colors. semantic-layout.css maps its live control colors
+/// to the app's root theme variables, including already-mounted popup surfaces.
+pub fn theme() -> sapid::Theme {
+    let scheme = if current_theme() == "dark" {
         sapid::ColorScheme::Dark
     } else {
         sapid::ColorScheme::Light
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    let scheme = sapid::ColorScheme::Light;
     sapid::Theme::new(&sapid::BLUE, scheme).expect("BLUE supports light and dark modes")
 }
 

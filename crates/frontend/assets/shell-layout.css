@@ -106,3 +106,11 @@
 .navbar .lang-toggle, .navbar .theme-toggle { font-family: Arial, sans-serif; line-height: normal; }
 .admin-user-row { padding: 8px 16px; }
 .admin-user-head { font-size: .8125rem; }
+/* Theme may also change from an editor's View menu; derive the icon from the
+   same root state rather than keeping a second component-local theme value. */
+.navbar .theme-toggle { font-size: 0; }
+.navbar .theme-toggle::before { content: "🌙"; font-size: .875rem; }
+:root[data-theme="dark"] .navbar .theme-toggle::before { content: "☀"; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .navbar .theme-toggle::before { content: "☀"; }
+}

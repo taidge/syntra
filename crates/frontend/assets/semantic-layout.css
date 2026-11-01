@@ -96,3 +96,67 @@
 }
 .sapid-dialog.office-modal .sapid-layer-close:hover { background:var(--bg); color:var(--text); }
 .sapid-dialog.office-modal .sapid-layer-close:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+
+/* Sapid Theme is mount-time configuration. Keep live application colors on the
+   root theme so mounted controls and top-layer popups switch together. */
+:root { --office-color-scheme: light; }
+:root[data-theme="dark"] { --office-color-scheme: dark; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --office-color-scheme: dark; }
+}
+:root [class*="sapid-theme-"] {
+  --sp-canvas: var(--bg);
+  --sp-surface: var(--bg-white);
+  --sp-input: var(--bg-white);
+  --sp-text: var(--text);
+  --sp-muted: var(--text-light);
+  --sp-accent: var(--primary);
+  --sp-hover: var(--primary-hover);
+  --sp-accent-soft: var(--primary-light);
+  --sp-accent-text: var(--primary);
+  --sp-on-accent: var(--text-white);
+  --sp-ring: var(--primary);
+  --sp-input-focus: var(--primary);
+  --sp-border: var(--border-dark);
+  --sp-disabled: var(--bg);
+  --sp-disabled-text: var(--text-muted);
+  --sp-danger: var(--danger);
+  --sp-danger-fill: var(--danger);
+  --sp-on-danger: var(--text-white);
+  color-scheme: var(--office-color-scheme);
+}
+/* Portable Sapid colors are inline values; override only their color channels,
+   leaving the widget's dimensions, positioning and interaction styles intact. */
+:root :is(.sapid-layer, .sapid-menu, .sapid-menu-item) {
+  background-color: var(--bg-white) !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+:root .sapid-menu-item:hover:enabled,
+:root .sapid-menu-item:focus-visible {
+  background-color: var(--bg) !important;
+}
+:root :is(.sapid-text-field, .sapid-native-select):not(.sapid-unstyled) {
+  background-color: var(--bg-white) !important;
+  color: var(--text) !important;
+  border-color: var(--border-dark) !important;
+}
+:root :is(.sapid-text-field, .sapid-native-select):disabled {
+  background-color: var(--bg) !important;
+  color: var(--text-muted) !important;
+}
+:root .sapid-text-field::placeholder { color: var(--text-muted); opacity: 1; }
+:root .sapid-native-select option { background-color: var(--bg-white); color: var(--text); }
+/* These are defaults: Office's compact toolbar, formula and tab styles retain
+   priority over portable Sapid colors. */
+:where(:root .sapid-button:not(.sapid-unstyled):not(.toolbar-btn)) { color: var(--text) !important; border-color: var(--border-dark) !important; }
+:where(:root .sapid-button-secondary:not(.sapid-unstyled):not(.toolbar-btn)) { background-color: var(--bg) !important; }
+:where(:root .sapid-button-outline:not(.sapid-unstyled)),
+:where(:root .sapid-button-subtle:not(.sapid-unstyled)) { background-color: transparent !important; }
+:where(:root .sapid-button-primary:not(.sapid-unstyled)) { background-color: var(--primary) !important; color: var(--text-white) !important; border-color: var(--primary) !important; }
+:where(:root .sapid-button-danger:not(.sapid-unstyled)) { background-color: var(--danger) !important; color: var(--text-white) !important; border-color: var(--danger) !important; }
+:where(:root .sapid-button:not(.sapid-unstyled):not(.toolbar-btn):disabled) { background-color: var(--bg) !important; color: var(--text-muted) !important; border-color: var(--border) !important; }
+:root :is(.sapid-field-label, .sapid-fieldset-legend):not(.sapid-unstyled) { color: var(--text) !important; }
+:root .sapid-field-description:not(.sapid-unstyled) { color: var(--text-light) !important; }
+:root .sapid-field-error:not(.sapid-unstyled) { color: var(--danger) !important; }
+:root .sapid-layer-close { color: var(--text-light) !important; background-color: transparent !important; }

@@ -1,19 +1,6 @@
 use crate::{components::ui::*, state::AuthState};
 use glory::prelude::*;
 
-fn current_theme() -> String {
-    #[cfg(target_arch = "wasm32")]
-    {
-        return web_sys::window()
-            .and_then(|window| window.local_storage().ok().flatten())
-            .and_then(|storage| storage.get_item("theme").ok().flatten())
-            .unwrap_or_else(|| "light".into());
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        "light".into()
-    }
-}
 pub fn set_theme(value: &str) {
     if let Some(window) = web_sys::window() {
         if let Ok(Some(storage)) = window.local_storage() {
@@ -25,7 +12,6 @@ pub fn set_theme(value: &str) {
         {
             let _ = root.set_attribute("data-theme", value);
         }
-        let _ = window.location().reload();
     }
 }
 #[allow(non_snake_case)]
@@ -83,20 +69,10 @@ pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                 .unstyled()
                 .name("Switch language")
                 .class("lang-toggle"),
-                action(
-                    if current_theme() == "dark" {
-                        "☀"
-                    } else {
-                        "🌙"
-                    },
-                    || {
-                        set_theme(if current_theme() == "dark" {
-                            "light"
-                        } else {
-                            "dark"
-                        })
-                    },
-                )
+                action("🌙", move || {
+                    let next_dark = current_theme() != "dark";
+                    set_theme(if next_dark { "dark" } else { "light" });
+                })
                 .unstyled()
                 .name(crate::i18n::t("nav.theme_toggle"))
                 .class("theme-toggle"),

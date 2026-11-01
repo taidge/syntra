@@ -39,7 +39,7 @@
 .calc-editor .formula-bar .sapid-button:hover { background: var(--bg) !important; border-color: var(--border) !important; }
 .calc-editor .calc-toolbar,
 .calc-editor .calc-format-toolbar {
-  padding: 4px 16px; gap: 3px; flex-wrap: nowrap; overflow-x: auto;
+  padding: 4px 16px; gap: 3px; flex-wrap: nowrap; overflow: hidden;
   background: var(--bg-white); border-bottom: 1px solid var(--border);
 }
 .calc-editor .calc-toolbar { min-height: 36px; }
@@ -75,12 +75,26 @@
   flex: 1 1 0; min-height: 120px; max-height: none;
   overflow: auto; background: var(--bg-white);
 }
-.calc-editor .sheet-grid { width: max-content !important; min-width: 2160px; table-layout: fixed; border-spacing: 0; }
+.calc-editor .sheet-grid { min-width: 0; table-layout: fixed; border-spacing: 0; }
 .calc-editor .sheet-grid :is(th,td) { padding: 0 !important; border-color: var(--border) !important; }
-.calc-editor .sheet-grid th { background: #f1f5f9 !important; color: var(--text-light) !important; font-size: 12px !important; font-weight: 600 !important; }
-.calc-editor .sheet-grid thead th { height: 24px; min-width: 80px; padding: 3px 2px !important; }
-.calc-editor .sheet-grid th.row-header { width: 80px !important; min-width: 80px !important; max-width: 80px; padding: 2px 8px !important; }
+.calc-editor .sheet-grid th { background: #f1f5f9 !important; color: var(--text-light) !important; font-size: 12px !important; font-weight: 600 !important; line-height: 20px !important; }
+.calc-editor .sheet-grid thead th { height: 24px; min-width: 80px; padding: 0 2px !important; }
+.calc-editor .sheet-grid th.row-header { width: 80px !important; min-width: 80px !important; max-width: 80px; padding: 0 8px !important; }
 .calc-editor .sheet-grid .cell-button { min-height: 24px; padding: 2px 4px; line-height: 20px; height: 100%; width: 100% !important; text-overflow: clip; white-space: nowrap; display: block; }
+.calc-editor .sheet-grid .cell-italic .cell-button,
+.calc-editor .sheet-grid .cell-italic .calc-cell-input { font-style: italic; }
+.calc-editor .sheet-grid .cell-underline .cell-button,
+.calc-editor .sheet-grid .cell-underline .calc-cell-input { text-decoration: underline; }
+.calc-editor .sheet-grid .cell-align-left :is(.cell-button,.calc-cell-input) { text-align: left; }
+.calc-editor .sheet-grid .cell-align-center :is(.cell-button,.calc-cell-input) { text-align: center; }
+.calc-editor .sheet-grid .cell-align-right :is(.cell-button,.calc-cell-input) { text-align: right; }
+.calc-editor .sheet-grid td[style*="sticky"] { z-index: 2; background-color: var(--bg-white); }
+.calc-editor .sheet-grid td[style*="sticky"][style*="top:"][style*="left:"] { z-index: 3; }
+.calc-editor .sheet-grid thead th { z-index: 4; }
+.calc-editor .sheet-grid th.row-header { z-index: 4; }
+.calc-editor .sheet-grid thead th[style*="left:"],
+.calc-editor .sheet-grid th.row-header[style*="top:"] { z-index: 5; }
+.calc-editor .sheet-grid .corner-cell { z-index: 6 !important; }
 .calc-editor .sheet-tabs { min-height: 40px; padding: 0 16px; gap: 2px; overflow-x: auto; flex-wrap: nowrap; }
 .calc-editor .sheet-tabs input { max-width: 110px; min-height: 26px !important; height: 26px; padding: 2px 6px !important; font-size: 12px !important; }
 .calc-editor .sheet-tabs .sheet-tab { padding: 8px 18px !important; min-height: 40px !important; height: 40px; border-radius: 0 !important; border-bottom-width: 2px !important; }
@@ -157,8 +171,24 @@
 .calc-editor .calc-ribbon .font-family-field { order:1; }
 .calc-editor .calc-ribbon .calc-toolbar { flex:1 1 0; height:41px; min-width:0; border:0; padding:5px 8px; align-items:center; }
 .calc-editor .calc-ribbon .calc-toolbar .toolbar-btn { min-height:26px !important; height:26px; padding:2px 7px !important; }
+.calc-editor .calc-toolbar .sapid-popover-trigger {
+  width:32px !important; min-width:32px; min-height:26px !important; height:26px !important; padding:0 !important;
+  font-size:0 !important; line-height:24px; color:var(--text) !important; background:transparent !important;
+  border:1px solid var(--border) !important; border-radius:3px;
+}
+.calc-editor .calc-toolbar .sapid-popover-trigger::before { content:"⋯"; font-size:20px; }
+.calc-editor .calc-toolbar .sapid-overflow-panel { min-width:180px; gap:2px !important; align-items:stretch !important; }
+.calc-editor .calc-toolbar .sapid-overflow-panel > .sapid-overflow-item { width:100%; }
+.calc-editor .calc-toolbar .sapid-overflow-panel .toolbar-btn,
+.calc-editor .calc-toolbar .sapid-overflow-panel .sapid-copy-button {
+  width:100%; margin:0 !important; justify-content:flex-start;
+  border-color:transparent !important; padding:3px 8px !important;
+}
+.calc-editor .calc-toolbar .sapid-overflow-panel .toolbar-btn { font-size:0 !important; }
+.calc-editor .calc-toolbar .sapid-overflow-panel .toolbar-btn::after { content:attr(aria-label); font-size:12px; }
 .calc-editor .calc-advanced-formats { gap:8px; flex-wrap:wrap; }
 .calc-editor .sheet-grid .cell-button { border:0; border-radius:0; background:transparent; color:inherit; font:inherit; padding:2px 4px; margin:0; outline-offset:-2px; }
+.calc-editor .sheet-grid .cell-button { box-sizing:border-box; min-height:0 !important; line-height:20px !important; padding:0 4px; }
 .calc-editor .sheet-grid .cell-button:focus { outline:0; }
 .calc-editor .sheet-grid .cell.active { background:var(--primary-light); }
 .calc-editor .sheet-management { gap:3px; align-items:center; }
@@ -189,10 +219,19 @@
   .calc-editor .editor-navbar { height:42px; min-height:42px; padding:4px 12px; gap:8px; }
   .calc-editor .editor-navbar .calc-document-name { flex:0 0 180px; }
   .calc-editor .calc-ribbon .calc-format-toolbar { padding-left:8px; }
+  .calc-editor .calc-ribbon { flex-wrap:wrap !important; height:auto; }
+  .calc-editor .calc-ribbon .calc-format-toolbar { flex:0 0 100%; height:34px; }
+  .calc-editor .calc-ribbon .calc-toolbar { flex:0 0 100%; height:36px; }
   .calc-editor .formula-bar { padding:3px 8px; gap:5px; }
   .calc-editor .formula-bar input[aria-label="Cell address or named range"] { flex:0 0 64px; width:64px; }
   .calc-editor .formula-bar .sapid-button[aria-label="Go to cell"] { display:none; }
   .calc-editor .formula-bar .sapid-button:last-child { max-width:56px; overflow:hidden; }
   .calc-editor .formula-bar > input.calc-formula-input { min-width:100px; }
   .files-page .file-grid { grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); }
+}
+.calc-editor .calc-cell-input {
+  display:block; box-sizing:border-box; width:100%; min-width:0; height:100%;
+  min-height:0; margin:0; padding:0 4px; border:0; border-radius:0;
+  outline:2px solid var(--primary); outline-offset:-2px;
+  background:var(--bg-white); color:var(--text); font:inherit;
 }

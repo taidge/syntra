@@ -1,7 +1,33 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 import { createDocument, registerUser, uniqueEmail, uniqueUsername } from './helpers';
 
 test.use({ locale: 'en-US', serviceWorkers: 'block' });
+
+async function expectCalcToolbarFits(page: Page) {
+  const toolbar = page.locator('.calc-toolbar');
+  await expect(toolbar).toBeVisible();
+  // Resize observation can briefly leave the previous set of inline actions.
+  await expect.poll(async () => toolbar.evaluate(element => {
+    const box = element as HTMLElement;
+    const style = getComputedStyle(box);
+    const horizontalScrollbar = box.offsetHeight - box.clientHeight
+      - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth);
+    const verticalScrollbar = box.offsetWidth - box.clientWidth
+      - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth);
+    return Math.max(box.scrollWidth - box.clientWidth,
+      box.scrollHeight - box.clientHeight, horizontalScrollbar, verticalScrollbar);
+  })).toBeLessThanOrEqual(1);
+
+  const more = page.getByRole('button', { name: /^More tools \(/ });
+  if (await more.isVisible()) {
+    await more.click();
+    const overflow = page.locator('.sapid-overflow-panel');
+    await expect(overflow).toBeVisible();
+    await overflow.getByRole('button', { name: 'Clear borders', exact: true }).click();
+    await page.keyboard.press('Escape');
+    await expect(overflow).toBeHidden();
+  }
+}
 
 test('homepage keeps the Dioxus typography and four-column feature layout', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -88,10 +114,17 @@ for (const kind of ['writer', 'calc', 'slides', 'whiteboard'] as const) {
     if (kind === 'calc') {
       await expect(page.locator('.cell-button').first()).toHaveCSS('border-top-width', '0px');
       await expect(page.locator('.cell-button').first()).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await expectCalcToolbarFits(page);
     }
     await page.screenshot({ path: test.info().outputPath(`${kind}-desktop.png`) });
+    if (kind === 'calc') {
+      await page.setViewportSize({ width: 1248, height: 1000 });
+      await expectCalcToolbarFits(page);
+      await page.screenshot({ path: test.info().outputPath('calc-1248.png') });
+    }
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(canvas).toBeVisible();
+    if (kind === 'calc') await expectCalcToolbarFits(page);
     await page.screenshot({ path: test.info().outputPath(`${kind}-mobile.png`) });
     const mobileNav = await page.locator('.navbar').boundingBox();
     const navbarEnd = await page.locator('.navbar-end').boundingBox();
