@@ -23,6 +23,13 @@ struct Inventory {
     lease_until: i64,
 }
 
+fn gc_backlog(conn: &mut SqliteConnection) -> QueryResult<i32> {
+    diesel::sql_query("SELECT COUNT(*) AS value FROM (SELECT 1 FROM storage_gc LIMIT ?)")
+        .bind::<Integer, _>(MAX_GC_BACKLOG)
+        .get_result::<Number>(conn)
+        .map(|count| count.value)
+}
+
 pub(crate) fn referenced(conn: &mut SqliteConnection, path: &str) -> Result<bool, AppError> {
     let result = diesel::sql_query("SELECT (EXISTS(SELECT 1 FROM files WHERE path=?1 OR thumbnail_path=?1) OR EXISTS(SELECT 1 FROM file_versions WHERE path=?1) OR EXISTS(SELECT 1 FROM upload_chunks WHERE path=?1) OR EXISTS(SELECT 1 FROM conversion_jobs WHERE output_path=?1) OR EXISTS(SELECT 1 FROM retained_blobs WHERE path=?1)) AS value")
         .bind::<Text,_>(path).get_result::<Number>(conn)?;
@@ -63,8 +70,9 @@ pub(crate) async fn begin_write(db: &DbPool, path: &str) -> Result<WriteLease, A
         let now=chrono::Utc::now().timestamp();
         // Bounded prefix count: all backend writes, not only multipart uploads,
         // stop admission when durable cleanup cannot keep pace.
-        let backlog=diesel::sql_query("SELECT COUNT(*) AS value FROM (SELECT path FROM storage_gc LIMIT 1024)").get_result::<Number>(conn)?.value;
-        if backlog>=MAX_GC_BACKLOG {return Err(AppError::RateLimit("Deferred object cleanup is backlogged; retry after cleanup".into()));}
+        if gc_backlog(conn)? >= MAX_GC_BACKLOG {
+            return Err(AppError::RateLimit("Deferred object cleanup is backlogged; retry after cleanup".into()));
+        }
         let reserved = diesel::sql_query("INSERT INTO blob_inventory(path,state,first_seen,lease_until,token) VALUES (?,'writing',?,?,?) ON CONFLICT(path) DO NOTHING")
             .bind::<Text,_>(key).bind::<BigInt,_>(now).bind::<BigInt,_>(now+WRITE_LEASE_SECONDS).bind::<Text,_>(claim).execute(conn)?;
         if reserved != 1 {
@@ -134,32 +142,126 @@ pub(crate) fn prepare_attachment(conn: &mut SqliteConnection, path: &str) -> Res
 }
 
 /// The persistent claim and every business reference write serialize in SQLite.
+/// The caller must hold an IMMEDIATE transaction.
 /// Network deletion happens after this transaction, while triggers fence inserts.
-pub(crate) fn claim_gc(
+pub(crate) fn claim_gc_in_transaction(
     conn: &mut SqliteConnection,
     path: &str,
     now: i64,
 ) -> Result<Option<String>, AppError> {
-    conn.immediate_transaction::<_,AppError,_>(|conn| {
-        if referenced(conn,path)? {
-            // This is not pending physical deletion. Last-reference retirement
-            // re-enqueues it, with the owned inventory scan as a recovery path.
-            diesel::sql_query("DELETE FROM storage_gc WHERE path=?").bind::<Text,_>(path).execute(conn)?;
-            return Ok(None);
-        }
-        if let Some(row)=diesel::sql_query("SELECT state,first_seen,lease_until FROM blob_inventory WHERE path=?")
-            .bind::<Text,_>(path).get_result::<Inventory>(conn).optional()?
-            && row.state=="writing" && row.lease_until>now {
-            return Ok(None);
-        }
-        let token=Uuid::new_v4().to_string();
-        let claimed=diesel::sql_query("UPDATE storage_gc SET claim_token=?,claim_until=? WHERE path=? AND claim_until<=?")
-            .bind::<Text,_>(&token).bind::<BigInt,_>(now+120).bind::<Text,_>(path).bind::<BigInt,_>(now).execute(conn)?;
-        if claimed==0 { return Ok(None); }
-        diesel::sql_query("INSERT INTO blob_inventory(path,state,first_seen) VALUES (?,'deleting',?) ON CONFLICT(path) DO UPDATE SET state='deleting',lease_until=0,token=NULL")
-            .bind::<Text,_>(path).bind::<BigInt,_>(now).execute(conn)?;
-        Ok(Some(token))
-    })
+    if referenced(conn, path)? {
+        // This is not pending physical deletion. Last-reference retirement
+        // re-enqueues it, with the owned inventory scan as a recovery path.
+        diesel::sql_query("DELETE FROM storage_gc WHERE path=?")
+            .bind::<Text, _>(path)
+            .execute(conn)?;
+        return Ok(None);
+    }
+    if let Some(row) =
+        diesel::sql_query("SELECT state,first_seen,lease_until FROM blob_inventory WHERE path=?")
+            .bind::<Text, _>(path)
+            .get_result::<Inventory>(conn)
+            .optional()?
+        && row.state == "writing"
+        && row.lease_until > now
+    {
+        return Ok(None);
+    }
+    let token = Uuid::new_v4().to_string();
+    let claimed = diesel::sql_query(
+        "UPDATE storage_gc SET claim_token=?,claim_until=? WHERE path=? AND claim_until<=?",
+    )
+    .bind::<Text, _>(&token)
+    .bind::<BigInt, _>(now + 120)
+    .bind::<Text, _>(path)
+    .bind::<BigInt, _>(now)
+    .execute(conn)?;
+    if claimed == 0 {
+        return Ok(None);
+    }
+    diesel::sql_query("INSERT INTO blob_inventory(path,state,first_seen) VALUES (?,'deleting',?) ON CONFLICT(path) DO UPDATE SET state='deleting',lease_until=0,token=NULL")
+        .bind::<Text,_>(path).bind::<BigInt,_>(now).execute(conn)?;
+    Ok(Some(token))
+}
+
+/// SQLite's lease index orders entries with equal expiry by rowid. A cursor
+/// lets each tick inspect a bounded page even if early rows are referenced.
+#[derive(Default)]
+pub struct ExpiredWriteCursor(Option<(i64, i64)>);
+
+/// Recover expired database reservations, including a reservation whose worker
+/// returned late and never started object I/O. Fence the writer and enqueue
+/// deletion in the same transaction so a late completion cannot make the
+/// queued key attachable. Explicitly registered writes are recoverable at
+/// lease expiry, as in `claim_gc_in_transaction`. Discovery grace applies to storage
+/// scans, including objects written by a late PUT after the first deletion.
+pub async fn expire_blob_writes_page(
+    db: &DbPool,
+    cursor: &mut ExpiredWriteCursor,
+    config: &MaintenanceConfig,
+    now: i64,
+) -> Result<usize, AppError> {
+    #[derive(QueryableByName)]
+    struct ExpiredWrite {
+        #[diesel(sql_type = BigInt)]
+        rowid: i64,
+        #[diesel(sql_type = BigInt)]
+        lease_until: i64,
+        #[diesel(sql_type = Text)]
+        path: String,
+    }
+
+    let after = cursor.0;
+    let batch = config.scan_page_size.clamp(1, 1000) as i32;
+    let (queued, next) = db
+        .run(move |conn| {
+            let (lease_until, rowid) = after.unwrap_or((i64::MIN, i64::MIN));
+            let page = diesel::sql_query(
+                "SELECT rowid,lease_until,path FROM blob_inventory
+                 WHERE state='writing' AND lease_until<=? AND (lease_until,rowid)>(?,?)
+                 ORDER BY lease_until,rowid LIMIT ?",
+            )
+            .bind::<BigInt, _>(now)
+            .bind::<BigInt, _>(lease_until)
+            .bind::<BigInt, _>(rowid)
+            .bind::<Integer, _>(batch)
+            .load::<ExpiredWrite>(conn)?;
+            if page.is_empty() {
+                return Ok((0, None));
+            }
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                let limit = batch.min(MAX_GC_BACKLOG - gc_backlog(conn)?);
+                if limit == 0 {
+                    return Ok((0, after));
+                }
+                let next = page
+                    .get(limit as usize - 1)
+                    .map(|row| (row.lease_until, row.rowid));
+                let mut queued = 0;
+                for row in page.into_iter().take(limit as usize) {
+                    if referenced(conn, &row.path)? {
+                        continue;
+                    }
+                    let fenced = diesel::sql_query(
+                        "UPDATE blob_inventory SET state='deleting',lease_until=0,token=NULL
+                         WHERE rowid=? AND path=? AND state='writing' AND lease_until=? AND lease_until<=?",
+                    )
+                    .bind::<BigInt, _>(row.rowid)
+                    .bind::<Text, _>(&row.path)
+                    .bind::<BigInt, _>(row.lease_until)
+                    .bind::<BigInt, _>(now)
+                    .execute(conn)?;
+                    if fenced == 1 {
+                        super::persistence::enqueue_gc(conn, &row.path)?;
+                        queued += 1;
+                    }
+                }
+                Ok((queued, next))
+            })
+        })
+        .await?;
+    cursor.0 = next;
+    Ok(queued)
 }
 
 fn legacy_namespace_exists(conn: &mut SqliteConnection, path: &str) -> Result<bool, AppError> {
@@ -324,6 +426,145 @@ struct HistoryRow {
     #[diesel(sql_type=Text)]
     created_at: String,
 }
+
+#[derive(Default)]
+pub struct NativeHistoryCountCursor(String);
+
+pub struct NativeHistoryCountPage {
+    pub removed: usize,
+    pub sweep_finished: bool,
+}
+
+fn native_history_count_candidates(
+    conn: &mut SqliteConnection,
+    document: &str,
+    current: i32,
+    keep: i64,
+    limit: i64,
+) -> QueryResult<Vec<Identity>> {
+    let protected_from =
+        current.saturating_sub(super::collaboration::MAX_HISTORY_OPERATIONS as i32);
+    if protected_from <= 0 {
+        return Ok(Vec::new());
+    }
+    // Stable documents normally contain only the protected suffix. Check its
+    // indexed lower range before walking even the bounded newest-N offset.
+    if diesel::sql_query(
+        "SELECT id FROM versions WHERE document_id=? AND version_number>=0
+         AND version_number<? ORDER BY version_number,created_at,id LIMIT 1",
+    )
+    .bind::<Text, _>(document)
+    .bind::<Integer, _>(protected_from)
+    .get_result::<Identity>(conn)
+    .optional()?
+    .is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let threshold = diesel::sql_query(
+        "SELECT id,version_number,created_at FROM versions
+         WHERE document_id=? AND version_number>=0
+         ORDER BY version_number DESC,created_at DESC,id DESC LIMIT 1 OFFSET ?",
+    )
+    .bind::<Text, _>(document)
+    .bind::<BigInt, _>(keep - 1)
+    .get_result::<HistoryRow>(conn)
+    .optional()?;
+    let Some(threshold) = threshold else {
+        return Ok(Vec::new());
+    };
+    let last_candidate_version = (protected_from - 1).min(threshold.version_number);
+    diesel::sql_query(
+        "SELECT id FROM versions WHERE document_id=? AND version_number>=0
+         AND version_number<=? AND (version_number,created_at,id)<(?,?,?)
+         ORDER BY version_number,created_at,id LIMIT ?",
+    )
+    .bind::<Text, _>(document)
+    .bind::<Integer, _>(last_candidate_version)
+    .bind::<Integer, _>(threshold.version_number)
+    .bind::<Text, _>(threshold.created_at)
+    .bind::<Text, _>(threshold.id)
+    .bind::<BigInt, _>(limit)
+    .load(conn)
+}
+
+/// Catch up count retention for old native snapshots without scanning the
+/// current/OT suffix. The exact maintenance pass still applies age, duplicate,
+/// file history and quota policy. Only one entity may delete rows per turn.
+pub async fn retain_native_history_count_page(
+    db: &DbPool,
+    cursor: &mut NativeHistoryCountCursor,
+    config: &MaintenanceConfig,
+) -> Result<NativeHistoryCountPage, AppError> {
+    const ENTITY_PAGE: i64 = 16;
+    #[derive(QueryableByName)]
+    struct Entity {
+        #[diesel(sql_type = Text)]
+        id: String,
+        #[diesel(sql_type = Integer)]
+        version: i32,
+    }
+
+    let after = cursor.0.clone();
+    let keep = config.history_max_versions.clamp(1, 10000) as i64;
+    let batch = config.history_batch_size.clamp(1, 1000) as i64;
+    let (removed, next, sweep_finished) = db
+        .run(move |conn| {
+            let entities = diesel::sql_query(
+                "SELECT id,version FROM documents WHERE id>? ORDER BY id LIMIT ?",
+            )
+            .bind::<Text, _>(after)
+            .bind::<BigInt, _>(ENTITY_PAGE)
+            .load::<Entity>(conn)?;
+            let last_page = entities.len() < ENTITY_PAGE as usize;
+            for (index, entity) in entities.iter().enumerate() {
+                if native_history_count_candidates(conn, &entity.id, entity.version, keep, 1)?
+                    .is_empty()
+                {
+                    continue;
+                }
+                let count = conn.immediate_transaction::<_, AppError, _>(|conn| {
+                    use contrix_core::schema::documents::dsl as d;
+                    use contrix_core::schema::versions::dsl as v;
+                    let current = d::documents
+                        .find(&entity.id)
+                        .select(d::version)
+                        .first::<i32>(conn)
+                        .optional()?;
+                    let Some(current) = current else { return Ok(0) };
+                    let candidates =
+                        native_history_count_candidates(conn, &entity.id, current, keep, batch)?;
+                    if candidates.is_empty() {
+                        return Ok(0);
+                    }
+                    let ids: Vec<_> = candidates.into_iter().map(|row| row.id).collect();
+                    diesel::delete(v::versions.filter(v::id.eq_any(ids)))
+                        .execute(conn)
+                        .map_err(AppError::from)
+                })?;
+                let finished = last_page && index + 1 == entities.len();
+                let next = if finished {
+                    String::new()
+                } else {
+                    entity.id.clone()
+                };
+                return Ok::<_, AppError>((count, next, finished));
+            }
+            let next = if last_page {
+                String::new()
+            } else {
+                entities.last().expect("full entity page").id.clone()
+            };
+            Ok((0, next, last_page))
+        })
+        .await?;
+    cursor.0 = next;
+    Ok(NativeHistoryCountPage {
+        removed,
+        sweep_finished,
+    })
+}
+
 /// Ordinary history is kept only while within both the newest N and max age
 /// (zero age disables expiry). Extra protection is bounded to one canonical
 /// current snapshot and at most 2048 canonical bases from the contiguous OT
@@ -372,8 +613,9 @@ pub async fn retain_history_page(
                 diesel::sql_query("SELECT version AS value FROM documents WHERE id=?").bind::<Text,_>(&entity).get_result::<Number>(conn).optional()?.map(|n|n.value)
             } else {None};
             let floor=if let Some(current)=current {
-                let log=diesel::sql_query("SELECT version AS value FROM operation_log WHERE document_id=? AND version<=? AND version>0 ORDER BY version DESC LIMIT 2048")
-                    .bind::<Text,_>(&entity).bind::<Integer,_>(current).load::<Number>(conn)?;
+                let log=diesel::sql_query("SELECT version AS value FROM operation_log WHERE document_id=? AND version<=? AND version>0 ORDER BY version DESC LIMIT ?")
+                    .bind::<Text,_>(&entity).bind::<Integer,_>(current)
+                    .bind::<BigInt,_>(super::collaboration::MAX_HISTORY_OPERATIONS as i64).load::<Number>(conn)?;
                 let mut expected=current;let mut floor=None;
                 for operation in log {if operation.value!=expected {break;}expected=expected.saturating_sub(1);floor=Some(expected);}
                 floor
@@ -474,6 +716,129 @@ mod tests {
         assert!(matches!(reused, Err(AppError::Conflict(_))));
         assert_eq!(storage.read_file(&key).await.unwrap(), b"object");
     }
+
+    #[tokio::test]
+    async fn expired_reservations_without_objects_are_fenced_and_drained_in_pages() {
+        let (temp, db, storage, owner) = fixture().await;
+        let (_, referenced_path, _) = file(&db, &storage, &owner).await;
+        let abandoned = format!("{owner}/{}/abandoned", Uuid::new_v4());
+        let late = format!("{owner}/{}/late", Uuid::new_v4());
+        let live = format!("{owner}/{}/live", Uuid::new_v4());
+        drop(begin_write(&db, &abandoned).await.unwrap());
+        let late_writer = begin_write(&db, &late).await.unwrap();
+        let _live_writer = begin_write(&db, &live).await.unwrap();
+        assert!(!temp.path().join("files").join(&abandoned).exists());
+        assert!(!temp.path().join("files").join(&late).exists());
+
+        let mut cursor = ExpiredWriteCursor::default();
+        let config = MaintenanceConfig {
+            reconcile_enabled: false,
+            scan_page_size: 1,
+            ..MaintenanceConfig::default()
+        };
+        let now = chrono::Utc::now().timestamp();
+        let db_path = temp.path().join("test.db");
+        let mut external = SqliteConnection::establish(db_path.to_str().unwrap()).unwrap();
+        external.batch_execute("BEGIN IMMEDIATE").unwrap();
+        assert_eq!(
+            expire_blob_writes_page(&db, &mut cursor, &config, now)
+                .await
+                .unwrap(),
+            0,
+            "an empty expired page does not need the writer lock"
+        );
+        external.batch_execute("ROLLBACK").unwrap();
+        drop(external);
+
+        // Even an inconsistent inventory state must never authorize deleting
+        // an object that is still referenced. Put it on the first page.
+        exec(
+            &db,
+            format!(
+                "UPDATE blob_inventory SET state='writing',lease_until=0 WHERE path='{referenced_path}';
+                 UPDATE blob_inventory SET lease_until=1 WHERE path IN ('{abandoned}','{late}');
+                 WITH RECURSIVE backlog(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM backlog WHERE n < {MAX_GC_BACKLOG})
+                 INSERT INTO storage_gc(path,created_at) SELECT 'test-backlog-' || n,'2000-01-01T00:00:00Z' FROM backlog;"
+            ),
+        )
+        .await;
+        assert_eq!(
+            expire_blob_writes_page(&db, &mut cursor, &config, now)
+                .await
+                .unwrap(),
+            0,
+            "recovery must leave room in the shared outbox"
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) AS value FROM storage_gc").await,
+            MAX_GC_BACKLOG
+        );
+        exec(
+            &db,
+            "DELETE FROM storage_gc WHERE path LIKE 'test-backlog-%'".into(),
+        )
+        .await;
+        for queued in [0, 1, 1, 0] {
+            assert_eq!(
+                expire_blob_writes_page(&db, &mut cursor, &config, now)
+                    .await
+                    .unwrap(),
+                queued
+            );
+        }
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) AS value FROM storage_gc").await,
+            2
+        );
+        assert!(matches!(
+            late_writer.finish().await,
+            Err(AppError::Conflict(_))
+        ));
+
+        // A fresh pool can drain the durable outbox without an object scan or
+        // a live writer handle. Both absent local objects delete idempotently.
+        let second = DbPool::with_timeouts(
+            db_path.to_str().unwrap(),
+            1,
+            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(3),
+        )
+        .unwrap();
+        persistence::drain_storage_gc(&second, &storage)
+            .await
+            .unwrap();
+        assert_eq!(
+            count(&second, "SELECT COUNT(*) AS value FROM storage_gc").await,
+            0
+        );
+        assert_eq!(
+            count(
+                &second,
+                "SELECT COUNT(*) AS value FROM blob_inventory WHERE state='deleted'"
+            )
+            .await,
+            2
+        );
+        assert_eq!(
+            count(
+                &second,
+                "SELECT COUNT(*) AS value FROM blob_inventory WHERE state='writing'"
+            )
+            .await,
+            2,
+            "live and referenced keys are retained"
+        );
+        assert_eq!(
+            storage.read_file(&referenced_path).await.unwrap(),
+            b"current object"
+        );
+        assert!(matches!(
+            begin_write(&second, &abandoned).await,
+            Err(AppError::Conflict(_))
+        ));
+    }
+
     async fn file(db: &DbPool, storage: &StorageBackend, owner: &str) -> (String, String, i64) {
         let data = b"current object";
         let path = storage
@@ -527,6 +892,223 @@ mod tests {
             }
         }
         panic!("bounded scan failed to finish");
+    }
+
+    async fn append_native_snapshots(
+        db: &DbPool,
+        document: &str,
+        owner: &str,
+        first: i32,
+        last: i32,
+    ) {
+        let (document, owner) = (document.to_owned(), owner.to_owned());
+        db.run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                if first == 1 {
+                    diesel::sql_query("INSERT INTO files(id,name,path,size,owner_id) VALUES ('file-' || ?,'native',? || '.json',0,?)")
+                        .bind::<Text, _>(&document).bind::<Text, _>(&document)
+                        .bind::<Text, _>(&owner).execute(conn)?;
+                    diesel::sql_query("INSERT INTO documents(id,file_id,doc_type,content) VALUES (?,'file-' || ?,'writer','{}')")
+                        .bind::<Text, _>(&document).bind::<Text, _>(&document).execute(conn)?;
+                }
+                diesel::sql_query(
+                    "WITH RECURSIVE series(n) AS
+                     (SELECT ? UNION ALL SELECT n+1 FROM series WHERE n<?)
+                     INSERT INTO versions(id,document_id,version_number,content,created_by,created_at)
+                     SELECT ? || '-' || n,?,n,'{}',?,'2000-01-01T00:00:00Z' FROM series",
+                )
+                .bind::<Integer, _>(first)
+                .bind::<Integer, _>(last)
+                .bind::<Text, _>(&document)
+                .bind::<Text, _>(&document)
+                .bind::<Text, _>(&owner)
+                .execute(conn)?;
+                diesel::sql_query("UPDATE documents SET version=? WHERE id=?")
+                    .bind::<Integer, _>(last)
+                    .bind::<Text, _>(&document)
+                    .execute(conn)?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_history_count_catchup_is_bounded_and_fair_during_active_writes() {
+        let (_temp, db, _storage, owner) = fixture().await;
+        let protected = super::super::collaboration::MAX_HISTORY_OPERATIONS as i32;
+        append_native_snapshots(&db, "a-hot", &owner, 1, 2400).await;
+        append_native_snapshots(&db, "b-sibling", &owner, 1, 2400).await;
+        let config = MaintenanceConfig {
+            history_max_versions: 100,
+            history_batch_size: 100,
+            history_max_age_days: 0,
+            ..Default::default()
+        };
+        let mut cursor = NativeHistoryCountCursor::default();
+        let first = retain_native_history_count_page(&db, &mut cursor, &config)
+            .await
+            .unwrap();
+        assert_eq!(first.removed, 100);
+        assert!(!first.sweep_finished);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS value FROM versions WHERE document_id='b-sibling'"
+            )
+            .await,
+            2400
+        );
+        let second = retain_native_history_count_page(&db, &mut cursor, &config)
+            .await
+            .unwrap();
+        assert_eq!(second.removed, 100);
+        assert!(second.sweep_finished);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS value FROM versions WHERE document_id='a-hot'"
+            )
+            .await,
+            2300,
+            "the hot document cannot monopolize a sibling's turn"
+        );
+
+        // Continue appending while the two bounded turns make progress.
+        // This rate is below the configured deletion budget.
+        for round in 0..8 {
+            let first = 2401 + round * 25;
+            append_native_snapshots(&db, "a-hot", &owner, first, first + 24).await;
+            for _ in 0..2 {
+                let page = retain_native_history_count_page(&db, &mut cursor, &config)
+                    .await
+                    .unwrap();
+                assert!(page.removed <= config.history_batch_size as usize);
+            }
+        }
+        for document in ["a-hot", "b-sibling"] {
+            assert_eq!(
+                count(
+                    &db,
+                    format!(
+                        "SELECT COUNT(*) AS value FROM versions WHERE document_id='{document}'"
+                    )
+                )
+                .await,
+                protected + 1,
+                "current and every possible canonical OT base survive"
+            );
+        }
+        assert_eq!(
+            count(&db, format!("SELECT COUNT(*) AS value FROM versions v JOIN documents d ON d.id=v.document_id WHERE v.version_number < d.version-{protected}")).await,
+            0,
+            "the backlog converges while snapshots are still being appended"
+        );
+        let quiet = retain_native_history_count_page(&db, &mut cursor, &config)
+            .await
+            .unwrap();
+        assert_eq!(quiet.removed, 0);
+        assert!(quiet.sweep_finished);
+    }
+
+    #[tokio::test]
+    async fn native_history_count_catchup_advances_bounded_empty_entity_pages() {
+        let (temp, db, _storage, owner) = fixture().await;
+        exec(&db, format!(
+            "WITH RECURSIVE series(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM series WHERE n<17)
+             INSERT INTO files(id,name,path,size,owner_id)
+             SELECT printf('empty-%02d',n),'native',printf('empty-%02d.json',n),0,'{owner}' FROM series;
+             INSERT INTO documents(id,file_id,doc_type,content)
+             SELECT id,id,'writer','{{}}' FROM files;"
+        )).await;
+        append_native_snapshots(&db, "z-backlog", &owner, 1, 2400).await;
+        let config = MaintenanceConfig {
+            history_max_versions: 100,
+            history_batch_size: 100,
+            ..Default::default()
+        };
+        let mut cursor = NativeHistoryCountCursor::default();
+        let mut writer =
+            SqliteConnection::establish(temp.path().join("test.db").to_str().unwrap()).unwrap();
+        writer.batch_execute("BEGIN IMMEDIATE").unwrap();
+        let empty = retain_native_history_count_page(&db, &mut cursor, &config)
+            .await
+            .unwrap();
+        assert_eq!(empty.removed, 0);
+        assert!(
+            !empty.sweep_finished,
+            "the entity scan is bounded to sixteen documents"
+        );
+        writer.batch_execute("ROLLBACK").unwrap();
+        let backlog = retain_native_history_count_page(&db, &mut cursor, &config)
+            .await
+            .unwrap();
+        assert_eq!(backlog.removed, 100);
+        assert!(backlog.sweep_finished);
+    }
+
+    #[tokio::test]
+    async fn native_history_count_catchup_preserves_newest_tuple_and_reads_empty_pages_without_writer_lock()
+     {
+        let (temp, db, _storage, owner) = fixture().await;
+        append_native_snapshots(&db, "tuple", &owner, 1, 2300).await;
+        exec(
+            &db,
+            format!(
+                "INSERT INTO versions(id,document_id,version_number,content,created_by,created_at)
+             VALUES ('tie-old','tuple',101,'{{}}','{owner}','1999-01-01T00:00:00Z'),
+                    ('tie-same','tuple',101,'{{}}','{owner}','2000-01-01T00:00:00Z')"
+            ),
+        )
+        .await;
+        let config = MaintenanceConfig {
+            history_max_versions: 2200,
+            history_batch_size: 70,
+            history_max_age_days: 0,
+            ..Default::default()
+        };
+        let mut cursor = NativeHistoryCountCursor::default();
+        assert_eq!(
+            retain_native_history_count_page(&db, &mut cursor, &config)
+                .await
+                .unwrap()
+                .removed,
+            70
+        );
+        assert_eq!(
+            retain_native_history_count_page(&db, &mut cursor, &config)
+                .await
+                .unwrap()
+                .removed,
+            32
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS value FROM versions WHERE document_id='tuple'"
+            )
+            .await,
+            2200
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) AS value FROM versions WHERE id='tuple-101'"
+            )
+            .await,
+            1,
+            "the newest-N tuple boundary survives equal-version timestamp/id ties"
+        );
+        let mut writer =
+            SqliteConnection::establish(temp.path().join("test.db").to_str().unwrap()).unwrap();
+        writer.batch_execute("BEGIN IMMEDIATE").unwrap();
+        let empty = retain_native_history_count_page(&db, &mut cursor, &config)
+            .await
+            .unwrap();
+        assert_eq!(empty.removed, 0);
+        assert!(empty.sweep_finished);
+        writer.batch_execute("ROLLBACK").unwrap();
     }
 
     #[tokio::test]
@@ -860,12 +1442,26 @@ mod tests {
     }
     #[tokio::test]
     async fn active_slow_write_is_protected_and_expired_writer_cannot_publish_after_gc_fence() {
+        async fn read_head(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            request
+        }
+
         let (_temp, db, _local, owner) = fixture().await;
         let path = format!("{owner}/{}/slow", Uuid::new_v4());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (started, observed) = tokio::sync::oneshot::channel();
         let (release, allowed) = tokio::sync::oneshot::channel();
+        let listed_path = path.clone();
+        let modified = chrono::Utc::now();
+        let last_modified = modified.to_rfc3339();
         let endpoint = tokio::spawn(async move {
             let (mut put, _) = listener.accept().await.unwrap();
             let mut data = Vec::new();
@@ -892,20 +1488,47 @@ mod tests {
             }
             started.send(()).unwrap();
             let (mut delete, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                let mut chunk = [0; 1024];
-                let count = delete.read(&mut chunk).await.unwrap();
-                assert!(count > 0);
-                request.extend_from_slice(&chunk[..count]);
-            }
-            assert!(request.starts_with(b"DELETE "));
+            let delete_line = format!("DELETE /bucket/{listed_path} ");
+            assert!(
+                read_head(&mut delete)
+                    .await
+                    .starts_with(delete_line.as_bytes())
+            );
             delete
-                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await
                 .unwrap();
             let _ = allowed.await;
             put.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+
+            // The delayed PUT has recreated the physical object. The normal
+            // scanner sees it, and the durable fence survives a second DELETE.
+            let (mut list, _) = listener.accept().await.unwrap();
+            assert!(
+                read_head(&mut list)
+                    .await
+                    .starts_with(b"GET /bucket?list-type=2&")
+            );
+            let xml = format!(
+                "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>{listed_path}</Key><LastModified>{last_modified}</LastModified></Contents></ListBucketResult>"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",
+                xml.len()
+            );
+            list.write_all(response.as_bytes()).await.unwrap();
+            let (mut delete, _) = listener.accept().await.unwrap();
+            assert!(
+                read_head(&mut delete)
+                    .await
+                    .starts_with(delete_line.as_bytes())
+            );
+            delete
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
                 .await
                 .unwrap();
         });
@@ -935,9 +1558,21 @@ mod tests {
         // Simulate a lost process/heartbeat; recovery owns the key from now on.
         exec(
             &db,
-            format!("UPDATE blob_inventory SET lease_until=0 WHERE path='{path}'"),
+            format!("UPDATE blob_inventory SET lease_until=0 WHERE path='{path}'; DELETE FROM storage_gc WHERE path='{path}'"),
         )
         .await;
+        assert_eq!(
+            expire_blob_writes_page(
+                &db,
+                &mut ExpiredWriteCursor::default(),
+                &MaintenanceConfig::default(),
+                chrono::Utc::now().timestamp(),
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(count(&db,format!("SELECT COUNT(*) AS value FROM blob_inventory WHERE path='{path}' AND state='deleting'")).await,1);
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             persistence::drain_storage_gc(&db, &storage),
@@ -946,8 +1581,35 @@ mod tests {
         .unwrap()
         .unwrap();
         release.send(()).unwrap();
-        endpoint.await.unwrap();
         assert!(matches!(writer.await.unwrap(), Err(AppError::Conflict(_))));
+        assert_eq!(count(&db,format!("SELECT COUNT(*) AS value FROM blob_inventory WHERE path='{path}' AND state='deleted'")).await,1);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) AS value FROM storage_gc").await,
+            0
+        );
+        let config = MaintenanceConfig {
+            orphan_grace_seconds: 30,
+            ..MaintenanceConfig::default()
+        };
+        let mut scan = storage.begin_scan().await.unwrap();
+        assert_eq!(
+            reconcile_page(&db, &storage, &mut scan, &config, modified.timestamp() + 31)
+                .await
+                .unwrap(),
+            1
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            persistence::drain_storage_gc(&db, &storage),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        endpoint.await.unwrap();
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) AS value FROM storage_gc").await,
+            0
+        );
         assert_eq!(count(&db,format!("SELECT COUNT(*) AS value FROM blob_inventory WHERE path='{path}' AND state='deleted'")).await,1);
         assert!(matches!(
             persistence::commit_blob(&db, path, |_| Ok(())).await,

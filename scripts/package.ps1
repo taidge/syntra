@@ -15,7 +15,7 @@ try {
         & "$PSScriptRoot/build-frontend.ps1" -Release
     }
     $web = Join-Path $metadata.target_directory 'web'
-    foreach ($asset in @('assets/contrix_frontend.js', 'assets/contrix_frontend_bg.wasm', 'assets/main.css', 'assets/sapid.css')) {
+    foreach ($asset in @('assets/contrix_frontend.js', 'assets/contrix_frontend_bg.wasm', 'assets/calc-worker.js', 'assets/main.css', 'assets/sapid.css')) {
         if (-not (Test-Path -LiteralPath (Join-Path $web $asset))) { throw "Missing frontend asset: $asset" }
     }
     $extension = if ($Target -like '*windows*') { '.exe' } else { '' }

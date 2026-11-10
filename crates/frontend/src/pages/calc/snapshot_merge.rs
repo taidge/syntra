@@ -29,7 +29,7 @@ fn state(document: &Value) -> Option<(Value, Cells)> {
     }
     Some((metadata, cells))
 }
-fn semantic(cell: Option<&Value>) -> Option<Value> {
+pub(super) fn semantic(cell: Option<&Value>) -> Option<Value> {
     let mut value = cell?.clone();
     if let Some(formula) = value.get("formula").and_then(Value::as_str) {
         let formula = formula.trim_start_matches('=').to_owned();

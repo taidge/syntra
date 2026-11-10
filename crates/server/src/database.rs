@@ -753,6 +753,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn admission_is_bounded_and_checkout_expires() {
         let (_directory, database) = single_slot(500);
+        // Cold WAL setup is covered separately. Use a longer deadline only
+        // for prewarming, then measure checkout against an occupied slot.
+        let warm = database
+            .checkout(Duration::from_secs(5), None)
+            .await
+            .expect("initialize the single-slot pool before testing admission");
+        drop(warm);
+        settled(&database).await;
+        assert_eq!(database.state().idle_connections, 1);
         let mut provider = database.clone();
         let lease = provider.get_mut_conn().await.unwrap();
         let mut waiter = database.clone();
@@ -771,10 +780,8 @@ mod tests {
             .err()
             .expect("a third operation is rejected immediately");
         assert!(error.to_string().contains("admission capacity"));
-        assert!(
-            waiting.await.unwrap().is_err(),
-            "the admitted waiter has a checkout deadline"
-        );
+        let error = waiting.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("database checkout timed out"));
         drop(lease);
         settled(&database).await;
         assert_eq!(database.state().idle_connections, 1);

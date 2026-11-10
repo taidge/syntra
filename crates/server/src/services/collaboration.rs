@@ -9,7 +9,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_HISTORY_OPERATIONS: u64 = 2048;
+pub(super) const MAX_HISTORY_OPERATIONS: u64 = 2048;
 const MAX_HISTORY_BYTES: i64 = 32 * 1024 * 1024;
 pub struct Snapshot {
     pub content: Value,

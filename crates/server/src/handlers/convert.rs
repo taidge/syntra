@@ -40,9 +40,26 @@ fn render_source_error(res: &mut Response, error: AppError) {
     res.render(Json(ApiResponse::<()>::err(error.to_response())));
 }
 
-// ZIP generation and document parsing are CPU work, independent of a SQL lease.
-// Keep the permit in the worker so cancelling a caller cannot exceed the bound.
-static EXPORT_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+const EXPORT_CONCURRENCY: u32 = 2;
+static EXPORT_WORKERS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(EXPORT_CONCURRENCY as usize);
+
+async fn run_export_worker<T: Send + 'static>(
+    workers: &'static tokio::sync::Semaphore,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let permit = workers
+        .acquire()
+        .await
+        .map_err(|_| "Conversion worker unavailable".to_string())?;
+    // The permit follows the blocking work even if its caller is cancelled.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| "Conversion worker failed".to_string())
+}
 
 // Background jobs have no HTTP caller to retry temporary pool backpressure.
 // Each attempt releases its lease before waiting; permanent SQL errors stop.
@@ -80,12 +97,7 @@ pub(super) async fn export_content(
     export_format: ExportFormat,
     target_format: String,
 ) -> Result<Vec<u8>, String> {
-    let permit = EXPORT_WORKERS
-        .acquire()
-        .await
-        .map_err(|_| "Conversion worker unavailable".to_string())?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
+    run_export_worker(&EXPORT_WORKERS, move || {
         let doc_type = DocumentType::parse_lossy(&doc_type_str);
         let content: serde_json::Value = serde_json::from_str(&content_str).unwrap_or_default();
 
@@ -156,13 +168,41 @@ pub(super) async fn export_content(
             )),
         }
     })
-    .await
-    .map_err(|_| "Conversion worker failed".to_string())?
+    .await?
 }
 
 #[cfg(test)]
 mod conversion_worker_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_export_releases_its_slot_only_after_blocking_work_finishes() {
+        use std::time::Duration;
+        static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let caller = tokio::spawn(run_export_worker(&WORKERS, move || {
+            started.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        tokio::time::timeout(Duration::from_secs(5), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(WORKERS.try_acquire().is_err());
+
+        release.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), run_export_worker(&WORKERS, || 42))
+                .await
+                .unwrap()
+                .unwrap(),
+            42
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn worker_exports_writer_content_to_html_and_native_package() {
@@ -930,6 +970,14 @@ mod review_conversion_regressions {
             .unwrap_err()
             .contains("budget")
         );
+        let all_slots = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            EXPORT_WORKERS.acquire_many(EXPORT_CONCURRENCY),
+        )
+        .await
+        .expect("a rejected export must return its slot")
+        .unwrap();
+        drop(all_slots);
         assert!(
             export_content(content, "calc".into(), ExportFormat::Xlsx, "xlsx".into())
                 .await

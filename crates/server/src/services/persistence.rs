@@ -13,8 +13,10 @@ use contrix_core::schema::{
 };
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Text};
+use futures_util::StreamExt;
+use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use uuid::Uuid;
 
 pub fn authorize(
@@ -381,7 +383,21 @@ where
     R: Send + 'static,
     F: FnOnce(&mut SqliteConnection) -> Result<R, AppError> + Send + 'static,
 {
-    let (finished, completion) = tokio::sync::oneshot::channel::<bool>();
+    commit_blob_observed(db, candidate, callback, |_| {}).await
+}
+
+async fn commit_blob_observed<R, F, Notify>(
+    db: &DbPool,
+    candidate: String,
+    callback: F,
+    notify: Notify,
+) -> Result<R, AppError>
+where
+    R: Send + 'static,
+    F: FnOnce(&mut SqliteConnection) -> Result<R, AppError> + Send + 'static,
+    Notify: FnOnce(&R) + Send + 'static,
+{
+    let (finished, completion) = oneshot::channel::<bool>();
     let cleanup_db = db.clone();
     let attachment_candidate = candidate.clone();
     tokio::spawn(async move {
@@ -396,6 +412,9 @@ where
         let result = super::maintenance::prepare_attachment(conn, &attachment_candidate)
             .and_then(|_| callback(conn));
         let _ = finished.send(result.is_ok());
+        if let Ok(committed) = &result {
+            notify(committed);
+        }
         result
     })
     .await
@@ -407,6 +426,7 @@ where
 pub fn request_gc(db: &DbPool, storage: &StorageBackend) -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
     static RUNNING: AtomicBool = AtomicBool::new(false);
+    static PENDING: AtomicBool = AtomicBool::new(false);
     struct RunningGuard;
     impl Drop for RunningGuard {
         fn drop(&mut self) {
@@ -416,6 +436,7 @@ pub fn request_gc(db: &DbPool, storage: &StorageBackend) -> bool {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return false;
     };
+    PENDING.store(true, Ordering::Release);
     if RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -425,9 +446,32 @@ pub fn request_gc(db: &DbPool, storage: &StorageBackend) -> bool {
     let (db, storage) = (db.clone(), storage.clone());
     let guard = RunningGuard;
     runtime.spawn(async move {
-        let _guard = guard;
-        if let Err(error) = drain_storage_gc(&db, &storage).await {
-            tracing::warn!(%error,"Deferred storage cleanup failed; durable outbox will retry");
+        PENDING.store(false, Ordering::Release);
+        let mut failed = HashSet::new();
+        // Coalesced hints may arrive during cleanup. Catch up in bounded pages
+        // before retiring so a burst does not depend on a later HTTP request.
+        for _ in 0..16 {
+            match drain_storage_gc_page(&db, &storage, &mut failed).await {
+                Ok(page) => {
+                    if let Some(error) = page.error {
+                        tracing::warn!(%error,"Deferred storage cleanup retains failed objects for retry");
+                    }
+                    if page.visited < 100 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error,"Deferred storage cleanup failed; durable outbox will retry");
+                    break;
+                }
+            }
+        }
+        drop(guard);
+        // Rearm only on normal retirement. A cancelled task merely releases
+        // RUNNING, which also avoids spawning work while Tokio shuts down.
+        if PENDING.swap(false, Ordering::AcqRel) {
+            request_gc(&db, &storage);
         }
     });
     true
@@ -435,62 +479,113 @@ pub fn request_gc(db: &DbPool, storage: &StorageBackend) -> bool {
 
 /// Metadata is committed first; failed object deletion stays queued for retry.
 pub async fn drain_storage_gc(db: &DbPool, storage: &StorageBackend) -> Result<(), AppError> {
-    let paths: Vec<GcPath> = db
-        .run(|conn| {
-            Ok::<_, AppError>(
-                diesel::sql_query("SELECT path FROM storage_gc ORDER BY created_at,path LIMIT 100")
-                    .load(conn)?,
-            )
-        })
-        .await?;
-    for entry in paths {
-        let path = entry.path.clone();
-        let claim = db
-            .run(move |conn| {
-                let claim = super::maintenance::claim_gc(conn, &path, Utc::now().timestamp())?;
-                if claim.is_none() {
-                    diesel::sql_query("UPDATE storage_gc SET created_at=? WHERE path=?")
-                        .bind::<Text, _>(Utc::now().to_rfc3339())
-                        .bind::<Text, _>(path)
-                        .execute(conn)?;
-                }
-                Ok::<_, AppError>(claim)
-            })
-            .await?;
-        let Some(claim) = claim else {
-            continue;
-        };
-        let deletion = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            storage.delete_file(&entry.path),
-        )
-        .await
-        .unwrap_or_else(|_| Err(AppError::Storage("Object deletion timed out".into())));
-        if let Err(error) = deletion {
-            tracing::warn!(path = %entry.path, %error, "Deferred blob deletion will retry");
-            db.run(move |conn| {
-                diesel::sql_query("UPDATE storage_gc SET created_at = ?,claim_token=NULL,claim_until=0 WHERE path = ? AND claim_token=?")
-                    .bind::<Text, _>(Utc::now().to_rfc3339())
-                    .bind::<Text, _>(entry.path)
-                    .bind::<Text, _>(claim)
-                    .execute(conn)?;
-                Ok::<_, AppError>(())
-            })
-            .await?;
-            return Err(error);
-        }
-        db.run(move |conn| conn.immediate_transaction::<_,AppError,_>(|conn| {
-            let removed=diesel::sql_query("DELETE FROM storage_gc WHERE path = ? AND claim_token=?")
-                .bind::<Text, _>(&entry.path).bind::<Text,_>(claim).execute(conn)?;
-            if removed==1 {
-                diesel::sql_query("UPDATE blob_inventory SET state='deleted',token=NULL,lease_until=0 WHERE path=?")
-                    .bind::<Text,_>(entry.path).execute(conn)?;
-            }
-            Ok::<_, AppError>(())
-        }))
-        .await?;
+    let page = drain_storage_gc_page(db, storage, &mut HashSet::new()).await?;
+    match page.error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+struct GcDrainPage {
+    visited: usize,
+    error: Option<AppError>,
+}
+
+async fn drain_storage_gc_page(
+    db: &DbPool,
+    storage: &StorageBackend,
+    failed: &mut HashSet<String>,
+) -> Result<GcDrainPage, AppError> {
+    let mut visited = 0;
+    let mut first_error = None;
+    while visited < 100 {
+        // Two waves of at most eight 30-second deletes fit within the existing
+        // 120-second ownership lease. Database work never waits on storage I/O.
+        let limit = (100 - visited).min(16) as i64;
+        let excluded = failed.clone();
+        let (selected, claims) = db.run(move |conn| {
+            let now = Utc::now().timestamp();
+            let paths = diesel::sql_query(
+                "SELECT g.path FROM storage_gc g WHERE g.claim_until<=?
+                 AND NOT EXISTS(SELECT 1 FROM blob_inventory b WHERE b.path=g.path AND b.state='writing' AND b.lease_until>?)
+                 ORDER BY g.created_at,g.path LIMIT ?",
+            )
+            .bind::<BigInt, _>(now)
+            .bind::<BigInt, _>(now)
+            .bind::<BigInt, _>(limit + excluded.len() as i64)
+            .load::<GcPath>(conn)?
+            .into_iter()
+            .filter(|entry| !excluded.contains(&entry.path))
+            .take(limit as usize)
+            .collect::<Vec<_>>();
+            let selected = paths.len();
+            if paths.is_empty() {
+                return Ok::<_, AppError>((0, Vec::new()));
+            }
+            let claims = conn.immediate_transaction::<_, AppError, _>(|conn| {
+                let mut claims = Vec::new();
+                for entry in paths {
+                    if let Some(token) = super::maintenance::claim_gc_in_transaction(conn, &entry.path, Utc::now().timestamp())? {
+                        claims.push((entry.path, token));
+                    }
+                }
+                Ok(claims)
+            })?;
+            Ok((selected, claims))
+        }).await?;
+        if selected == 0 {
+            break;
+        }
+        visited += selected;
+        let completed = futures_util::stream::iter(claims)
+            .map(|(path, token)| async move {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    storage.delete_file(&path),
+                )
+                .await
+                .unwrap_or_else(|_| Err(AppError::Storage("Object deletion timed out".into())));
+                (path, token, result)
+            })
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        if completed.is_empty() {
+            continue;
+        }
+        let (error, failed_paths) = db.run(move |conn| conn.immediate_transaction::<_, AppError, _>(|conn| {
+            let mut first_error = None;
+            let mut failed_paths = Vec::new();
+            for (path, token, result) in completed {
+                match result {
+                    Ok(()) => {
+                        let removed = diesel::sql_query("DELETE FROM storage_gc WHERE path=? AND claim_token=?")
+                            .bind::<Text, _>(&path).bind::<Text, _>(token).execute(conn)?;
+                        if removed == 1 {
+                            diesel::sql_query("UPDATE blob_inventory SET state='deleted',token=NULL,lease_until=0 WHERE path=?")
+                                .bind::<Text, _>(path).execute(conn)?;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%path, %error, "Deferred blob deletion will retry");
+                        failed_paths.push(path.clone());
+                        diesel::sql_query("UPDATE storage_gc SET created_at=?,claim_token=NULL,claim_until=0 WHERE path=? AND claim_token=?")
+                            .bind::<Text, _>(Utc::now().to_rfc3339()).bind::<Text, _>(path).bind::<Text, _>(token).execute(conn)?;
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            Ok((first_error, failed_paths))
+        })).await?;
+        if first_error.is_none() {
+            first_error = error;
+        }
+        failed.extend(failed_paths);
+    }
+    Ok(GcDrainPage {
+        visited,
+        error: first_error,
+    })
 }
 
 pub async fn commit_document(
@@ -515,6 +610,7 @@ pub async fn commit_document(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -527,8 +623,8 @@ pub async fn commit_document_with_credential(
     user: &str,
     expected_version: i32,
     content: String,
-    label: Option<String>,
     credential: &crate::middleware::auth::AuthenticatedCredential,
+    committed: oneshot::Sender<i32>,
 ) -> Result<i32, AppError> {
     commit_document_inner(
         db,
@@ -537,7 +633,7 @@ pub async fn commit_document_with_credential(
         user,
         expected_version,
         content,
-        label,
+        None,
         None,
         None,
         None,
@@ -547,6 +643,7 @@ pub async fn commit_document_with_credential(
             method: salvo::http::Method::PUT,
             path: format!("/api/v1/documents/{document_id}"),
         }),
+        Some(committed),
     )
     .await
 }
@@ -578,6 +675,7 @@ pub async fn commit_document_with_lock(
         content,
         label,
         token,
+        None,
         None,
         None,
         None,
@@ -716,6 +814,7 @@ pub async fn commit_document_operation_with_request(
         Some(request_hash.to_owned()),
         None,
         None,
+        None,
     )
     .await
 }
@@ -788,6 +887,7 @@ pub async fn commit_document_operation_with_effects_and_credential(
             method: salvo::http::Method::GET,
             path: format!("/api/v1/ws/collab/{document}"),
         }),
+        None,
     )
     .await
 }
@@ -806,6 +906,7 @@ async fn commit_document_inner(
     request_hash: Option<String>,
     effects: Option<(Vec<contrix_collab::OpType>, contrix_collab::Operation)>,
     credential: Option<CommitCredential>,
+    committed: Option<oneshot::Sender<i32>>,
 ) -> Result<i32, AppError> {
     if credential
         .as_ref()
@@ -892,7 +993,7 @@ async fn commit_document_inner(
         )
         .await?;
     let committed_path = new_path.clone();
-    let commit = commit_blob(db, new_path.clone(), move |conn| {
+    let write = move |conn: &mut SqliteConnection| {
         conn.immediate_transaction::<_, AppError, _>(|conn| {
             if let Some(credential) = &credential {
                 crate::middleware::auth::validate_credential_in_transaction(
@@ -996,6 +1097,12 @@ async fn commit_document_inner(
             }
             Ok(next)
         })
+    };
+    let commit = commit_blob_observed(db, new_path, write, move |version| {
+        if let Some(committed) = committed {
+            // Notify after the transaction completes even if its async caller timed out.
+            let _ = committed.send(*version);
+        }
     });
     let result = with_database_stage("document_metadata_commit", commit).await;
     request_gc(db, storage);
@@ -1106,4 +1213,88 @@ pub async fn purge_trashed(
         for owner in owners { release_unreferenced_retained_quota(conn, &owner)?; }
         Ok(deleted)
     })).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn commit_notification_reports_durable_success_after_the_caller_times_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("late-commit.db");
+        let db = DbPool::with_timeouts(
+            path.to_str().unwrap(),
+            1,
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let candidate = "candidate";
+        db.run_startup_migrations(move |conn| {
+            crate::migrations::run_directory(
+                conn,
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
+            )?;
+            diesel::sql_query("CREATE TABLE commit_fixture(version INTEGER NOT NULL)")
+                .execute(conn)?;
+            super::super::maintenance::prepare_attachment(conn, candidate)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let (entered, started) = oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (notify, mut completion) = oneshot::channel();
+        let commit = tokio::spawn(async move {
+            commit_blob_observed(
+                &db,
+                candidate.to_owned(),
+                move |conn| {
+                    conn.immediate_transaction::<_, AppError, _>(|conn| {
+                        diesel::sql_query("INSERT INTO commit_fixture(version) VALUES (2)")
+                            .execute(conn)?;
+                        entered.send(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Ok(2)
+                    })
+                },
+                move |version| {
+                    notify.send(*version).unwrap();
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(commit.await.unwrap().unwrap_err().status_code(), 503);
+        assert_eq!(
+            completion.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), completion)
+                .await
+                .unwrap()
+                .unwrap(),
+            2
+        );
+
+        #[derive(QueryableByName)]
+        struct Committed {
+            #[diesel(sql_type = Integer)]
+            version: i32,
+        }
+        let mut reader = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        let row = diesel::sql_query("SELECT version FROM commit_fixture")
+            .get_result::<Committed>(&mut reader)
+            .unwrap();
+        assert_eq!(row.version, 2);
+    }
 }

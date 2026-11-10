@@ -139,35 +139,69 @@ mod tests {
             .into_std()
             .unwrap();
         let server = tokio::spawn(Server::new(acceptor).serve(router));
-        for (path, expected) in [
-            ("/../private.txt", "404"),
-            ("/assets/../../private.txt", "404"),
-            ("/app.js", "safe-asset"),
-            ("/missing.js", "404"),
-            ("/assets/missing.wasm", "404"),
-            ("/icons/missing", "404"),
-            ("/writer/document-id", "safe-index"),
-        ] {
-            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-            socket
-                .write_all(
-                    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        // This loopback relay forwards the exact request without normalizing it.
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = relay.local_addr().unwrap();
+        let proxy = tokio::spawn(async move {
+            while let Ok((mut client, _)) = relay.accept().await {
+                let mut upstream = tokio::net::TcpStream::connect(address).await.unwrap();
+                tokio::io::copy_bidirectional(&mut client, &mut upstream)
+                    .await
+                    .unwrap();
+            }
+        });
+        for endpoint in [address, proxy_address] {
+            for (path, status, body_marker) in [
+                ("/../private.txt", Some("404"), None),
+                ("/assets/../../private.txt", Some("404"), None),
+                ("/assets\\..\\..\\private.txt", None, None),
+                ("/C:/private.txt", None, None),
+                ("/%2e%2e/private.txt", None, None),
+                ("/..%2fprivate.txt", None, None),
+                ("/..%5cprivate.txt", None, None),
+                ("/%252e%252e/private.txt", None, None),
+                ("/app.js", Some("200"), Some("safe-asset")),
+                ("/missing.js", Some("404"), None),
+                ("/assets/missing.wasm", Some("404"), None),
+                ("/icons/missing", Some("404"), None),
+                ("/writer/document-id", Some("200"), Some("safe-index")),
+            ] {
+                let mut socket = tokio::net::TcpStream::connect(endpoint).await.unwrap();
+                socket
+                    .write_all(
+                        format!(
+                            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                        )
                         .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                let mut response = Vec::new();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    socket.read_to_end(&mut response),
                 )
                 .await
+                .unwrap()
                 .unwrap();
-            let mut response = Vec::new();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                socket.read_to_end(&mut response),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            let response = String::from_utf8(response).unwrap();
-            assert!(response.contains(expected), "{path}: {response}");
-            assert!(!response.contains("outside-secret"));
+                let response = String::from_utf8(response).unwrap();
+                let (head, body) = response.split_once("\r\n\r\n").unwrap();
+                let received = head.lines().next().unwrap().split_whitespace().nth(1);
+                if let Some(status) = status {
+                    assert_eq!(received, Some(status), "{endpoint} {path}: {head}");
+                } else {
+                    assert!(
+                        matches!(received, Some("400" | "404")),
+                        "{endpoint} {path}: {head}"
+                    );
+                }
+                if let Some(marker) = body_marker {
+                    assert!(body.contains(marker), "{endpoint} {path}: {body}");
+                }
+                assert!(!response.contains("outside-secret"), "{endpoint} {path}");
+            }
         }
+        proxy.abort();
         server.abort();
     }
 

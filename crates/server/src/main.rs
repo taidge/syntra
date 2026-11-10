@@ -254,6 +254,39 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // 8b. Shared transactional trash purge and retryable object cleanup.
     // -----------------------------------------------------------------------
+    if config.maintenance.history_enabled {
+        let history_db = state.db.clone();
+        let history_config = config.maintenance.clone();
+        tokio::spawn(async move {
+            let mut cursor = services::maintenance::NativeHistoryCountCursor::default();
+            let mut sweep_removed_rows = false;
+            let idle = std::time::Duration::from_secs(history_config.interval_seconds.max(1));
+            let active = std::time::Duration::from_millis(250);
+            loop {
+                let delay = match services::maintenance::retain_native_history_count_page(
+                    &history_db,
+                    &mut cursor,
+                    &history_config,
+                )
+                .await
+                {
+                    Ok(page) => {
+                        sweep_removed_rows |= page.removed != 0;
+                        if page.sweep_finished && !std::mem::take(&mut sweep_removed_rows) {
+                            idle
+                        } else {
+                            active
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Native history count catch-up will retry");
+                        idle.min(std::time::Duration::from_secs(1))
+                    }
+                };
+                tokio::time::sleep(delay).await;
+            }
+        });
+    }
     {
         let maintenance_db = state.db.clone();
         let maintenance_storage = state.storage.clone();
@@ -263,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
                 maintenance_config.interval_seconds.max(1),
             ));
             let mut history = services::maintenance::HistoryCursor::default();
+            let mut expired_writes = services::maintenance::ExpiredWriteCursor::default();
             let mut scan = None;
             loop {
                 interval.tick().await;
@@ -285,6 +319,16 @@ async fn main() -> anyhow::Result<()> {
                     .await
                 {
                     tracing::warn!(%error,"History retention page will retry");
+                }
+                if let Err(error) = services::maintenance::expire_blob_writes_page(
+                    &maintenance_db,
+                    &mut expired_writes,
+                    &maintenance_config,
+                    chrono::Utc::now().timestamp(),
+                )
+                .await
+                {
+                    tracing::warn!(%error,"Expired object write recovery will retry");
                 }
                 if maintenance_config.reconcile_enabled {
                     if scan

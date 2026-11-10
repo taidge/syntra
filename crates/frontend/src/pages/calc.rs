@@ -159,35 +159,32 @@ struct CellPatch {
 }
 
 fn workbook_cells(value: &serde_json::Value) -> HashMap<(usize, u32, u32), serde_json::Value> {
-    let mut cells = HashMap::new();
-    for (sheet_index, sheet) in value
+    workbook_cell_entries(value)
+        .map(|(key, cell)| (key, cell.clone()))
+        .collect()
+}
+
+fn workbook_cell_entries(
+    value: &serde_json::Value,
+) -> impl Iterator<Item = (CellKey, &serde_json::Value)> {
+    value
         .get("sheets")
         .and_then(|value| value.as_array())
         .into_iter()
         .flatten()
         .enumerate()
-    {
-        for pair in sheet
-            .get("cells")
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-        {
-            let Some(pair) = pair.as_array().filter(|pair| pair.len() == 2) else {
-                continue;
-            };
-            let row = pair[0]
-                .get("row")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as u32;
-            let col = pair[0]
-                .get("col")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as u32;
-            cells.insert((sheet_index, row, col), pair[1].clone());
-        }
-    }
-    cells
+        .flat_map(|(sheet_index, sheet)| {
+            sheet["cells"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(move |pair| {
+                    let pair = pair.as_array().filter(|pair| pair.len() == 2)?;
+                    let row = pair[0]["row"].as_u64().unwrap_or(0) as u32;
+                    let col = pair[0]["col"].as_u64().unwrap_or(0) as u32;
+                    Some(((sheet_index, row, col), &pair[1]))
+                })
+        })
 }
 
 #[cfg(test)]

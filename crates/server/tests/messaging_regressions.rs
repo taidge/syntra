@@ -572,6 +572,48 @@ async fn websocket_ack_follows_durable_commit_and_retries_snapshots_and_rest_sta
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn lagged_websocket_recovers_from_the_durable_snapshot_and_keeps_receiving_commits() {
+    let server = TestServer::new().await;
+    let (jwt, _) = server
+        .register("lagged_writer", "lagged-writer@test.com", "password123")
+        .await;
+    let (document, _, _) = server
+        .create_document(&jwt, "broadcast-lag", "writer", None)
+        .await;
+    let id = document.parse().unwrap();
+    let mut socket = connect(&server, &document, &jwt).await;
+    let (initial, version) = snapshot(&mut socket).await;
+    let mut witness = server.state.collab.get_or_create_session(id).await;
+    let buffered = json!({"title": "in-memory-only"});
+
+    // Keep the socket's receiver parked on this current-thread runtime while
+    // the real production channel overwrites its oldest buffered messages.
+    tokio::task::unconstrained(async {
+        for _ in 0..1100 {
+            server
+                .state
+                .collab
+                .publish_snapshot(id, buffered.clone(), version)
+                .await;
+        }
+    })
+    .await;
+    assert!(matches!(
+        witness.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(dropped)) if dropped > 0
+    ));
+    // Periodic refresh only sends newer versions. A repeat of this version
+    // with persisted content requires the socket's lag recovery path.
+    assert_eq!(snapshot(&mut socket).await, (initial.clone(), version));
+
+    let changed =
+        contrix_doc_engine::writer::writer_content_with_text(&initial, "Saved after overflow");
+    let next_version = rest_save(&server, &jwt, &document, &changed, version).await;
+    assert_eq!(next_version, version + 1);
+    assert_eq!(snapshot(&mut socket).await, (changed, next_version));
+}
+
 #[tokio::test]
 async fn operation_log_failure_does_not_ack_publish_or_commit_document_or_quota() {
     let server = TestServer::new().await;

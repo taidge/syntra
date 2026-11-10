@@ -9,6 +9,8 @@ Cargo metadata's target_directory/package-smoke/<GUID>. They are retained for
 inspection. No caller environment variable, Cargo location or TEMP path changes.
 REST content and a WebSocket ACK must survive a forced server process restart;
 retrying that operation after restart must ACK without another version change.
+An upload staged before the same restart must retain its first chunk, reject a
+conflicting retry and complete exactly once with the assembled bytes.
 Browser tests use repository test code, but the application still runs only from
 its package; node receives its own API_URL/E2E_EXTERNAL_SERVER/artifacts values.
 .EXAMPLE
@@ -138,7 +140,9 @@ function Invoke-OfficeSmokeRequest {
     $response = $null
     try {
         if ($Token) { $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $Token) }
-        if ($null -ne $Payload) {
+        if ($Payload -is [Net.Http.HttpContent]) {
+            $request.Content = $Payload
+        } elseif ($null -ne $Payload) {
             $json = ConvertTo-Json -InputObject $Payload -Depth 100 -Compress
             $request.Content = [Net.Http.StringContent]::new($json, [Text.Encoding]::UTF8, 'application/json')
         }
@@ -160,6 +164,26 @@ function Invoke-OfficeSmokeJson {
     $json = [Text.Encoding]::UTF8.GetString($result.Bytes) | ConvertFrom-Json -Depth 100
     Assert-OfficeSmoke ($json.success -eq $true) "$Method $Path reported an API failure."
     return $json.data
+}
+
+function Send-OfficeSmokeUploadChunk {
+    param([string]$SessionPath, [int]$Index, [byte[]]$Bytes, [string]$Token, [int]$ExpectedStatus)
+    $multipart = [Net.Http.MultipartFormDataContent]::new()
+    try {
+        $part = [Net.Http.ByteArrayContent]::new($Bytes)
+        $part.Headers.ContentType = [Net.Http.Headers.MediaTypeHeaderValue]::new('application/octet-stream')
+        $multipart.Add($part, 'chunk', 'part.bin')
+        $path = "$SessionPath/chunks?chunk_index=$Index"
+        $result = Invoke-OfficeSmokeRequest 'POST' $path $multipart $Token
+        Assert-OfficeSmoke ($result.Status -eq $ExpectedStatus) "Chunk $Index returned $($result.Status), expected $ExpectedStatus."
+        $json = [Text.Encoding]::UTF8.GetString($result.Bytes) | ConvertFrom-Json -Depth 100
+        if ($ExpectedStatus -eq 200) {
+            Assert-OfficeSmoke ($json.success -eq $true -and $json.data.chunk_number -eq $Index) 'Chunk response did not acknowledge the requested index.'
+            return [long]$json.data.uploaded_size
+        }
+        Assert-OfficeSmoke ($json.success -eq $false -and $json.error.code -eq 409 -and $json.error.message.Contains('Chunk index already has different data')) 'Conflicting chunk bytes did not produce the overwrite conflict.'
+    }
+    finally { $multipart.Dispose() }
 }
 
 function Open-OfficeSmokeSocket {
@@ -403,6 +427,7 @@ try {
     $htmlText = [Text.Encoding]::UTF8.GetString($html.Bytes)
     Assert-OfficeSmoke ($htmlText.Contains('/bootstrap.js')) 'HTML does not reference the frontend bootstrap.'
     $null = Assert-OfficeSmokeAsset '/bootstrap.js' 'javascript'
+    $null = Assert-OfficeSmokeAsset '/assets/calc-worker.js' 'javascript'
     $glue = Assert-OfficeSmokeAsset '/assets/contrix_frontend.js' 'javascript'
     Assert-OfficeSmoke ([Text.Encoding]::UTF8.GetString($glue.Bytes).Contains('contrix_frontend_bg.wasm')) 'JavaScript glue does not reference the packaged WASM.'
     $wasm = Assert-OfficeSmokeAsset '/assets/contrix_frontend_bg.wasm' 'application/wasm'
@@ -427,6 +452,25 @@ try {
     Assert-OfficeSmoke ($download.Status -eq 200) 'Saved document download failed.'
     $downloaded = [Text.Encoding]::UTF8.GetString($download.Bytes) | ConvertFrom-Json -Depth 100
     Assert-OfficeSmoke ($downloaded.title -eq $marker) 'Downloaded blob does not contain the saved document.'
+
+    # A separate account isolates upload quota from the document and WS saves.
+    # Stage just one chunk before the same forced restart used by the WS ACK.
+    $uploadEmail = "upload_$taskNonce@example.test"
+    $uploadPassword = "Upload!9-$taskNonce"
+    $uploadAccount = Invoke-OfficeSmokeJson 'POST' '/api/v1/auth/register' 201 @{ username = "upload_$taskNonce"; email = $uploadEmail; password = $uploadPassword }
+    $uploadToken = [string]$uploadAccount.token
+    $quotaBaseline = [long]((Invoke-OfficeSmokeJson 'GET' '/api/v1/quota' 200 $null $uploadToken).storage_used)
+    $firstChunk = [Security.Cryptography.RandomNumberGenerator]::GetBytes(8192)
+    $secondChunk = [Security.Cryptography.RandomNumberGenerator]::GetBytes(12017)
+    $uploadBytes = [byte[]]::new($firstChunk.Length + $secondChunk.Length)
+    [Buffer]::BlockCopy($firstChunk, 0, $uploadBytes, 0, $firstChunk.Length)
+    [Buffer]::BlockCopy($secondChunk, 0, $uploadBytes, $firstChunk.Length, $secondChunk.Length)
+    $uploadSession = Invoke-OfficeSmokeJson 'POST' '/api/v1/upload/sessions' 201 @{ file_name = 'resume.bin'; total_size = $uploadBytes.Length; mime_type = 'application/octet-stream' } $uploadToken
+    Assert-OfficeSmoke (-not [string]::IsNullOrWhiteSpace($uploadSession.id)) 'Upload creation did not return a session ID.'
+    $uploadPath = "/api/v1/upload/sessions/$($uploadSession.id)"
+    $beforeRestartProgress = Send-OfficeSmokeUploadChunk $uploadPath 1 $firstChunk $uploadToken 200
+    $beforeRestartQuota = [long]((Invoke-OfficeSmokeJson 'GET' '/api/v1/quota' 200 $null $uploadToken).storage_used)
+    Assert-OfficeSmoke ($beforeRestartProgress -eq $firstChunk.Length -and $beforeRestartQuota -eq $quotaBaseline) 'The first chunk reported incorrect progress or changed charged quota.'
 
     # Keep the REST document independent so both persistence paths are checked.
     # Kill the actual server immediately after its WebSocket ACK, with the
@@ -476,6 +520,28 @@ try {
     $wsDownload = Invoke-OfficeSmokeRequest 'GET' "/api/v1/files/$($collaborative.file_id)/download" $null ([string]$again.token)
     Assert-OfficeSmoke ($wsDownload.Status -eq 200 -and ([Text.Encoding]::UTF8.GetString($wsDownload.Bytes) | ConvertFrom-Json -Depth 100).title -eq $wsMarker) 'Acknowledged WebSocket blob did not survive restart and retry.'
 
+    $resumedAccount = Invoke-OfficeSmokeJson 'POST' '/api/v1/auth/login' 200 @{ email = $uploadEmail; password = $uploadPassword }
+    $resumedToken = [string]$resumedAccount.token
+    # Never retransmit the original first chunk. The download must include its
+    # durable pre-restart bytes even after a conflicting upload to that index.
+    $replacementChunk = [byte[]]$firstChunk.Clone()
+    $replacementChunk[0] = [byte]($replacementChunk[0] -bxor 1)
+    Send-OfficeSmokeUploadChunk $uploadPath 1 $replacementChunk $resumedToken 409
+    $resumedProgress = Send-OfficeSmokeUploadChunk $uploadPath 2 $secondChunk $resumedToken 200
+    $repeatedProgress = Send-OfficeSmokeUploadChunk $uploadPath 2 $secondChunk $resumedToken 200
+    $beforeCompleteQuota = [long]((Invoke-OfficeSmokeJson 'GET' '/api/v1/quota' 200 $null $resumedToken).storage_used)
+    Assert-OfficeSmoke ($resumedProgress -eq $uploadBytes.Length -and $repeatedProgress -eq $resumedProgress -and $beforeCompleteQuota -eq $quotaBaseline) 'Resume or retry changed assembled progress or charged quota incorrectly.'
+    $completedUpload = Invoke-OfficeSmokeJson 'POST' "$uploadPath/complete" 201 $null $resumedToken
+    $completedQuota = [long]((Invoke-OfficeSmokeJson 'GET' '/api/v1/quota' 200 $null $resumedToken).storage_used)
+    $replayedUpload = Invoke-OfficeSmokeJson 'POST' "$uploadPath/complete" 200 $null $resumedToken
+    $replayedQuota = [long]((Invoke-OfficeSmokeJson 'GET' '/api/v1/quota' 200 $null $resumedToken).storage_used)
+    Assert-OfficeSmoke (-not [string]::IsNullOrWhiteSpace($completedUpload.id) -and $replayedUpload.id -eq $completedUpload.id) 'Completion retry returned a different file ID.'
+    Assert-OfficeSmoke ($completedQuota - $quotaBaseline -eq $uploadBytes.Length -and $replayedQuota -eq $completedQuota) 'Completed upload was not charged exactly once.'
+    $uploadedFiles = @(Invoke-OfficeSmokeJson 'GET' '/api/v1/files' 200 $null $resumedToken)
+    Assert-OfficeSmoke ($uploadedFiles.Count -eq 1 -and $uploadedFiles[0].id -eq $completedUpload.id) 'Upload completion did not leave exactly one file.'
+    $uploadDownload = Invoke-OfficeSmokeRequest 'GET' "/api/v1/files/$($completedUpload.id)/download" $null $resumedToken
+    Assert-OfficeSmoke ($uploadDownload.Status -eq 200 -and [Convert]::ToBase64String([byte[]]$uploadDownload.Bytes) -ceq [Convert]::ToBase64String($uploadBytes)) 'Downloaded upload differs from the ordered pre- and post-restart bytes.'
+
     if ($BrowserTests) {
         $cli = Join-Path $taskWorkspace 'e2e/node_modules/@playwright/test/cli.js'
         $testFile = Join-Path $taskWorkspace 'e2e/tests/package.ui.spec.ts'
@@ -500,6 +566,13 @@ try {
         image_id = $taskImageId
         source_free_server_start = $true; restart_persistence = $true; browser_tests = [bool]$BrowserTests
         websocket_ack_restart = $true; websocket_receipt_retry = $true
+        upload_chunk_restart = $true; upload_conflicting_chunk_rejected = $true; upload_completion_replay = $true
+        upload_restart = [ordered]@{
+            session_id = $uploadSession.id; file_id = $completedUpload.id
+            first_chunk_bytes = $firstChunk.Length; second_chunk_bytes = $secondChunk.Length
+            downloaded_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$uploadDownload.Bytes))
+            quota_baseline_bytes = $quotaBaseline; quota_after_complete_bytes = $completedQuota; quota_after_replay_bytes = $replayedQuota
+        }
         websocket_document_id = $collaborative.id; websocket_version = $wsVersion
         document_id = $document.id; version = $saved.version; assets = @($taskAssets)
     }

@@ -569,31 +569,43 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     // The owned task retains admission through storage and SQL, even if the
     // HTTP client disconnects while a background commit can still succeed.
     let committed = tokio::spawn(with_request_database_observation(async move {
-        let _capacity = capacity;
-        let version = crate::services::persistence::commit_document_with_credential(
+        let (notify, completion) = tokio::sync::oneshot::channel();
+        let result = crate::services::persistence::commit_document_with_credential(
             &state.db,
             &state.storage,
             &id,
             &uid,
             expected,
             content,
-            None,
             &credential,
-        )
-        .await?;
-        if let Ok(document_id) = Uuid::parse_str(&id) {
-            state
-                .collab
-                .publish_snapshot(document_id, body.content, version as u64)
-                .await;
-        }
-        crate::services::WebhookService::fire_event(
-            &state.db,
-            "document.updated",
-            &serde_json::json!({"id":id,"version":version}),
+            notify,
         )
         .await;
-        Ok::<_, AppError>(version)
+        let publish = async move {
+            let _capacity = capacity;
+            let Ok(version) = completion.await else {
+                return;
+            };
+            if let Ok(document_id) = Uuid::parse_str(&id) {
+                state
+                    .collab
+                    .publish_snapshot(document_id, body.content, version as u64)
+                    .await;
+            }
+            crate::services::WebhookService::fire_event(
+                &state.db,
+                "document.updated",
+                &serde_json::json!({"id":id,"version":version}),
+            )
+            .await;
+        };
+        if result.is_ok() {
+            publish.await;
+        } else {
+            // Return the HTTP error while retaining ownership of any late commit.
+            tokio::spawn(with_request_database_observation(publish));
+        }
+        result
     }))
     .await;
     match committed {

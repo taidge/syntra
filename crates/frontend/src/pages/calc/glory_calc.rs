@@ -1,8 +1,14 @@
 //! Application-owned workbook state and semantic Glory/Sapid presentation.
 use super::*;
+#[path = "calculation.rs"]
+mod calculation;
+use calculation::{CalculationCell, CalculationInput};
 #[path = "snapshot_merge.rs"]
 mod snapshot_merge;
 
+#[cfg(target_arch = "wasm32")]
+#[path = "calculation_worker.rs"]
+mod calculation_worker;
 #[cfg(target_arch = "wasm32")]
 #[path = "cell_events.rs"]
 mod cell_events;
@@ -61,16 +67,14 @@ fn merge_visible_delta(
     }
 }
 
-/// Calculation is independent of visual formatting and legacy style schemas.
-#[derive(serde::Deserialize)]
-struct CalculationCell {
-    value: contrix_doc_engine::calc::CellValue,
-    #[serde(default)]
-    formula: Option<String>,
-}
-
 type CalculatedCells = HashMap<CellKey, contrix_doc_engine::calc::CellValue>;
-type CalculationCache = Option<(u64, CalculatedCells)>;
+
+#[derive(Clone)]
+struct CalculationCache {
+    values: CalculatedCells,
+    #[cfg(target_arch = "wasm32")]
+    pending: Option<Rc<CalculationInput>>,
+}
 
 #[derive(Clone)]
 struct Book {
@@ -81,7 +85,7 @@ struct Book {
     redo: Vec<(CalcSnapshot, serde_json::Value)>,
     revision: u64,
     dirty: bool,
-    calculation: RefCell<CalculationCache>,
+    calculation: RefCell<Option<CalculationCache>>,
     conflict: Option<serde_json::Value>,
 }
 impl Default for Book {
@@ -199,6 +203,7 @@ impl Book {
     fn serialize_raw(&self) -> serde_json::Value {
         let snap = &self.snapshot;
         let mut root = self.content.as_object().cloned().unwrap_or_default();
+        let original_cells: HashMap<_, _> = workbook_cell_entries(&self.content).collect();
         let sheets = snap
             .sheets
             .iter()
@@ -225,39 +230,19 @@ impl Book {
                     .filter(|key| key.0 == si)
                     .map(|key| (key.1, key.2))
                     .collect();
-                let original_cells = workbook_cells(&self.content);
                 let cells = keys
                     .into_iter()
                     .map(|(r, c)| {
                         let value = snap.cells.get(&(si, r, c)).cloned().unwrap_or_default();
-                        let original = original_cells.get(&(si, r, c));
+                        let original = original_cells.get(&(si, r, c)).copied();
                         let original_display = original.map(cell_input_text);
                         let mut cell = original
                             .cloned()
                             .unwrap_or_else(|| serde_json::json!({"comment":null}));
                         if original_display.as_deref() != Some(value.as_str()) {
-                            let (formula, typed) = if value.starts_with('=') {
-                                (
-                                    serde_json::json!(value),
-                                    serde_json::json!({"type":"Empty"}),
-                                )
-                            } else if value.is_empty() {
-                                (serde_json::Value::Null, serde_json::json!({"type":"Empty"}))
-                            } else if let Some(n) =
-                                value.parse::<f64>().ok().filter(|n| n.is_finite())
-                            {
-                                (
-                                    serde_json::Value::Null,
-                                    serde_json::json!({"type":"Number","value":n}),
-                                )
-                            } else {
-                                (
-                                    serde_json::Value::Null,
-                                    serde_json::json!({"type":"Text","value":value}),
-                                )
-                            };
-                            cell["formula"] = formula;
-                            cell["value"] = typed;
+                            let edited = CalculationCell::edited(&value);
+                            cell["formula"] = serde_json::json!(edited.formula);
+                            cell["value"] = serde_json::json!(edited.value);
                         }
                         let previous_format = original
                             .and_then(|cell| cell.get("format"))
@@ -298,66 +283,77 @@ impl Book {
         serde_json::Value::Object(root)
     }
     fn ensure_calculated(&self) {
-        if self
-            .calculation
-            .borrow()
-            .as_ref()
-            .is_some_and(|(revision, _)| *revision == self.revision)
-        {
+        if self.calculation.borrow().is_some() {
             return;
         }
-        let mut values = HashMap::new();
-        let raw = self.serialize_raw();
-        for (si, sheet) in raw["sheets"].as_array().into_iter().flatten().enumerate() {
-            let mut engine = contrix_doc_engine::calc::Sheet::new(String::new());
-            for pair in sheet["cells"].as_array().into_iter().flatten() {
-                if let Ok(reference) = serde_json::from_value(pair[0].clone()) {
-                    let input = serde_json::from_value::<CalculationCell>(pair[1].clone());
-                    let (value, formula) = match input {
-                        Ok(input) => (input.value, input.formula),
-                        Err(_) => (
-                            contrix_doc_engine::calc::CellValue::Error(
-                                "#VALUE! Invalid stored cell value or formula".into(),
-                            ),
-                            None,
-                        ),
-                    };
-                    engine.cells.insert(
-                        reference,
-                        contrix_doc_engine::calc::Cell {
-                            value,
-                            formula,
-                            format: Default::default(),
-                            comment: None,
-                        },
-                    );
-                }
-            }
-            engine.recalculate();
-            for (reference, cell) in engine.cells {
-                values.insert((si, reference.row, reference.col), cell.value);
-            }
+        let input = CalculationInput::from_workbook(&self.snapshot, &self.content);
+        let mut values = input.constants();
+        #[cfg(target_arch = "wasm32")]
+        if input.needs_worker() {
+            *self.calculation.borrow_mut() = Some(CalculationCache {
+                values,
+                pending: Some(Rc::new(input)),
+            });
+            return;
         }
-        *self.calculation.borrow_mut() = Some((self.revision, values));
+        values.extend(
+            input
+                .calculate(usize::MAX)
+                .expect("calculation fits in memory"),
+        );
+        *self.calculation.borrow_mut() = Some(CalculationCache {
+            values,
+            #[cfg(target_arch = "wasm32")]
+            pending: None,
+        });
     }
-    fn calculated_values(&self) -> CalculatedCells {
+
+    #[cfg(target_arch = "wasm32")]
+    fn pending_calculation(&self) -> Option<Rc<CalculationInput>> {
         self.ensure_calculated();
         self.calculation
             .borrow()
             .as_ref()
             .expect("calculated")
-            .1
+            .pending
             .clone()
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn calculation_allows_save(
+        &self,
+        (revision, progress): (u64, calculation_worker::Progress),
+    ) -> bool {
+        self.pending_calculation().is_none()
+            || (self.revision == revision && progress.allows_raw_save())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn accept_calculation(&self, revision: u64, values: calculation::FormulaResults) -> bool {
+        if self.revision != revision {
+            return false;
+        }
+        let mut calculation = self.calculation.borrow_mut();
+        let Some(cache) = calculation.as_mut() else {
+            return false;
+        };
+        if cache.pending.take().is_none() {
+            return false;
+        }
+        cache.values.extend(values);
+        true
+    }
+
     fn display(&self, si: usize, row: u32, col: u32) -> String {
         self.ensure_calculated();
         self.calculation
             .borrow()
             .as_ref()
             .expect("calculated")
-            .1
+            .values
             .get(&(si, row, col))
             .map(calculated_text)
+            .or_else(|| self.snapshot.cells.get(&(si, row, col)).cloned())
             .unwrap_or_default()
     }
     fn numeric(&self, si: usize, row: u32, col: u32) -> Option<f64> {
@@ -367,7 +363,7 @@ impl Book {
             .borrow()
             .as_ref()
             .expect("calculated")
-            .1
+            .values
             .get(&(si, row, col))
         {
             Some(contrix_doc_engine::calc::CellValue::Number(n)) => Some(*n),
@@ -376,7 +372,9 @@ impl Book {
     }
     fn serialize(&self) -> serde_json::Value {
         let mut content = self.serialize_raw();
-        let values = self.calculated_values();
+        self.ensure_calculated();
+        let calculation = self.calculation.borrow();
+        let cache = calculation.as_ref().expect("calculated");
         for (si, sheet) in content["sheets"]
             .as_array_mut()
             .into_iter()
@@ -386,30 +384,35 @@ impl Book {
             for pair in sheet["cells"].as_array_mut().into_iter().flatten() {
                 let row = pair[0]["row"].as_u64().unwrap_or(0) as u32;
                 let col = pair[0]["col"].as_u64().unwrap_or(0) as u32;
-                if !pair[1]["formula"].is_null()
-                    && let Some(value) = values.get(&(si, row, col))
-                {
-                    pair[1]["value"] = serde_json::to_value(value).expect("cell values serialize");
+                if !pair[1]["formula"].is_null() {
+                    pair[1]["value"] = serde_json::to_value(
+                        cache
+                            .values
+                            .get(&(si, row, col))
+                            .unwrap_or(&contrix_doc_engine::CellValue::Empty),
+                    )
+                    .expect("cell values serialize");
                 }
             }
         }
-        self.calculation.borrow_mut().take();
         content
     }
     #[cfg(any(test, target_arch = "wasm32"))]
     fn apply_remote(&mut self, payload: &serde_json::Value) {
         if let Some((_user, patch)) = cell_patch_from_operation(payload) {
+            let mut merged = self.serialize_raw();
             if self.dirty {
                 let base = workbook_cells(&self.content);
-                let local = workbook_cells(&self.serialize());
+                let local = workbook_cells(&merged);
                 let key = (patch.sheet, patch.row, patch.col);
-                if base.get(&key) != local.get(&key) {
+                if snapshot_merge::semantic(base.get(&key))
+                    != snapshot_merge::semantic(local.get(&key))
+                {
                     let mut server = self.content.clone();
                     apply_cell_patch(&mut server, &patch);
                     self.conflict = Some(server);
                     return;
                 }
-                let mut merged = self.serialize();
                 if !apply_cell_patch(&mut merged, &patch) {
                     return;
                 }
@@ -422,7 +425,7 @@ impl Book {
                                 content,
                                 ..Default::default()
                             };
-                            let mut merged = checkpoint.serialize();
+                            let mut merged = checkpoint.serialize_raw();
                             apply_cell_patch(&mut merged, &patch);
                             checkpoint.hydrate(merged);
                             (checkpoint.snapshot, checkpoint.content)
@@ -440,9 +443,8 @@ impl Book {
                 self.redo = redo;
                 self.dirty = true;
             } else {
-                let mut content = self.serialize();
-                if apply_cell_patch(&mut content, &patch) {
-                    self.hydrate(content);
+                if apply_cell_patch(&mut merged, &patch) {
+                    self.hydrate(merged);
                 }
             }
         } else if let Some((_user, replacement)) = workbook_replace_from_operation(payload) {
@@ -458,6 +460,7 @@ impl Book {
 #[derive(Clone, Copy)]
 struct Editor {
     book: Cage<Book>,
+    calculation_epoch: Cage<u64>,
     sheet: Cage<usize>,
     active: Cage<(u32, u32)>,
     anchor: Cage<(u32, u32)>,
@@ -544,7 +547,7 @@ impl Editor {
         let si = self.sheet.get();
         self.book.revise(|b| {
             b.checkpoint();
-            b.content = b.serialize();
+            b.content = b.serialize_raw();
             let key = if column {
                 "column_widths"
             } else {
@@ -927,7 +930,7 @@ impl Editor {
         .normalized();
         self.book.revise(|b| {
             b.checkpoint();
-            b.content = b.serialize();
+            b.content = b.serialize_raw();
             operation(&mut b.content, si, range);
         });
     }
@@ -935,7 +938,7 @@ impl Editor {
         let si = self.sheet.get();
         let target = self.book.revise(|b| {
             b.checkpoint();
-            b.content = b.serialize();
+            b.content = b.serialize_raw();
             let target = b.snapshot.sheets.len();
             let name = format!("{} copy", b.snapshot.sheets[si]);
             b.snapshot.sheets.push(name.clone());
@@ -981,7 +984,7 @@ impl Editor {
         }
         self.book.revise(|b| {
             b.checkpoint();
-            b.content = b.serialize();
+            b.content = b.serialize_raw();
             b.snapshot.sheets.swap(from, to);
             let swap = |s| {
                 if s == from {
@@ -1151,6 +1154,7 @@ fn format_control(
 pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     let ed = Editor {
         book: scope.cage(Book::default()),
+        calculation_epoch: scope.cage(0),
         sheet: scope.cage(0),
         active: scope.cage((0, 0)),
         anchor: scope.cage((0, 0)),
@@ -1181,6 +1185,9 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     #[cfg(target_arch = "wasm32")]
     let session = scope.cage(None::<CollabHandle>);
     let token = auth.with(|a| a.token.clone().unwrap_or_default());
+    #[cfg(target_arch = "wasm32")]
+    let calculation =
+        calculation_worker::Controller::install(&scope, ed, loaded, auth, token.clone());
     #[cfg(target_arch = "wasm32")]
     let self_id = auth.with(|a| {
         a.user
@@ -1312,6 +1319,10 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     let timer = Rc::new(RefCell::new(None::<Timeout>));
     let saving = scope.cage(false);
     let failed = scope.cage(false);
+    #[cfg(target_arch = "wasm32")]
+    let waiting_for_calculation = scope.cage(false);
+    #[cfg(target_arch = "wasm32")]
+    let calculation_progress = calculation.progress;
     let save: Rc<dyn Fn()> = Rc::new({
         let weak = scope.downgrade();
         let id = id.clone();
@@ -1322,12 +1333,26 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 || saving.get()
                 || !ed.book.with(|b| b.dirty)
                 || ed.book.with(|b| b.conflict.is_some())
+                || !auth.with(|state| state.token.as_deref() == Some(token.as_str()))
             {
                 return;
             }
             let Some(scope) = weak.upgrade() else {
                 return;
             };
+            #[cfg(target_arch = "wasm32")]
+            {
+                if !ed
+                    .book
+                    .with(|book| book.calculation_allows_save(calculation_progress.get()))
+                {
+                    waiting_for_calculation.revise(|waiting| *waiting = true);
+                    return;
+                }
+                if waiting_for_calculation.get_untracked() {
+                    waiting_for_calculation.revise(|waiting| *waiting = false);
+                }
+            }
             let (content, revision) = ed.book.with(|b| (b.serialize(), b.revision));
             let id = id.clone();
             let token = token.clone();
@@ -1406,6 +1431,28 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 }
                 saving.revise(|v| *v = false);
             });
+        }
+    });
+    #[cfg(target_arch = "wasm32")]
+    scope.effect({
+        let save = save.clone();
+        move || {
+            if !waiting_for_calculation.get() || saving.get() {
+                return;
+            }
+            let progress = calculation_progress.get();
+            let (valid, ready) = ed.book.with(|book| {
+                (
+                    book.dirty && book.conflict.is_none(),
+                    book.calculation_allows_save(progress),
+                )
+            });
+            if !valid || ready {
+                waiting_for_calculation.revise(|waiting| *waiting = false);
+                if valid {
+                    save();
+                }
+            }
         }
     });
     #[cfg(target_arch = "wasm32")]
@@ -1554,6 +1601,40 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             scope.bond(move || collaborators.with(|v| format!("{} collaborators", v.len()))),
         )),
     ];
+    #[cfg(target_arch = "wasm32")]
+    let chrome = {
+        use calculation_worker::Progress;
+
+        let mut chrome = chrome;
+        let progress = calculation.progress;
+        chrome.push(Box::new(
+            text()
+                .class("calc-formula-status")
+                .content(scope.bond(move || progress.get().1.message())),
+        ));
+        chrome.push(Box::new(when(
+            scope.bond(move || progress.get().1 == Progress::Pending),
+            {
+                let calculation = calculation.clone();
+                move || {
+                    let calculation = calculation.clone();
+                    action(&crate::i18n::t("calc.formula_cancel"), move || {
+                        calculation.cancel()
+                    })
+                }
+            },
+        )));
+        chrome.push(Box::new(when(
+            scope.bond(move || progress.get().1.allows_raw_save()),
+            move || {
+                let calculation = calculation.clone();
+                action(&crate::i18n::t("calc.formula_retry"), move || {
+                    calculation.retry()
+                })
+            },
+        )));
+        chrome
+    };
     let toolbar: Vec<sapid::OverflowItem> = vec![
         toolbar_action("Bold", move || ed.format(|s| s.bold = !s.bold)),
         toolbar_action("Italic", move || ed.format(|s| s.italic = !s.italic)),
@@ -1983,7 +2064,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             sapid::button().theme(crate::components::ui::theme()).label("Pivot summary").on_press(move||{
                 let si=ed.sheet.get();let range=MergedRange{start:ed.anchor.get(),end:ed.end.get()}.normalized();
                 ed.book.revise(|b|{
-                    b.checkpoint();b.content=b.serialize();
+                    b.checkpoint();b.content=b.serialize_raw();
                     let target=b.snapshot.sheets.len();let name=format!("Pivot{target}");
                     let values=pivot_sum_rows(&b.snapshot.cells,si,range.start,range.end);
                     b.snapshot.sheets.push(name.clone());
@@ -2258,6 +2339,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         when(ai_open,{let id=id.clone();move||{let id=id.clone();widget(move|scope|crate::components::ai_assist::AiAssist(scope.clone(),auth,id.clone()).build(scope))}}),)),
         row().class("status-bar").fill((
             text().content(scope.bond(move || {
+                let _ = ed.calculation_epoch.get();
                 let (r, c) = ed.active.get();
                 let si = ed.sheet.get();
                 let selected = ed.selected();
@@ -2332,7 +2414,7 @@ fn color(value: &str) -> Option<Color> {
 }
 fn add_blank_sheet(book: &mut Book) -> usize {
     book.checkpoint();
-    book.content = book.serialize();
+    book.content = book.serialize_raw();
     let index = book.snapshot.sheets.len();
     let mut suffix = index + 1;
     let name = loop {
@@ -2733,6 +2815,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                 .content(move || {
                     let scope = cell_scope.upgrade().expect("live spreadsheet cell");
                     let value = scope.bond(move || {
+                        let _ = ed.calculation_epoch.get();
                         ed.book.with(|b| {
                             let value = b.display(si, r, c);
                             let style = b
@@ -2930,6 +3013,7 @@ fn chart_view(scope: &Scope, ed: Editor) -> impl Widget {
         }
         .normalized();
         let si = ed.sheet.get();
+        let _ = ed.calculation_epoch.get();
         ed.book.with(|b| {
             let points: Vec<_> = (range.start.0..=range.end.0)
                 .take(128)
@@ -3080,6 +3164,7 @@ mod tests {
             );
             let ed = Editor {
                 book: scope.cage(book),
+                calculation_epoch: scope.cage(0),
                 sheet: scope.cage(0),
                 active: scope.cage((0, 0)),
                 anchor: scope.cage((0, 0)),
@@ -3106,6 +3191,7 @@ mod tests {
     fn fill_test_editor(scope: &Scope, book: Book) -> Editor {
         Editor {
             book: scope.cage(book),
+            calculation_epoch: scope.cage(0),
             sheet: scope.cage(0),
             active: scope.cage((0, 0)),
             anchor: scope.cage((0, 0)),

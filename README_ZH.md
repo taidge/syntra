@@ -365,7 +365,7 @@ cargo test -p contrix-export
 
 ```bash
 # 格式化代码
-cargo fmt --all
+cargo fmt
 
 # 运行 clippy 检查
 cargo clippy --locked --workspace --all-targets --no-deps --features contrix-frontend/ssr -- -D warnings

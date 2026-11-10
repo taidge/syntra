@@ -138,13 +138,15 @@ test.describe('Ambiguous document saves @ui', () => {
       } else if (route.request().method() === 'GET') {
         const response = await route.fetch({ maxRetries: 0 });
         expect(response.status()).toBe(200);
-        const body = await response.json();
-        const fields = Object.entries(body.data.content);
-        expect(fields.length).toBeGreaterThan(1);
-        body.data.content = Object.fromEntries(fields.reverse());
+        const body = await response.text();
+        // Swap only the keys. JSON.stringify would also change values such as
+        // Writer's 8.0 spacing from a floating-point token to an integer token.
+        const reordered = body.replace(/("after":[0-9.eE+-]+),("before":[0-9.eE+-]+)/, '$2,$1');
+        expect(reordered).not.toBe(body);
+        expect(JSON.parse(reordered).data.content).toEqual(writes[0].content);
         reads++;
         await gate;
-        await route.fulfill({ response, json: body });
+        await route.fulfill({ response, body: reordered });
         return;
       }
       await route.continue();

@@ -82,6 +82,114 @@ async function enterCell(page: Page, name: string, value: string, display = valu
     await expect(namedCell(page, name)).toHaveText(display);
 }
 
+const workerFormula = '=SUM(B1:B20000)';
+
+async function seedWorkerFormula(request: APIRequestContext, { id, token }: CalcFixture) {
+    const url = `${API_BASE}/documents/${id}`;
+    const headers = { Authorization: `Bearer ${token}` };
+    const load = await request.get(url, { headers });
+    expect(load.ok()).toBeTruthy();
+    const { version, content } = (await load.json()).data;
+    content.sheets[0].cells = [
+        [{ row: 0, col: 0 }, { formula: workerFormula, value: { type: 'Number', value: -1 } }],
+        [{ row: 0, col: 1 }, { formula: null, value: { type: 'Number', value: 2 } }],
+    ];
+    const saved = await request.put(url, { headers, data: { expected_version: version, content } });
+    expect(saved.ok()).toBeTruthy();
+
+    return async () => {
+        const result = await request.get(url, { headers });
+        expect(result.ok()).toBeTruthy();
+        return (await result.json()).data.content.sheets[0].cells.map(([, cell]: [unknown, unknown]) => cell);
+    };
+}
+
+test.describe('Calc formula worker @ui', () => {
+    test('calculates a sparse range off-thread and saves the matching edited revision', async ({ page, request }) => {
+        const fixture = await createCalcDoc(request);
+        const persistedCells = await seedWorkerFormula(request, fixture);
+        const worker = page.waitForEvent('worker', worker => worker.url().endsWith('/assets/calc-worker.js'));
+        await gotoCalc(page, fixture.id, fixture.token, fixture.user);
+        await worker;
+        await expect(namedCell(page, 'A1')).toHaveText('2');
+        await namedCell(page, 'B1').click();
+        const formulaInput = page.getByRole('textbox', { name: 'Formula', exact: true });
+        await expect(formulaInput).toHaveValue('2');
+        await formulaInput.fill('7');
+        await page.getByRole('button', { name: 'Apply formula', exact: true }).click();
+        await expect(namedCell(page, 'B1')).toHaveText('7');
+        await page.getByRole('button', { name: 'Save', exact: true }).click();
+        await expect(namedCell(page, 'A1')).toHaveText('7');
+        await expect.poll(persistedCells).toEqual([
+            expect.objectContaining({ formula: workerFormula, value: { type: 'Number', value: 7 } }),
+            expect.objectContaining({ formula: null, value: { type: 'Number', value: 7 } }),
+        ]);
+        const liveWorker = page.workers().find(worker => worker.url().endsWith('/assets/calc-worker.js'));
+        expect(liveWorker).toBeDefined();
+        const closed = liveWorker!.waitForEvent('close');
+        await page.getByRole('link', { name: 'Dashboard', exact: true }).click();
+        await expect(page).toHaveURL(/\/dashboard$/);
+        await closed;
+    });
+
+    test('terminates superseded, cancelled and timed out workers and keeps formulas in a raw save', async ({ page, request }) => {
+        const fixture = await createCalcDoc(request);
+        const persistedCells = await seedWorkerFormula(request, fixture);
+        await page.routeWebSocket('**/api/v1/ws/**', () => {});
+        await page.clock.install();
+        await page.addInitScript(() => {
+            localStorage.setItem('locale', 'en');
+            const post = Worker.prototype.postMessage;
+            // Hold this page's calculation messages so cancellation is independent of CPU speed.
+            const controls = window as Window & { holdCalculation?: boolean };
+            controls.holdCalculation = true;
+            Worker.prototype.postMessage = function (
+                this: Worker, message: unknown, transfer?: Transferable[] | StructuredSerializeOptions,
+            ) {
+                if (Array.isArray(message) && message[1] instanceof Uint8Array && controls.holdCalculation) {
+                    return;
+                }
+                Reflect.apply(post, this, [message, transfer ?? []]);
+            };
+        });
+        const first = page.waitForEvent('worker', worker => worker.url().endsWith('/assets/calc-worker.js'));
+        await gotoCalc(page, fixture.id, fixture.token, fixture.user);
+        const firstClosed = (await first).waitForEvent('close');
+        const replacement = page.waitForEvent('worker', worker => worker.url().endsWith('/assets/calc-worker.js'));
+        await expect(namedCell(page, 'A1')).toHaveText(workerFormula);
+        await namedCell(page, 'B1').click();
+        const formulaInput = page.getByRole('textbox', { name: 'Formula', exact: true });
+        await expect(formulaInput).toHaveValue('2');
+        await formulaInput.fill('9');
+        await page.getByRole('button', { name: 'Apply formula', exact: true }).click();
+        await expect(namedCell(page, 'B1')).toHaveText('9');
+        await firstClosed;
+        const replacementClosed = (await replacement).waitForEvent('close');
+        const put = page.waitForRequest(req => req.method() === 'PUT' && req.url() === `${API_BASE}/documents/${fixture.id}`);
+        await page.getByRole('button', { name: 'Save', exact: true }).click();
+        await page.getByRole('button', { name: 'Cancel calculation', exact: true }).click();
+        await replacementClosed;
+        await put;
+        await expect(page.locator('.calc-formula-status')).toContainText('Calculation cancelled');
+        await expect(namedCell(page, 'A1')).toHaveText(workerFormula);
+        await expect.poll(persistedCells).toEqual([
+            expect.objectContaining({ formula: workerFormula, value: { type: 'Empty' } }),
+            expect.objectContaining({ formula: null, value: { type: 'Number', value: 9 } }),
+        ]);
+
+        const timedOut = page.waitForEvent('worker', worker => worker.url().endsWith('/assets/calc-worker.js'));
+        await page.getByRole('button', { name: 'Recalculate formulas', exact: true }).click();
+        const timedOutClosed = (await timedOut).waitForEvent('close');
+        await page.clock.fastForward(10_001);
+        await timedOutClosed;
+        await expect(page.locator('.calc-formula-status')).toContainText('Formula calculation timed out');
+
+        await page.evaluate(() => { Reflect.deleteProperty(window, 'holdCalculation'); });
+        await page.getByRole('button', { name: 'Recalculate formulas', exact: true }).click();
+        await expect(namedCell(page, 'A1')).toHaveText('9');
+    });
+});
+
 /** Exercise physical pointer events rather than the selection or Fill buttons. */
 async function dragBetween(source: Locator, destination: Locator) {
     await source.dragTo(destination, { steps: 12 });
