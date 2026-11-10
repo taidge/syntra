@@ -5,13 +5,16 @@
 use std::error::Error as StdError;
 use std::ops::{Deref, DerefMut};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use contrix_core::config::DatabaseConfig;
-use diesel::connection::{TransactionManager, TransactionManagerStatus};
+use anyhow::Context;
+use contrix_core::{config::DatabaseConfig, error::AppError};
+use diesel::connection::{
+    Instrumentation, InstrumentationEvent, TransactionManager, TransactionManagerStatus,
+};
 use diesel::result::{Error, QueryResult};
 use diesel::{Connection, SqliteConnection};
 use diesel_async::pooled_connection::deadpool::{Object, Pool};
@@ -22,6 +25,11 @@ use diesel_async::sync_connection_wrapper::{SpawnBlocking, SyncConnectionWrapper
 use futures_util::future::BoxFuture;
 use horme::GetConnection;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+
+use crate::middleware::request_observability::{
+    WorkerPhase, current_database_observation, current_database_operation,
+    observe_database_operation, observe_statement, with_database_observation,
+};
 
 pub type DbConnection = SyncConnectionWrapper<SqliteConnection, SqliteRuntime>;
 
@@ -45,13 +53,54 @@ pub struct SqliteRuntime {
     operation_timeout: Duration,
 }
 impl SqliteRuntime {
-    fn new(operation_timeout: Duration) -> Self {
+    pub(crate) fn new(operation_timeout: Duration) -> Self {
         Self {
             tail: None,
             operation_timeout,
         }
     }
 }
+
+#[derive(Default)]
+struct SqliteObservation {
+    query_started: Option<Instant>,
+}
+
+impl Instrumentation for SqliteObservation {
+    fn on_connection_event(&mut self, event: InstrumentationEvent<'_>) {
+        observe_statement(|observation, operation| match event {
+            InstrumentationEvent::StartQuery { .. } => {
+                self.query_started = Some(Instant::now());
+                observation
+                    .statements_started
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(operation) = operation {
+                    operation.statements_started.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            InstrumentationEvent::FinishQuery { error, .. } => {
+                if let Some(started) = self.query_started.take() {
+                    observation
+                        .sql_run_us
+                        .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    observation
+                        .statements_completed
+                        .fetch_add(1, Ordering::Relaxed);
+                    if let Some(operation) = operation {
+                        operation
+                            .statements_completed
+                            .fetch_add(1, Ordering::Release);
+                    }
+                }
+                if let Some(error) = error {
+                    observation.record_pressure(&AppError::Database(error.to_string()));
+                }
+            }
+            _ => {}
+        });
+    }
+}
+
 impl SpawnBlocking for SqliteRuntime {
     fn get_runtime() -> Self {
         Self::new(Duration::from_secs(15))
@@ -67,11 +116,32 @@ impl SpawnBlocking for SqliteRuntime {
         let predecessor = self.tail.take();
         let (finished, next) = oneshot::channel();
         self.tail = Some(next);
+        let observation = current_database_observation();
+        let worker_observation = observation.clone();
+        let operation = current_database_operation();
+        let worker_operation = operation.clone();
         let worker = tokio::spawn(async move {
             if let Some(predecessor) = predecessor {
+                if let Some(progress) = &worker_operation {
+                    progress.set_phase(WorkerPhase::WaitingPredecessor);
+                }
                 let _ = predecessor.await;
             }
-            let result = tokio::task::spawn_blocking(task).await;
+            if let Some(progress) = &worker_operation {
+                progress.set_phase(WorkerPhase::BlockingQueue);
+            }
+            let result = tokio::task::spawn_blocking(move || {
+                if let Some(progress) = &worker_operation {
+                    progress.set_phase(WorkerPhase::Running);
+                }
+                let result =
+                    with_database_observation(worker_observation, worker_operation.clone(), task);
+                if let Some(progress) = &worker_operation {
+                    progress.set_phase(WorkerPhase::Returning);
+                }
+                result
+            })
+            .await;
             let _ = finished.send(());
             result
         });
@@ -80,9 +150,14 @@ impl SpawnBlocking for SqliteRuntime {
             let result = tokio::time::timeout(timeout, worker)
                 .await
                 .map_err(|_| -> BoxError {
-                    Box::new(std::io::Error::other(
-                        "database operation timed out; cleanup remains admitted",
-                    ))
+                    const TIMEOUT: &str = "database operation timed out; cleanup remains admitted";
+                    if let Some(observation) = observation {
+                        observation.record_pressure(&AppError::Database(TIMEOUT.into()));
+                        if let Some(operation) = operation {
+                            observation.record_operation_timeout(&operation);
+                        }
+                    }
+                    Box::new(std::io::Error::other(TIMEOUT))
                 })?;
             result
                 .map_err(|error| -> BoxError { Box::new(error) })?
@@ -95,10 +170,43 @@ struct Inner {
     provider: horme::Db<Pool<DbConnection>>,
     admission: Arc<Semaphore>,
     checkout_timeout: Duration,
+    operation_timeout: Duration,
     admitted: AtomicUsize,
     checkouts: AtomicU64,
     #[cfg(test)]
     setup_activity: Arc<SetupActivity>,
+}
+
+struct StartupCheckoutProgress(Mutex<(&'static str, Instant)>);
+
+impl StartupCheckoutProgress {
+    fn new() -> Self {
+        Self(Mutex::new(("pool acquisition", Instant::now())))
+    }
+
+    fn advance(&self, stage: &'static str) {
+        let (previous, started_at) = {
+            let mut progress = self.0.lock().unwrap();
+            std::mem::replace(&mut *progress, (stage, Instant::now()))
+        };
+        tracing::debug!(
+            stage = previous,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "Startup database connection stage completed"
+        );
+    }
+
+    fn failure_context(&self) -> String {
+        let (stage, started_at) = *self.0.lock().unwrap();
+        format!(
+            "Startup database checkout failed during {stage} ({} ms in stage)",
+            started_at.elapsed().as_millis()
+        )
+    }
+}
+
+tokio::task_local! {
+    static STARTUP_CHECKOUT_PROGRESS: Arc<StartupCheckoutProgress>;
 }
 
 #[cfg(test)]
@@ -225,9 +333,7 @@ impl Database {
             .filter(|size| *size <= Semaphore::MAX_PERMITS)
             .ok_or_else(|| failure("database admission capacity too large"))?;
         let busy_ms = busy_timeout.as_millis().min(i32::MAX as u128);
-        let settings = format!(
-            "PRAGMA busy_timeout={busy_ms}; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
-        );
+        let busy_setting = format!("PRAGMA busy_timeout={busy_ms};");
         let mut manager_config = ManagerConfig::default();
         manager_config.recycling_method = RecyclingMethod::Fast;
         #[cfg(test)]
@@ -236,10 +342,17 @@ impl Database {
         let manager_activity = setup_activity.clone();
         manager_config.custom_setup = Box::new(move |url| {
             let url = url.to_owned();
-            let settings = settings.clone();
+            let busy_setting = busy_setting.clone();
+            let progress = STARTUP_CHECKOUT_PROGRESS.try_with(Arc::clone).ok();
             #[cfg(test)]
             let setup_activity = manager_activity.clone();
             Box::pin(async move {
+                let advance = move |stage| {
+                    if let Some(progress) = &progress {
+                        progress.advance(stage);
+                    }
+                };
+                advance("blocking worker queue");
                 let connection = tokio::task::spawn_blocking(move || {
                     use diesel::connection::SimpleConnection;
                     #[cfg(test)]
@@ -249,10 +362,20 @@ impl Database {
                         setup_activity.started.fetch_add(1, Ordering::SeqCst);
                         SetupWorker(setup_activity)
                     };
+                    advance("SQLite open");
                     let mut connection = SqliteConnection::establish(&url)?;
-                    connection.batch_execute(&settings).map_err(|error| {
-                        diesel::ConnectionError::BadConnection(error.to_string())
-                    })?;
+                    for (stage, sql) in [
+                        ("SQLite busy timeout", busy_setting.as_str()),
+                        ("SQLite WAL setup", "PRAGMA journal_mode=WAL;"),
+                        ("SQLite synchronous setup", "PRAGMA synchronous=NORMAL;"),
+                    ] {
+                        advance(stage);
+                        connection.batch_execute(sql).map_err(|error| {
+                            diesel::ConnectionError::BadConnection(error.to_string())
+                        })?;
+                    }
+                    advance("pool checkout completion");
+                    connection.set_instrumentation(SqliteObservation::default());
                     Ok::<_, diesel::ConnectionError>(connection)
                 })
                 .await
@@ -274,6 +397,7 @@ impl Database {
             provider: horme::Db::new(pool),
             admission: Arc::new(Semaphore::new(admitted)),
             checkout_timeout,
+            operation_timeout,
             admitted: AtomicUsize::new(0),
             checkouts: AtomicU64::new(0),
             #[cfg(test)]
@@ -310,18 +434,44 @@ impl Database {
             .await
             .map_err(query_error)
             .map_err(E::from)?;
+        observe_database_operation(|| {
+            connection.spawn_blocking(move |connection| Ok(callback(connection)))
+        })
+        .await
+        .map_err(E::from)?
+    }
+
+    /// Open the first pooled connection and run migrations before starting
+    /// traffic. The short request lease deadline also covers queueing, so it
+    /// can mask the SQLite busy timeout during cold connection setup.
+    pub async fn run_startup_migrations<F>(&self, callback: F) -> anyhow::Result<()>
+    where
+        F: FnOnce(&mut SqliteConnection) -> anyhow::Result<()> + Send + 'static,
+    {
+        let progress = Arc::new(StartupCheckoutProgress::new());
+        let timeout = self.0.checkout_timeout.max(self.0.operation_timeout);
+        let started_at = Instant::now();
+        let mut connection = self
+            .checkout(timeout, Some(progress.clone()))
+            .await
+            .map_err(query_error)
+            .with_context(|| progress.failure_context())?;
+        tracing::info!(
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "Startup database connection ready"
+        );
         connection
             .spawn_blocking(move |connection| Ok(callback(connection)))
             .await
-            .map_err(E::from)?
+            .context("Startup database migration worker failed")?
+            .context("Startup database migrations failed")
     }
-}
 
-impl GetConnection for Database {
-    type Connection = DbConnection;
-    type Lease<'a> = DatabaseLease;
-
-    async fn get_mut_conn(&mut self) -> horme::Result<Self::Lease<'_>> {
+    async fn checkout(
+        &self,
+        timeout: Duration,
+        startup: Option<Arc<StartupCheckoutProgress>>,
+    ) -> horme::Result<DatabaseLease> {
         let permit = self
             .0
             .admission
@@ -339,19 +489,53 @@ impl GetConnection for Database {
         // its blocking worker finishes. A late lease follows the usual cleanup.
         let checkout = tokio::spawn(async move {
             let mut provider = inner.provider.clone();
-            let connection = provider.get_mut_conn().await?;
+            let acquisition = provider.get_mut_conn();
+            let connection = match startup {
+                Some(progress) => STARTUP_CHECKOUT_PROGRESS.scope(progress, acquisition).await,
+                None => acquisition.await,
+            }?;
             inner.checkouts.fetch_add(1, Ordering::Relaxed);
             Ok::<_, horme::Error>(DatabaseLease {
                 connection: Some(connection),
                 admission: Some(admission),
             })
         });
-        tokio::time::timeout(self.0.checkout_timeout, checkout)
+        tokio::time::timeout(timeout, checkout)
             .await
             .map_err(|_| horme::Error::from(failure("database checkout timed out")))?
             .map_err(|error| {
                 horme::Error::from(failure(format!("database checkout task failed: {error}")))
             })?
+    }
+}
+
+impl GetConnection for Database {
+    type Connection = DbConnection;
+    type Lease<'a> = DatabaseLease;
+
+    async fn get_mut_conn(&mut self) -> horme::Result<Self::Lease<'_>> {
+        let Some(observation) = current_database_observation() else {
+            return self.checkout(self.0.checkout_timeout, None).await;
+        };
+        let started = Instant::now();
+        observation
+            .checkout_attempts
+            .fetch_add(1, Ordering::Relaxed);
+        let result = self.checkout(self.0.checkout_timeout, None).await;
+        observation
+            .checkout_wait_us
+            .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        match &result {
+            Ok(_) => {
+                observation
+                    .checkouts_acquired
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                observation.record_pressure(&AppError::Database(error.to_string()));
+            }
+        }
+        result
     }
 }
 
@@ -676,6 +860,85 @@ mod tests {
             42,
             "a late setup and cancelled waiter must both retire cleanly"
         );
+        settled(&database).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_exposes_sqlite_setup_failure_and_reuses_the_migration_connection() {
+        use diesel::connection::SimpleConnection;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("startup.sqlite");
+        let url = path.to_string_lossy();
+        let mut lock = SqliteConnection::establish(&url).unwrap();
+        lock.batch_execute(
+            "PRAGMA journal_mode=DELETE; CREATE TABLE existing(value INTEGER); BEGIN EXCLUSIVE;",
+        )
+        .unwrap();
+
+        // This lock outlasts the short request checkout deadline. Startup
+        // must expose the SQLite setup failure before attempting migrations.
+        let database = Database::with_timeouts(
+            &url,
+            1,
+            Duration::from_millis(25),
+            Duration::from_secs(5),
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        let error = database
+            .run_startup_migrations(|_| panic!("migrations ran without a ready connection"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("SQLite WAL setup"), "{error:#}");
+        assert!(format!("{error:#}").contains("database is locked"));
+        assert_eq!(database.state().checkouts, 0);
+
+        lock.batch_execute("ROLLBACK").unwrap();
+        drop(lock);
+        database
+            .run_startup_migrations(|connection| {
+                connection.batch_execute(
+                    "CREATE TEMP TABLE startup_probe(value INTEGER); \
+                     INSERT INTO startup_probe VALUES (42);",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        settled(&database).await;
+        assert_eq!(database.state().checkouts, 1);
+
+        #[derive(diesel::QueryableByName)]
+        struct Probe {
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            value: i32,
+        }
+        let mut provider = database.clone();
+        let probe: Probe = diesel::sql_query("SELECT value FROM startup_probe")
+            .get_result(&mut provider)
+            .await
+            .unwrap();
+        assert_eq!(probe.value, 42);
+        assert_eq!(database.0.setup_activity.started.load(Ordering::SeqCst), 2);
+        settled(&database).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_distinguishes_migration_errors_from_connection_errors() {
+        use diesel::connection::SimpleConnection;
+
+        let (_directory, database) = single_slot(5_000);
+        let error = database
+            .run_startup_migrations(|connection| {
+                connection.batch_execute("INSERT INTO absent_table VALUES (1);")?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Startup database migrations failed");
+        assert!(format!("{error:#}").contains("no such table: absent_table"));
+        assert_eq!(database.state().checkouts, 1);
         settled(&database).await;
     }
 

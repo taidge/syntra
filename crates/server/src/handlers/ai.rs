@@ -117,6 +117,7 @@ pub async fn assist(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     };
 
     let Some(ai) = state.ai.as_ref() else {
+        crate::middleware::request_observability::record_failure("ai_assist", "ai_disabled");
         render_error(
             res,
             StatusCode::SERVICE_UNAVAILABLE,

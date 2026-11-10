@@ -81,7 +81,13 @@ pub async fn authorize_file_access(
     user_id: &str,
     required_role: &str,
 ) -> Result<(), AppError> {
-    crate::services::tenancy::ensure_same_tenant_async(conn, user_id, &row.owner_id).await?;
+    if row.owner_id == user_id {
+        // Owner access still checks tenant activity. Both operands previously
+        // queried the same user separately, taking two short leases.
+        crate::services::tenancy::user_tenant_async(conn, user_id).await?;
+    } else {
+        crate::services::tenancy::ensure_same_tenant_async(conn, user_id, &row.owner_id).await?;
+    }
     if let Some(room_id) = row.room_id.as_deref() {
         check_room_access(conn, user_id, room_id, required_role).await
     } else if row.owner_id == user_id {
@@ -143,16 +149,20 @@ pub async fn load_accessible_document(
 ) -> Result<Option<File>, AppError> {
     use contrix_core::schema::documents::dsl as d;
 
-    let file_id = d::documents
+    let row = d::documents
+        .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(document_id))
-        .select(d::file_id)
-        .first::<String>(conn)
+        .select(File::as_select())
+        .first::<File>(conn)
         .await
         .optional()
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-    match file_id {
-        Some(fid) => load_accessible_file(conn, &fid, user_id, required_role).await,
+    match row {
+        Some(row) => {
+            authorize_file_access(conn, &row, user_id, required_role).await?;
+            Ok(Some(row))
+        }
         None => Ok(None),
     }
 }

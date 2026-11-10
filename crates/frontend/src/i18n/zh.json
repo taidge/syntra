@@ -145,6 +145,7 @@
   "editor.loading_document": "正在加载文档...",
   "editor.failed_load": "加载失败:{err}",
   "editor.save_failed": "保存失败:{err}",
+  "editor.save_unconfirmed": "无法确认保存结果。本地修改已保留，请再次点击保存。",
   "editor.export_succeeded": "已导出为 {fmt}",
   "editor.export_failed": "导出失败:{err}",
   "editor.coming_soon": "即将推出:{what}",

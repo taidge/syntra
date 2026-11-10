@@ -1,5 +1,6 @@
 //! Atomic database commits for immutable blobs and durable deferred cleanup.
 use super::StorageBackend;
+use crate::middleware::request_observability::with_database_stage;
 use crate::state::DbPool;
 use chrono::Utc;
 use contrix_core::error::AppError;
@@ -844,8 +845,8 @@ async fn commit_document_inner(
         operation_client.clone(),
         request_hash.clone(),
     );
-    let original: (Document, File, Option<i32>) = db
-        .run(move |conn| {
+    let preflight = db.run(move |conn| {
+        conn.transaction::<_, AppError, _>(|conn| {
             if let Some(credential) = &read_credential {
                 crate::middleware::auth::validate_credential_in_transaction(
                     conn,
@@ -854,40 +855,44 @@ async fn commit_document_inner(
                     &credential.path,
                 )?;
             }
-            let document = d::documents.find(&read_id).first::<Document>(conn)?;
-            let file = f::files.find(&document.file_id).first::<File>(conn)?;
+            let (version, file) = d::documents
+                .inner_join(f::files.on(d::file_id.eq(f::id)))
+                .filter(d::id.eq(&read_id))
+                .select((d::version, File::as_select()))
+                .first::<(i32, File)>(conn)?;
             authorize(conn, &file, &read_user, "editor")?;
             if let (Some((client, counter)), Some(hash)) = (&read_client, &read_hash)
                 && let Some(version) =
                     check_operation_receipt(conn, &read_id, &read_user, client, *counter, hash)?
             {
-                return Ok((document, file, Some(version)));
+                return Ok((file, Some(version)));
             }
-            if document.version != expected_version {
+            if version != expected_version {
                 return Err(AppError::Conflict(
                     "Document changed; reload before saving".into(),
                 ));
             }
-            Ok((document, file, None))
+            Ok((file, None))
         })
-        .await?;
-    if let Some(version) = original.2 {
+    });
+    let (original, replayed_version): (File, Option<i32>) =
+        with_database_stage("document_preflight", preflight).await?;
+    if let Some(version) = replayed_version {
         return Ok(version);
     }
     let owner = original
-        .1
         .owner_id
         .parse()
         .map_err(|_| AppError::Internal("Invalid file owner".into()))?;
     let new_path = storage
         .save_file(
             &owner,
-            &format!("{}.contrix.json", original.1.id),
+            &format!("{}.contrix.json", original.id),
             content.as_bytes(),
         )
         .await?;
     let committed_path = new_path.clone();
-    let result = commit_blob(db, new_path.clone(), move |conn| {
+    let commit = commit_blob(db, new_path.clone(), move |conn| {
         conn.immediate_transaction::<_, AppError, _>(|conn| {
             if let Some(credential) = &credential {
                 crate::middleware::auth::validate_credential_in_transaction(
@@ -991,8 +996,8 @@ async fn commit_document_inner(
             }
             Ok(next)
         })
-    })
-    .await;
+    });
+    let result = with_database_stage("document_metadata_commit", commit).await;
     request_gc(db, storage);
     result
 }

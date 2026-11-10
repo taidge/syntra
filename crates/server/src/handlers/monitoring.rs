@@ -18,9 +18,15 @@ macro_rules! count_or_unavailable {
         match $query.await {
             Ok(value) => value,
             Err(error) => {
-                tracing::warn!(%error,"Monitoring collection failed");
+                use crate::middleware::request_observability::{database_cause, record_failure};
+                let error = AppError::from(error);
+                record_failure("monitoring", database_cause(&error));
                 $res.status_code(StatusCode::SERVICE_UNAVAILABLE);
-                $res.render(Json(ApiResponse::<()>::err(ErrorResponse{code:503,message:"Monitoring temporarily unavailable".into(),details:None})));
+                $res.render(Json(ApiResponse::<()>::err(ErrorResponse {
+                    code: 503,
+                    message: "Monitoring temporarily unavailable".into(),
+                    details: None,
+                })));
                 return;
             }
         }

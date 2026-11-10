@@ -8,7 +8,46 @@
 
 ## 修复执行状态
 
-2026 年 11 月 9 日启动多 agent 修复，更新至 11 月 10 日。本轮 Linux 补充与跨平台修正已完成：**Linux 555 项 Rust、20 项定点重复、Linux/Windows 各 136 项联合 HTTP/浏览器回归，以及两个最终 ZIP 的浏览器与强停重启验收通过**，最终联合运行均无重试。严格 Clippy、默认配置、WASM/release 与真实 S3 兼容服务的 3 项独立验收亦通过。各轮数量分别记录，不累加为独立测试数。最终 8 并发负载仍有 **0.75% 的 503 拒绝**，未再出现 500 或传输错误，这项容量边界如实保留。**O02 及 O03 的容器验收尚未完成**，需要数据位于 D 盘或远端的 builder；macOS 和 AWS 生产桶仍未验证，启动 checkout 超时另列后续专项。
+2026 年 11 月 9 日启动多 agent 修复。11 月 10 日的 `19d7409` 已通过 **Linux 555 项 Rust、20 项定点重复、Linux/Windows 各 136 项联合 HTTP/浏览器回归，以及两个 ZIP 的浏览器与强停重启验收**。联合运行均无重试，真实 Garage 兼容服务的 3 项验收亦通过。该版本的 8 并发测量保留 **0.75% 的 503 拒绝**。11 月 11 日续修完成 D 盘上的 Linux/amd64 容器实测，并加入鉴权容量、启动诊断和本地冷备演练。各轮证据分别列出，macOS 与真实 AWS 桶仍待运行验证。
+
+### 11 月 11 日续修
+
+从已验收的本地提交 `19d7409` 继续。并行推进请求鉴权与数据库容量、启动可靠性、容器与发布门禁，以及配套冷备恢复。此前 Windows/Linux ZIP 和容量数据保留原身份。
+
+- JWT/API key 使用一个 SQLite 快照读取凭证、角色和租户活动状态。活跃时间展示按 30 秒节流，写入后在同一租约内复核授权。文档访问合并文档和文件查询，并减少所有者路径的重复租户读取。事务提交与长连接的撤权复核继续有效。503 增加服务端请求 ID，日志分别记录明确响应原因及同期观察到的数据库压力。SQL 耗时来自 SQLite 执行线程的已完成语句，独立业务任务不在该请求统计内。
+- 启动首连接使用现有 checkout 和 operation 时限中较大的值，启动日志分别标记连接获取、SQLite 初始化及迁移。请求 checkout 和准入参数沿用既有配置。历史 Windows 失败实例退出前已进入 WAL，尚未写入 schema，两次历史超时的具体阶段仍缺证据。
+- 同一源码的 Linux 原生 workspace 复跑 **560 通过、0 失败、4 忽略**，严格 Clippy 通过。新增 3 项鉴权 HTTP 回归实测常规所有者 GET 的 5 次租约与 5 条 SQL、节流写入、即刻撤权和 503 的请求 ID 关联；两项启动回归覆盖真实 SQLite 独占锁、迁移连接复用和迁移错误分类。首轮全量有 16 项服务器单元失败，部分明确停留在 WAL 初始化，其余主要是 checkout 或清理超时。事后 WSL I/O 压力采样及同一 ELF 锁用例 0.278 秒的通过记录均保留，无法将每次失败单独归因。 [全量结果](E:/Works/arkret-org/convert/office/target/review-phase3-validation/linux-rerun-summary.json) · [首轮失败](E:/Works/arkret-org/convert/office/target/review-phase3-validation/linux-workspace-first-failure.log) · [启动调查](E:/Works/arkret-org/convert/office/target/review-phase3-validation/linux-startup-investigation.json) · [Clippy](E:/Works/arkret-org/convert/office/target/review-phase3-validation/linux-clippy.log)
+- 新增 CI 容器验收及三平台 ZIP 验收。Intel macOS 的 `x86_64-apple-darwin` ZIP 使用匹配的 `macos-15-intel` runner，同批 ZIP 共用一次 Web 构建。容器和 ZIP 共用静态资源哈希、真实浏览器和强停重启断言。静态工作流检查已通过，GitHub 托管 runner 的实际结果待执行。 [Actionlint 记录](E:/Works/arkret-org/convert/office/target/review-phase3-delivery-actionlint.log) · [GitHub runner 架构说明](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)
+- O02/O03 的 Linux/amd64 镜像已在项目专用 D 盘 WSL2 rootless builder 上从干净上下文构建。注册表、VHDX、实际挂载设备、Docker/BuildKit、containerd 数据根和运行时卷均核对为同一 D 盘 ext4。现有 Docker Desktop 数据盘仍在 C。独立原始工作区归档逐项核对 2482 个镜像上下文条目，2478 个字节相同，四个差异均为期间编辑的报告或 README，编译输入全匹配。 [构建存储](E:/Works/arkret-org/convert/office/target/office-container-storage-proof.json) · [运行时存储](E:/Works/arkret-org/convert/office/target/office-container-runtime-storage-proof.json) · [上下文核对](E:/Works/arkret-org/convert/office/target/office-container-context-crosscheck.json) · [构建日志](E:/Works/arkret-org/convert/office/target/office-container-build-phase3.log) · [WSL 导入文档](https://learn.microsoft.com/windows/wsl/reference)
+- 镜像 `sha256:4ce2efc2c7c496a34d19c70e5c12a9ee77e463e6132f065ed55623a2fa268ad0` 以生产配置、非 root 用户启动，HTTP 资源与镜像内文件哈希匹配。Chromium 登录保存、REST 下载、SIGKILL 后同卷恢复、WebSocket ACK 持久化和重放幂等均通过。首轮功能断言通过后本地包装器因 PowerShell 变量同名导致清理失败，已按容器和卷身份清理；中间一次包装器作用域校验在启动前失败。修正包装器并将通过报告移到清理之后，最终完整烟测退出码 0，确认无测试容器和卷遗留。镜像已导出，压缩包 SHA-256 为 `5a6b6e87accbdc3c7add4458f2df8552cb9ebd4921b7543bcc88381ea39c59ca`。 [最终烟测](E:/Works/arkret-org/convert/office/target/package-smoke/72406505711549ce8171b27f08136c32/result.json) · [首轮清理失败](E:/Works/arkret-org/convert/office/target/office-container-smoke-phase3.log) · [镜像文件](D:/Works/arkret-org/office-container-validation-20261111/contrix-office-linux-amd64-20261111.tar.gz)
+- 使用上一轮 Windows release ZIP 完成真实冷备恢复演练。停止源进程后复制 SQLite、仍有效的 1,623,312 字节 WAL、当前文档对象和上传原件，共四个文件。只复制主数据库时缺少该文档。配套恢复到全新实例后，完整性检查、登录、Writer v3、两条历史记录和两类下载字节全部通过。负向副本删除及同长度修改均被清单检出，原备份哈希保持一致。演练范围为本地存储。 [运行结果](E:/Works/arkret-org/convert/office/target/disaster-recovery/3d63c264cd884b2f9c0d2236580b69a8/result.json) · [独立清单核验](E:/Works/arkret-org/convert/office/target/disaster-recovery/3d63c264cd884b2f9c0d2236580b69a8/independent-verification.json)
+
+当前 Linux 原生 release `f365ce56…a3b102a5b` 另行通过 **136/136** HTTP/Chromium 回归，无失败、跳过或重试。新 ZIP 同样通过浏览器、REST 与 WebSocket 强停恢复、操作重放和 ELF `755` 校验，前一轮 ZIP 保留原路径。新版 ZIP 的本地冷备演练也通过。Linux 演练首轮因 PowerShell 子进程发现 metadata 超时而未启动，脚本改为直接调用 `cargo metadata --no-deps --format-version 1` 后复验。 [原生 release 构建](E:/Works/arkret-org/convert/office/target/review-phase3-validation/phase3-native-release-build.log) · [136 项结果](E:/Works/arkret-org/convert/office/target/review-phase3-validation/phase3-native-e2e-result.json) · [ZIP 烟测](E:/Works/arkret-org/convert/office/target/review-phase3-validation/phase3-native-package-smoke-result.json) · [新 Linux ZIP](E:/Works/arkret-org/convert/office/target/dist/contrix-office-x86_64-unknown-linux-gnu-phase3.zip) · [新 ZIP 冷备结果](E:/Works/arkret-org/convert/office/target/review-phase3-validation/linux-disaster-recovery-result.json)
+
+镜像导出独立验证了配置和全部 6 层摘要，D 盘验证实例在容器及卷清空后停止，保留镜像与项目专用 VHDX。 [镜像校验](E:/Works/arkret-org/convert/office/target/office-container-artifact-proof.json) · [隔离实例清理](E:/Works/arkret-org/convert/office/target/office-container-shutdown-proof.json)
+
+容量复测保持连接池 5、准入 10、每 worker 100 次、90% GET/10% CAS PUT 和零自动重试。普通文档混合流结束后，再以独立大文档运行 30 次串行导出并发冷文档读取，2 MiB 只适用于后一阶段。旧原生 ELF 与新容器 ELF 都在同一 Ubuntu 主机独立运行。2 并发两组均 200/200，吞吐 78.96 与 79.93 req/s；8 并发两轮均 800/800，正序旧/新 79.80/70.46 req/s，反序新/旧 70.86/72.83 req/s。编译工具链分别为 Rust 1.98.1 和 1.99.1，且交换顺序后差距缩小，因果归因仍需同工具链数据。旧 Windows 0.75% 的失败记录保留。 [首轮数据](E:/Works/arkret-org/convert/office/target/review-phase3-validation/performance/summary.json) · [反序新版](E:/Works/arkret-org/convert/office/target/review-phase3-validation/performance/after-8-reverse.json) · [反序旧版](E:/Works/arkret-org/convert/office/target/review-phase3-validation/performance/before-8-reverse.json)
+
+相同 Rust 1.98.1 的两个原生 release 二进制随后按相同参数重新执行。旧版一次启动返回 `database checkout timed out`，测试流未执行。新版该组 200/200。两轮 8 并发均保留实际失败及耗时。
+
+| 8 并发 | 成功/请求 | 成功 req/s | GET / PUT p95 ms | 失败 |
+| --- | ---: | ---: | --- | --- |
+| 旧版，正序 | 798/800 | 79.86 | 115.89 / 113.18 | GET 2 次 503 |
+| 新版，正序 | 799/800 | 41.41 | 115.36 / 121.14 | PUT 1 次 503，操作时限 |
+| 新版，反序 | 794/800 | 39.90 | 109.31 / 174.08 | PUT 3 次 429、2 次准入 503、1 次操作时限 503 |
+| 旧版，反序 | 800/800 | 72.25 | 125.16 / 127.19 | 0 |
+
+新版两轮 GET 均为 720/720。两次超时请求的服务器耗时约 15 秒，请求 ID 与 `documents / operation_timeout` 日志吻合。HTTP 任务的前置 4 次租约及 4 条语句均完成，实际 SQL 计时各小于 0.3ms。保存进入独立任务后，现有请求统计缺少其内部阶段。两个新版场景全程的 WSL I/O full stall 累计分别约 12.45 和 29.87 秒，两个旧版 8 并发场景分别约 0.07 和 0.10 秒。采样覆盖混合和独立导出阶段，无法分配到单条请求或据此归因吞吐变化。 [同工具链原始数据摘要与请求日志](E:/Works/arkret-org/convert/office/target/review-phase3-validation/performance/matched-native-summary.json)
+
+从原数据库和 WAL 字节只读校验帧校验和，在内存重建后做 SQLite 完整性检查。正序超时的内容实际成为 v4，其后续历史证明元数据提交成功，事务内记录时间早于 503 约 15 秒。现有证据无法确定提交相对 503 的准确先后。反序超时的内容未进入版本历史，残留一条吻合时间和文件 ID 的 `writing` 租约，物理对象不存在。证据支持超时发生在对象登记的数据库操作附近，仍缺具体 SQL 或 worker 完成阶段。收到 503 的客户端应按版本重新读取状态，再用 CAS 决定是否保存。下一步关联保存任务内的凭证复核、预检、对象登记及最终写事务，并区分 worker 排队和实际运行，再验证保存超时与容量。 [只读 WAL 核对](E:/Works/arkret-org/convert/office/target/review-phase3-validation/performance/save-timeout-wal-evidence.json)
+
+修正 metadata 发现方式后，冷备脚本在新版 Linux ZIP 和上一轮 Windows ZIP 上分别完成默认入口复验。Windows workspace Rust 构建期间读到了续修后的前端源码，依赖仍使用启动时的 feature 集合，因缺少 `RequestCache` 编译失败；当前清单已声明该 feature，完整 Windows 复验仍待重跑。上一轮 Windows 包的通过记录保留其原二进制身份。Intel macOS 与 AWS 专用桶仍需真实环境结果。 [Windows 冷备复验](E:/Works/arkret-org/convert/office/target/disaster-recovery/70b08eefdb504a22b3eb2043ea1cb008/result.json) · [本轮 Windows 构建日志](E:/Works/arkret-org/convert/office/target/review-phase3-validation/workspace-tests.log)
+
+### 11 月 11 日保存超时续修
+
+- 文档保存任务继承 HTTP 请求 ID。503 日志区分文档预检、对象登记、对象写入完成及最终元数据提交，也区分数据库 worker 排队、执行和返回阶段。保存前的凭证、权限和版本复核共用一次读取事务，最终写事务再次复核。已就绪对象的附加检查使用只读路径。
+- Writer、Slides、Whiteboard 和 Calc 遇到保存响应丢失或网关超时时，重新读取一次文档。只有服务器版本推进且内容匹配已提交草稿时才确认保存，验证期间新输入的草稿继续保留。新增五项浏览器回归，待新 Web 构建实跑。
+- Linux 定点运行的服务端单元测试为 88 通过、5 失败，涉及数据库 checkout 超时及测试同步通道提前关闭。鉴权集成测试前三项通过，新增写锁用例的会话字段名错误已修正，待重跑。对象登记超时后仍可能留下无实体文件的 `writing` 记录，过期回收与保存容量均待复验。上述 ZIP 和容器结果对应上一轮产物。
 
 ### 第一轮历史摘要
 
@@ -103,7 +142,7 @@ Rust 总数内含：89 项服务端单元、146 项 API、17 项外部高级格�
 后续优先级：
 
 1. **容量与可观测性：** 针对已确认的认证/租户检查准入拒绝，统计每请求的数据库租约数、排队与 SQL 耗时，评估共享读事务或满足撤权一致性要求的缓存；使用相同请求参数建立并发阶梯与明确 SLO。为所有 503 分支增加无凭据的原因与请求关联，确认默认 503 的实际来源。当前 5 连接下的 8 workers 不是零拒绝容量。
-2. **运行平台：** Linux 原生验证结果见下节；继续在合规 Docker builder 和真实 macOS 上验证当前源代码与发行包。AWS 生产兼容性应使用专用测试桶独立验证。
+2. **运行平台：** Linux 原生与 D 盘 Docker 验收见执行记录。Intel macOS 的真实运行仍待托管 runner，AWS 兼容性仍待专用测试桶。
 3. **灾备与产品能力：** 建立数据库与 blob 的一致备份/恢复演练；复杂 Office 排版/播放、更广泛图表和透视功能、离线协作、全面可访问性继续作为产品能力建设，不能以本轮回归替代认证。
 4. **启动可靠性：** 两个独立诊断/基线实例曾在测试开始前因数据库 checkout 超时退出，分别保留 Linux 和 Windows 记录；完整验收的其他独立实例成功不能解释这些失败。需在受控负载下区分池初始化、连接创建与调度耗时，再决定是否改启动准入或时限；失败后的资源采样不构成原因证明。
 
@@ -199,13 +238,13 @@ Rust 总数内含：89 项服务端单元、146 项 API、17 项外部高级格�
 | F07 | [标准样式表](E:/Works/arkret-org/convert/office/crates/export/src/xlsx_styles.rs:11) | [标准样式 parts 与索引](E:/Works/arkret-org/convert/office/crates/export/tests/review_regressions.rs:30) |
 | F08 | [外部页序、布局与元素](E:/Works/arkret-org/convert/office/crates/export/src/pptx_import.rs:991)、[标准导入入口](E:/Works/arkret-org/convert/office/crates/export/src/pptx.rs:1067) | [外部页序与告警](E:/Works/arkret-org/convert/office/crates/export/tests/review_regressions.rs:54)、[浏览器原件下载](E:/Works/arkret-org/convert/office/e2e/tests/review.ui.spec.ts:75) |
 | O01 | [metadata 与路径前置检查](E:/Works/arkret-org/convert/office/scripts/workspace.ps1:2) | 正常环境 metadata、PowerShell 解析、调用者环境不变验证 |
-| O02 | [完整容器构建](E:/Works/arkret-org/convert/office/docker/Dockerfile:1) | 静态配置已核对；真实镜像构建仍待符合存储约束的 builder |
-| O03 | [完整 ZIP 组装](E:/Works/arkret-org/convert/office/scripts/package.ps1:1) | [无源码目录、资源哈希、浏览器登录保存与重启](E:/Works/arkret-org/convert/office/scripts/test-package.ps1:1)；容器部分同 O02 |
+| O02 | [完整容器构建](E:/Works/arkret-org/convert/office/docker/Dockerfile:1) | [D 盘隔离 builder 实际构建](E:/Works/arkret-org/convert/office/target/office-container-build-phase3.log)与[镜像运行验收](E:/Works/arkret-org/convert/office/target/package-smoke/72406505711549ce8171b27f08136c32/result.json) |
+| O03 | [完整 ZIP 组装](E:/Works/arkret-org/convert/office/scripts/package.ps1:1) | [ZIP 和镜像共用无源码启动、资源哈希、浏览器登录保存与重启验收](E:/Works/arkret-org/convert/office/scripts/test-package.ps1:1) |
 | O04 | [共享事务 purge](E:/Works/arkret-org/convert/office/crates/server/src/services/persistence.rs:1049) | [清理释放配额](E:/Works/arkret-org/convert/office/crates/server/tests/persistence_regressions.rs:343)、[保留对象去重计费](E:/Works/arkret-org/convert/office/crates/server/tests/persistence_regressions.rs:779) |
 
 ## 当前剩余边界与后续事项
 
-- Docker 的真实构建和镜像内浏览器验收尚未执行。当前只发现使用 C 盘现有数据盘的本机 builder；需要数据位于 D 盘或远端的 builder，不能用 Cargo target 位置替代此条件。
+- Docker Linux/amd64 的真实构建和镜像内浏览器验收已在 D 盘独立 builder 执行。继续构建时应核对实际数据根和挂载设备，现有 Docker Desktop 仍使用 C 盘数据盘。托管 CI 的容器门禁及 Intel macOS 包验收仍待实际运行。
 - 第二轮外部 PPTX/XLSX 的实现与能力限制见上文；这些是当前模型可表达的兼容能力，不等同完整 Microsoft Office 兼容性认证或精确排版/播放承诺。
 - Calc 可自动合并不同单元格的并发修改；同格不同输入、并发结构或非单元格元数据变化保守提示冲突。离线 CRDT 合并不在当前协议中，历史窗口外操作需要重新同步。
 - 历史保留、对象登记与分页回收已有第二轮实现，仍依赖后台最终收敛；保留例外、墓碑增长、未知旧对象及数据库分叉共享键的边界见上文。本轮取消、慢写与服务端故障测试不等同真实断电实验。

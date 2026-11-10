@@ -17,6 +17,7 @@ use contrix_export::ExportFormat;
 
 use crate::handlers::access::{check_room_access, load_accessible_target_folder};
 use crate::middleware::auth::get_user_id;
+use crate::middleware::request_observability::{record_failure, with_request_database_observation};
 use crate::services::{StorageBackend, StorageService};
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,7 @@ async fn persist_document_blob(
 }
 
 fn render_error(res: &mut Response, error: AppError) {
+    crate::middleware::request_observability::record_database_response("documents", &error);
     res.status_code(
         StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
     );
@@ -450,6 +452,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let capacity = match CAPACITY.clone().try_acquire_owned() {
         Ok(permit) => std::sync::Arc::new(permit),
         Err(_) => {
+            record_failure("document_save_capacity", "capacity_exhausted");
             render_error(
                 res,
                 AppError::RateLimit("Document save capacity is busy; retry later".into()),
@@ -565,15 +568,8 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     };
     // The owned task retains admission through storage and SQL, even if the
     // HTTP client disconnects while a background commit can still succeed.
-    let committed = tokio::spawn(async move {
+    let committed = tokio::spawn(with_request_database_observation(async move {
         let _capacity = capacity;
-        crate::middleware::auth::validate_credential_for_request(
-            &state,
-            &credential,
-            &salvo::http::Method::PUT,
-            &format!("/api/v1/documents/{id}"),
-        )
-        .await?;
         let version = crate::services::persistence::commit_document_with_credential(
             &state.db,
             &state.storage,
@@ -598,7 +594,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         )
         .await;
         Ok::<_, AppError>(version)
-    })
+    }))
     .await;
     match committed {
         Ok(Ok(version)) => {

@@ -1331,37 +1331,77 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             let (content, revision) = ed.book.with(|b| (b.serialize(), b.revision));
             let id = id.clone();
             let token = token.clone();
+            let weak = weak.clone();
             let expected_version = version.get();
             *submitted.borrow_mut() = Some(content.clone());
             failed.revise(|value| *value = false);
             saving.revise(|v| *v = true);
             ed.status.revise(|v| *v = "Saving…".into());
             let _ = scope.spawn(async move {
-                let req =
-                    serde_json::json!({"content":content,"expected_version":expected_version});
-                match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token)
-                    .await
-                {
-                    Ok(response) => {
-                        if let Some(next_version)=response["version"].as_i64().and_then(|value|i32::try_from(value).ok())
-                            && next_version>=version.get() {
-                            ed.book.revise(|book|book.observe_commit(content,Some(revision)));
-                            version.revise(|value|*value=next_version);
+                let outcome = save_document(&id, &content, expected_version, &token).await;
+                if weak.upgrade().is_none() {
+                    return;
+                }
+                let outcome = if auth.with(|state| state.token.as_deref().unwrap_or_default() == token.as_str()) {
+                    outcome
+                } else {
+                    DocumentSave::Unconfirmed
+                };
+                match outcome {
+                    DocumentSave::Saved(next_version) => {
+                        if next_version >= version.get() && ed.book.with(|book| book.conflict.is_none()) {
+                            ed.book.revise(|book| book.observe_commit(content, Some(revision)));
+                            version.revise(|value| *value = next_version);
+                            ed.status.revise(|value| {
+                                *value = if ed.book.with(|book| book.dirty) { "Unsaved changes" } else { "Saved" }.into();
+                            });
                         }
-                        ed.status.revise(|v| {
-                            *v = if ed.book.with(|b| b.dirty) {
-                                "Unsaved changes".into()
+                    }
+                    DocumentSave::Changed(snapshot) => {
+                        let has_conflict = ed.book.with(|book| book.conflict.is_some());
+                        if snapshot.version > version.get() && (!has_conflict || snapshot.version > remote_version.get()) {
+                            ed.book.revise(|book| {
+                                book.apply_snapshot(snapshot.content);
+                            });
+                            if ed.book.with(|book| book.conflict.is_some()) {
+                                remote_version.revise(|value| *value = snapshot.version);
                             } else {
-                                "Saved".into()
+                                version.revise(|value| *value = snapshot.version);
                             }
+                            ed.layout.revise(|value| *value += 1);
+                        }
+                        failed.revise(|value| *value = ed.book.with(|book| book.dirty));
+                        ed.status.revise(|value| {
+                            *value = ed.book.with(|book| {
+                                if book.conflict.is_some() {
+                                    "Conflict: local edits preserved. Choose a version before saving.".into()
+                                } else if book.dirty {
+                                    crate::i18n::t("editor.save_unconfirmed")
+                                } else {
+                                    "Saved".into()
+                                }
+                            });
                         });
                     }
-                    Err(error) => {
-                        let advanced=version.get()>expected_version&&ed.book.with(|book|book.conflict.is_none());
-                        failed.revise(|value|*value = !advanced);
-                        ed.status.revise(|value|*value=if advanced {
-                            if ed.book.with(|book|book.dirty){"Concurrent changes merged; saving latest edits.".into()}else{"Saved".into()}
-                        }else{format!("Save failed: {error}. Local changes retained; retry Save or reload.")});
+                    DocumentSave::Unconfirmed => {
+                        failed.revise(|value| *value = true);
+                        ed.status.revise(|value| *value = crate::i18n::t("editor.save_unconfirmed"));
+                    }
+                    DocumentSave::Rejected { status, message } => {
+                        let advanced = status == 409 && version.get() > expected_version
+                            && ed.book.with(|book| book.conflict.is_none());
+                        failed.revise(|value| *value = !advanced);
+                        ed.status.revise(|value| {
+                            *value = if advanced {
+                                if ed.book.with(|book| book.dirty) {
+                                    "Concurrent changes merged; saving latest edits.".into()
+                                } else {
+                                    "Saved".into()
+                                }
+                            } else {
+                                format!("Save failed: {message}. Local changes retained; retry Save or reload.")
+                            };
+                        });
                     }
                 }
                 saving.revise(|v| *v = false);

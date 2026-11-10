@@ -3,7 +3,7 @@ use crate::collab_client::CollabHandle;
 use crate::collab_client::ConnectionState;
 #[cfg(target_arch = "wasm32")]
 use crate::collab_client::{CollabMessage, connect_with_reconnect};
-use crate::state::{AuthState, api_get, api_put, export_document};
+use crate::state::{AuthState, DocumentSave, api_get, export_document, save_document};
 use gloo_timers::callback::Timeout;
 use glory::prelude::*;
 use glory::render::EventKind;

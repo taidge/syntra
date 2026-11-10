@@ -7,6 +7,7 @@ use contrix_core::config::StorageConfig;
 use contrix_core::error::AppError;
 use uuid::Uuid;
 
+use crate::middleware::request_observability::with_database_stage;
 use crate::services::s3_storage::S3Storage;
 
 /// Scanner state retains at most 64 open directory iterators, never an entire
@@ -302,7 +303,13 @@ impl StorageBackend {
             .to_string_lossy()
             .replace('\\', "/");
         let lease = match self.registry() {
-            Some(db) => Some(super::maintenance::begin_write(db, &path).await?),
+            Some(db) => Some(
+                with_database_stage(
+                    "blob_write_reservation",
+                    super::maintenance::begin_write(db, &path),
+                )
+                .await?,
+            ),
             None => None,
         };
         let result = match self {
@@ -321,7 +328,7 @@ impl StorageBackend {
         };
         result?;
         if let Some(lease) = lease {
-            lease.finish().await?;
+            with_database_stage("blob_write_finish", lease.finish()).await?;
         }
         Ok(())
     }

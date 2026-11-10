@@ -43,6 +43,22 @@ def request(base, method, path, token=None, body=None, timeout=30):
         raise RuntimeError(f"{method} {path}: HTTP {error.code}, body={text!r}") from error
 
 
+def failure_correlation(error):
+    source = error.__cause__
+    if not isinstance(source, urllib.error.HTTPError) or source.headers is None:
+        return {}
+    value = source.headers.get("X-Request-Id")
+    if not value:
+        return {}
+    try:
+        normalized = str(uuid.UUID(value))
+    except ValueError:
+        return {}
+    if normalized != value.lower():
+        return {}
+    return {"request_id": normalized}
+
+
 def percentiles(samples):
     values = sorted(samples)
     if not values:
@@ -180,7 +196,7 @@ def main():
                 except Exception as error:
                     failures.append({"method": method, "at_request": index,
                         "elapsed_ms": (time.perf_counter() - started) * 1000,
-                        "error": f"{type(error).__name__}: {error}"})
+                        "error": f"{type(error).__name__}: {error}", **failure_correlation(error)})
                     # A timed-out write may still commit. Resync explicitly;
                     # this is outside the timed workload and never retries it.
                     if method == "PUT":
@@ -188,7 +204,8 @@ def main():
                             current = request(base, "GET", "/documents/" + doc["id"], token)
                             version, content = current["version"], current["content"]
                         except Exception as refresh_error:
-                            failures.append({"method": "RESYNC", "error": str(refresh_error)})
+                            failures.append({"method": "RESYNC", "error": str(refresh_error),
+                                             **failure_correlation(refresh_error)})
             return timings, failures
         started = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -238,6 +255,9 @@ def main():
     except Exception as error:
         result["success"] = False
         errors.append(f"{type(error).__name__}: {error}")
+        correlation = failure_correlation(error)
+        if correlation:
+            result["terminal_request_id"] = correlation["request_id"]
     finally:
         stop.set()
         if sampler.is_alive():

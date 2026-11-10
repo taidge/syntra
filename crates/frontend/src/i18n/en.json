@@ -145,6 +145,7 @@
   "editor.loading_document": "Loading document...",
   "editor.failed_load": "Failed to load: {err}",
   "editor.save_failed": "Save failed: {err}",
+  "editor.save_unconfirmed": "Save could not be confirmed. Local changes retained. Press Save to try again.",
   "editor.export_succeeded": "Exported as {fmt}",
   "editor.export_failed": "Export failed: {err}",
   "editor.coming_soon": "Coming soon: {what}",

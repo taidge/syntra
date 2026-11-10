@@ -7,6 +7,7 @@ use salvo::prelude::*;
 
 use contrix_core::schema::ip_restrictions::dsl as ip;
 
+use super::request_observability::{database_cause, record_failure};
 use crate::state::AppState;
 
 /// Whether `client` matches an `ip_range` rule. The rule may be a single IP
@@ -102,15 +103,7 @@ impl IpFilter {
         let state = match depot.obtain::<Arc<AppState>>() {
             Ok(s) => s.clone(),
             Err(_) => {
-                res.status_code(StatusCode::SERVICE_UNAVAILABLE);
-                ctrl.skip_rest();
-                return;
-            }
-        };
-
-        let mut conn = match state.db.get() {
-            Ok(c) => c,
-            Err(_) => {
+                record_failure("ip_filter", "missing_app_state");
                 res.status_code(StatusCode::SERVICE_UNAVAILABLE);
                 ctrl.skip_rest();
                 return;
@@ -126,14 +119,17 @@ impl IpFilter {
         };
 
         // Load all restriction rules.
+        let mut conn = state.db.clone();
         let rules: Vec<(String, String)> = match ip::ip_restrictions
             .select((ip::ip_range, ip::restriction_type))
             .load::<(String, String)>(&mut conn)
             .await
         {
             Ok(rows) => rows,
-            Err(_) => {
+            Err(error) => {
                 // Backpressure must not silently bypass configured IP rules.
+                let error = contrix_core::error::AppError::from(error);
+                record_failure("ip_filter_rules", database_cause(&error));
                 res.status_code(StatusCode::SERVICE_UNAVAILABLE);
                 ctrl.skip_rest();
                 return;

@@ -25,7 +25,9 @@ automatically retried: failed CAS writes trigger an explicitly unmeasured state
 refresh so one transport error does not manufacture subsequent stale writes.
 The result contains successful latency p50/p95/p99, attempted and successful
 throughput, and every failed workload/resync request (including 429/503 or I/O
-errors). The tool exits unsuccessfully when errors occurred.
+errors). If an HTTP failure has a valid `X-Request-Id`, the result records it
+for correlation with the server's overload log. The tool exits unsuccessfully
+when errors occurred.
 
 The second scenario compares independent cold-document GETs before and during
 a fixed count of hot-document JSON exports. Cold sampling stops when the hot
@@ -102,8 +104,8 @@ submodules. Cross-compilation alone does not prove filesystem/network behavior.
 | Host | Executable acceptance | Current environment availability |
 | --- | --- | --- |
 | Windows | workspace tests/Clippy, WASM build, package smoke, raw upload rejection and junction tests | Local native toolchain available |
-| Linux | workspace tests/Clippy, WASM build, package smoke, raw upload rejection and symlink tests | Ubuntu WSL2 with Rust 1.98.1/GCC available; current source runtime gates require execution |
-| macOS | workspace tests/Clippy, WASM build, package smoke and symlink tests | No local macOS runtime; GitHub CI has macos-latest build jobs, but old-revision successes do not validate unpushed edits |
+| Linux | workspace tests/Clippy, WASM build, package smoke, raw upload rejection and symlink tests | Native Ubuntu WSL2 validation workspace available |
+| macOS | workspace tests/Clippy, WASM build, package smoke and symlink tests | CI and release use `macos-15-intel` to validate the Intel ZIP; actual runs require the matching revision on a macOS runner |
 
 On hosts with PowerShell, run `./scripts/check.ps1 -BuildWeb`, then
 `./scripts/package.ps1` and `./scripts/test-package.ps1` with the generated archive
@@ -116,6 +118,11 @@ cargo test --locked --workspace --features contrix-frontend/ssr
 cargo clippy --locked --workspace --all-targets --no-deps --features contrix-frontend/ssr -- -D warnings
 cargo check --locked -p contrix-frontend --lib --target wasm32-unknown-unknown
 ```
+
+For a container image already built with an eligible Docker builder, run
+`./scripts/test-package.ps1 -Image contrix-office -BrowserTests`. It starts the
+production image on a loopback port with an isolated volume and checks assets,
+browser saving, persistence after SIGKILL, and WebSocket replay.
 
 Respect the caller's Cargo and temporary-directory configuration. Do not invoke
 retired cache aliases, mutate global proxy settings, push a branch, trigger paid

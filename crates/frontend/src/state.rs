@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{File, FormData, Headers, Request, RequestInit, RequestMode, Response};
+use web_sys::{File, FormData, Headers, Request, RequestCache, RequestInit, RequestMode, Response};
 
 // ---------------------------------------------------------------------------
 // Client-side auth state
@@ -155,25 +155,36 @@ pub fn clear_auth_state() {
     }
 }
 
-/// Low-level fetch wrapper using `web_sys::Request` + `window.fetch()`.
-async fn fetch_with_opts(
+struct FetchFailure {
+    status: Option<u16>,
+    message: String,
+}
+
+/// Keep the HTTP status for requests whose failure can leave a write in flight.
+async fn fetch_response_text(
     url: &str,
     method: &str,
     body: Option<String>,
     token: &str,
-) -> Result<String, String> {
+    cache: RequestCache,
+) -> Result<String, FetchFailure> {
     let opts = RequestInit::new();
     opts.set_method(method);
     opts.set_mode(RequestMode::SameOrigin);
+    opts.set_cache(cache);
 
-    let headers = Headers::new().map_err(|e| format!("{:?}", e))?;
+    let javascript_error = |error| FetchFailure {
+        status: None,
+        message: format!("{error:?}"),
+    };
+    let headers = Headers::new().map_err(javascript_error)?;
     headers
         .set("Content-Type", "application/json")
-        .map_err(|e| format!("{:?}", e))?;
+        .map_err(javascript_error)?;
     if !token.is_empty() {
         headers
             .set("Authorization", &format!("Bearer {}", token))
-            .map_err(|e| format!("{:?}", e))?;
+            .map_err(javascript_error)?;
     }
     opts.set_headers(&headers);
 
@@ -181,18 +192,26 @@ async fn fetch_with_opts(
         opts.set_body(&wasm_bindgen::JsValue::from_str(&b));
     }
 
-    let request = Request::new_with_str_and_init(url, &opts).map_err(|e| format!("{:?}", e))?;
+    let request = Request::new_with_str_and_init(url, &opts).map_err(javascript_error)?;
 
-    let window = web_sys::window().ok_or_else(|| "no global window object".to_string())?;
+    let window = web_sys::window().ok_or_else(|| FetchFailure {
+        status: None,
+        message: "no global window object".into(),
+    })?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
-        .map_err(|e| format!("{:?}", e))?;
+        .map_err(javascript_error)?;
 
-    let resp: Response = resp_value
-        .dyn_into()
-        .map_err(|_| "fetch did not return a Response".to_string())?;
+    let resp: Response = resp_value.dyn_into().map_err(|_| FetchFailure {
+        status: None,
+        message: "fetch did not return a Response".into(),
+    })?;
 
     if !resp.ok() {
+        let failure = |message| FetchFailure {
+            status: Some(resp.status()),
+            message,
+        };
         // Try to extract a body for a better error message.
         if let Ok(text_promise) = resp.text()
             && let Ok(text_val) = JsFuture::from(text_promise).await
@@ -202,20 +221,32 @@ async fn fetch_with_opts(
             if let Ok(envelope) = serde_json::from_str::<ApiResponse<serde_json::Value>>(&text)
                 && let Some(err) = envelope.error
             {
-                return Err(err.message);
+                return Err(failure(err.message));
             }
-            return Err(format!("HTTP {}: {}", resp.status(), text));
+            return Err(failure(format!("HTTP {}: {}", resp.status(), text)));
         }
-        return Err(format!("HTTP {}", resp.status()));
+        return Err(failure(format!("HTTP {}", resp.status())));
     }
 
-    let text_promise = resp.text().map_err(|e| format!("{:?}", e))?;
+    let text_promise = resp.text().map_err(javascript_error)?;
     let text_val = JsFuture::from(text_promise)
         .await
-        .map_err(|e| format!("{:?}", e))?;
-    text_val
-        .as_string()
-        .ok_or_else(|| "response body is not a string".to_string())
+        .map_err(javascript_error)?;
+    text_val.as_string().ok_or_else(|| FetchFailure {
+        status: None,
+        message: "response body is not a string".into(),
+    })
+}
+
+async fn fetch_with_opts(
+    url: &str,
+    method: &str,
+    body: Option<String>,
+    token: &str,
+) -> Result<String, String> {
+    fetch_response_text(url, method, body, token, RequestCache::Default)
+        .await
+        .map_err(|error| error.message)
 }
 
 /// Helper to extract `data` from a successful `ApiResponse<T>`.
@@ -263,6 +294,76 @@ pub async fn api_put<T: serde::de::DeserializeOwned, B: Serialize>(
     let json = serde_json::to_string(body).map_err(|e| e.to_string())?;
     let text = fetch_with_opts(&url, "PUT", Some(json), token).await?;
     unwrap_envelope(&text)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DocumentSnapshot {
+    pub version: i32,
+    pub content: serde_json::Value,
+}
+
+pub(crate) enum DocumentSave {
+    Saved(i32),
+    Changed(DocumentSnapshot),
+    Unconfirmed,
+    Rejected { status: u16, message: String },
+}
+
+/// One CAS write, followed by a fresh read only if its result is ambiguous.
+/// A newer snapshot confirms the submitted JSON value, including nested maps
+/// whose keys may arrive in a different order.
+pub(crate) async fn save_document(
+    id: &str,
+    content: &serde_json::Value,
+    expected_version: i32,
+    token: &str,
+) -> DocumentSave {
+    #[derive(Deserialize)]
+    struct Receipt {
+        version: i32,
+    }
+
+    let url = format!("{API_BASE}/documents/{id}");
+    let body = serde_json::json!({"content": content, "expected_version": expected_version});
+    match fetch_response_text(
+        &url,
+        "PUT",
+        Some(body.to_string()),
+        token,
+        RequestCache::Default,
+    )
+    .await
+    {
+        Ok(text) => {
+            if let Ok(receipt) = unwrap_envelope::<Receipt>(&text)
+                && receipt.version > expected_version
+            {
+                return DocumentSave::Saved(receipt.version);
+            }
+        }
+        Err(FetchFailure {
+            status: Some(status),
+            message,
+        }) if !matches!(status, 502..=504) => {
+            return DocumentSave::Rejected { status, message };
+        }
+        Err(_) => {}
+    }
+
+    let snapshot = fetch_response_text(&url, "GET", None, token, RequestCache::NoStore)
+        .await
+        .ok()
+        .and_then(|text| unwrap_envelope::<DocumentSnapshot>(&text).ok());
+    match snapshot {
+        Some(snapshot) if snapshot.version > expected_version => {
+            if &snapshot.content == content {
+                DocumentSave::Saved(snapshot.version)
+            } else {
+                DocumentSave::Changed(snapshot)
+            }
+        }
+        _ => DocumentSave::Unconfirmed,
+    }
 }
 
 /// Perform a DELETE request and check for success.

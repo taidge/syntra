@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::Utc;
+use contrix_core::error::AppError;
 use contrix_core::schema::api_keys::dsl as ak;
 use diesel::prelude::*;
-use horme::OptionalExtension;
-use horme::RunQueryDsl;
+use diesel::sql_types::{Integer, Nullable, Text};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -303,6 +303,185 @@ pub fn hash_token(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+enum RequestCredential {
+    Session(JwtClaims),
+    ApiKey {
+        method: salvo::http::Method,
+        path: Result<String, &'static str>,
+    },
+}
+
+#[derive(diesel::QueryableByName)]
+struct RequestIdentity {
+    #[diesel(sql_type = Text)]
+    credential_id: String,
+    #[diesel(sql_type = Text)]
+    user_id: String,
+    #[diesel(sql_type = Text)]
+    role: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    tenant_id: Option<String>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    tenant_active: Option<i32>,
+    #[diesel(sql_type = Nullable<Text>)]
+    permissions: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    expires_at: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    last_seen_at: Option<String>,
+}
+
+// The tenant assignment is not part of the Diesel User model. A joined SQL
+// statement gives session/key, role and tenant activity one read snapshot.
+const SESSION_IDENTITY_SQL: &str = "
+    SELECT sessions.id AS credential_id, sessions.user_id, users.role, users.tenant_id,
+           tenants.is_active AS tenant_active, NULL AS permissions,
+           sessions.expires_at, sessions.last_activity_at AS last_seen_at
+      FROM sessions JOIN users ON users.id = sessions.user_id
+      LEFT JOIN tenants ON tenants.id = users.tenant_id
+     WHERE sessions.token_hash = ? AND sessions.user_id = ?
+       AND sessions.is_active = 1 AND sessions.expires_at > ?";
+
+const API_KEY_IDENTITY_SQL: &str = "
+    SELECT api_keys.id AS credential_id, api_keys.user_id, users.role, users.tenant_id,
+           tenants.is_active AS tenant_active, api_keys.permissions,
+           api_keys.expires_at, api_keys.last_used_at AS last_seen_at
+      FROM api_keys JOIN users ON users.id = api_keys.user_id
+      LEFT JOIN tenants ON tenants.id = users.tenant_id
+     WHERE api_keys.key_hash = ? AND api_keys.is_active = 1";
+
+const SESSION_ACTIVITY_SQL: &str = "
+    UPDATE sessions SET last_activity_at = ?
+     WHERE id = ? AND is_active = 1 AND last_activity_at IS ?";
+const API_KEY_ACTIVITY_SQL: &str = "
+    UPDATE api_keys SET last_used_at = ?
+     WHERE id = ? AND is_active = 1 AND last_used_at IS ?";
+
+fn read_request_identity(
+    conn: &mut diesel::SqliteConnection,
+    credential: &RequestCredential,
+    token_hash: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<(RequestIdentity, Option<chrono::DateTime<Utc>>), AppError> {
+    let (identity, invalid_message) = match credential {
+        RequestCredential::Session(claims) => (
+            diesel::sql_query(SESSION_IDENTITY_SQL)
+                .bind::<Text, _>(token_hash)
+                .bind::<Text, _>(&claims.sub)
+                .bind::<Text, _>(now.to_rfc3339())
+                .get_result::<RequestIdentity>(conn)
+                .optional()?,
+            "Session has been revoked or expired",
+        ),
+        RequestCredential::ApiKey { .. } => (
+            diesel::sql_query(API_KEY_IDENTITY_SQL)
+                .bind::<Text, _>(token_hash)
+                .get_result::<RequestIdentity>(conn)
+                .optional()?,
+            "Invalid or expired token",
+        ),
+    };
+    let identity = identity
+        .filter(|identity| identity.role != "disabled")
+        .ok_or_else(|| AppError::Auth(invalid_message.into()))?;
+
+    let expires_at = match credential {
+        RequestCredential::Session(claims) => i64::try_from(claims.exp)
+            .ok()
+            .and_then(|value| chrono::DateTime::from_timestamp(value, 0)),
+        RequestCredential::ApiKey { method, path } => {
+            let expires_at = identity
+                .expires_at
+                .as_deref()
+                .map(chrono::DateTime::parse_from_rfc3339)
+                .transpose()
+                .map_err(|_| AppError::Auth(invalid_message.into()))?
+                .map(|expires| expires.with_timezone(&Utc));
+            if expires_at.is_some_and(|expires| expires <= now) {
+                return Err(AppError::Auth(invalid_message.into()));
+            }
+            let path = path
+                .as_deref()
+                .map_err(|message| AppError::Validation((*message).into()))?;
+            if path == "/api/v1/api-keys" || path.starts_with("/api/v1/api-keys/") {
+                return Err(AppError::Forbidden(
+                    "A JWT session is required to manage API keys".into(),
+                ));
+            }
+            if !api_key_allows_request(
+                identity.permissions.as_deref().unwrap_or_default(),
+                method,
+                path,
+            ) {
+                return Err(AppError::Forbidden(
+                    "API key does not permit this operation".into(),
+                ));
+            }
+            expires_at
+        }
+    };
+
+    if expires_at.is_some_and(|expires| expires <= now) {
+        return Err(AppError::Auth(invalid_message.into()));
+    }
+
+    if identity.tenant_id.is_some() && identity.tenant_active != Some(1) {
+        return Err(AppError::Forbidden(
+            "Permission denied: Tenant is inactive or missing".into(),
+        ));
+    }
+    Ok((identity, expires_at))
+}
+
+fn authenticate_request(
+    conn: &mut diesel::SqliteConnection,
+    credential: RequestCredential,
+    token_hash: String,
+) -> Result<(AuthenticatedCredential, String), AppError> {
+    let now = Utc::now();
+    let (mut identity, mut expires_at) =
+        read_request_identity(conn, &credential, &token_hash, now)?;
+    let is_api_key = matches!(credential, RequestCredential::ApiKey { .. });
+
+    // These timestamps are display metadata. An authenticated request can
+    // refresh them once per 30 seconds. Skip issuing a write when fresh and
+    // compare the sampled value inside UPDATE to prevent concurrent refreshes
+    // from repeatedly writing the same credential or moving its clock back.
+    let threshold = now - chrono::Duration::seconds(30);
+    if identity.last_seen_at.as_deref().is_none_or(|value| {
+        chrono::DateTime::parse_from_rfc3339(value).map_or(true, |seen| seen <= threshold)
+    }) {
+        let activity_sql = if is_api_key {
+            API_KEY_ACTIVITY_SQL
+        } else {
+            SESSION_ACTIVITY_SQL
+        };
+        let _ = diesel::sql_query(activity_sql)
+            .bind::<Text, _>(now.to_rfc3339())
+            .bind::<Text, _>(&identity.credential_id)
+            .bind::<Nullable<Text>, _>(&identity.last_seen_at)
+            .execute(conn);
+        // A pending SQLite write can wait behind another writer. Read current
+        // authorization again after that wait, before allowing the request.
+        (identity, expires_at) = read_request_identity(conn, &credential, &token_hash, Utc::now())?;
+    }
+
+    let role = if identity.tenant_id.is_some() && identity.role == "admin" {
+        "tenant_admin".to_owned()
+    } else {
+        identity.role
+    };
+    Ok((
+        AuthenticatedCredential {
+            user_id: identity.user_id,
+            token_hash,
+            api_key_id: is_api_key.then_some(identity.credential_id),
+            expires_at,
+        },
+        role,
+    ))
+}
+
 /// Salvo handler that validates the `Authorization: Bearer <token>` header,
 /// decodes the JWT, and injects the user id and role into the depot.
 #[handler]
@@ -364,239 +543,78 @@ pub async fn jwt_auth_middleware(
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = 0;
 
-    match decode::<JwtClaims>(
+    let credential = match decode::<JwtClaims>(
         &token,
         &DecodingKey::from_secret(secret.as_bytes()),
         &validation,
     ) {
-        Ok(data) => {
-            let mut conn = match state.db.get() {
-                Ok(conn) => conn,
-                Err(error) => {
-                    tracing::warn!(stage = "connection_handle", %error, "Authentication database unavailable");
-                    database_unavailable(res, ctrl);
-                    return;
-                }
-            };
-            let token_hash = hash_token(&token);
-            let now = Utc::now().to_rfc3339();
-            let active_session = s::sessions
-                .inner_join(u::users.on(s::user_id.eq(u::id)))
-                .filter(s::token_hash.eq(&token_hash))
-                .filter(s::user_id.eq(&data.claims.sub))
-                .filter(s::is_active.eq(true))
-                .filter(s::expires_at.gt(&now))
-                .select((s::id, u::role))
-                .first::<(String, String)>(&mut conn)
-                .await
-                .optional();
+        Ok(data) => RequestCredential::Session(data.claims),
+        // Browser WebSocket URL tokens must be JWTs. API keys are accepted
+        // only through the Authorization header.
+        Err(_) if token_from_header => RequestCredential::ApiKey {
+            method: req.method().clone(),
+            path: authorization_path(req.uri().path()),
+        },
+        Err(_) => {
+            reject(
+                res,
+                ctrl,
+                StatusCode::UNAUTHORIZED,
+                "Invalid or expired token",
+            );
+            return;
+        }
+    };
 
-            match active_session {
-                Ok(Some((session_id, current_role))) if current_role != "disabled" => {
-                    let _ = diesel::update(s::sessions.filter(s::id.eq(session_id)))
-                        .set(s::last_activity_at.eq(&now))
-                        .execute(&mut conn)
-                        .await;
-                    depot.insert(
-                        CREDENTIAL_KEY,
-                        AuthenticatedCredential {
-                            user_id: data.claims.sub.clone(),
-                            token_hash,
-                            api_key_id: None,
-                            expires_at: i64::try_from(data.claims.exp)
-                                .ok()
-                                .and_then(|value| chrono::DateTime::from_timestamp(value, 0)),
-                        },
-                    );
-                    depot.insert(USER_ID_KEY, data.claims.sub.clone());
-                    // The database role is authoritative; the JWT copy can be
-                    // stale after an administrator changes permissions.
-                    let tenant = match crate::services::tenancy::ensure_active(
-                        &state,
-                        &data.claims.sub,
-                    )
-                    .await
-                    {
-                        Ok(tenant) => tenant,
-                        Err(
-                            error @ (contrix_core::error::AppError::Database(_)
-                            | contrix_core::error::AppError::Internal(_)),
-                        ) => {
-                            tracing::warn!(stage = "tenant_activity", %error, "Authentication database unavailable");
-                            database_unavailable(res, ctrl);
-                            return;
-                        }
-                        Err(error) => {
-                            reject_tenant(res, ctrl, error);
-                            return;
-                        }
-                    };
-                    depot.insert(
-                        USER_ROLE_KEY,
-                        if tenant.is_some() && current_role == "admin" {
-                            "tenant_admin".to_owned()
-                        } else {
-                            current_role
-                        },
-                    );
-                }
-                Ok(_) => reject(res, ctrl, "Session has been revoked or expired"),
-                Err(error) => {
-                    tracing::warn!(stage = "active_session", %error, "Authentication database unavailable");
-                    database_unavailable(res, ctrl);
-                }
+    let stage = match &credential {
+        RequestCredential::Session(_) => "session_identity",
+        RequestCredential::ApiKey { .. } => "api_key_identity",
+    };
+    let token_hash = hash_token(&token);
+    match state
+        .db
+        .run(move |conn| authenticate_request(conn, credential, token_hash))
+        .await
+    {
+        Ok((credential, role)) => {
+            depot.insert(USER_ID_KEY, credential.user_id.clone());
+            depot.insert(USER_ROLE_KEY, role);
+            depot.insert(CREDENTIAL_KEY, credential);
+        }
+        Err(AppError::Auth(message)) => reject(res, ctrl, StatusCode::UNAUTHORIZED, &message),
+        Err(AppError::Forbidden(message)) => reject(res, ctrl, StatusCode::FORBIDDEN, &message),
+        Err(AppError::Validation(message)) => reject(res, ctrl, StatusCode::BAD_REQUEST, &message),
+        Err(error) => {
+            let cause = super::request_observability::database_cause(&error);
+            if error.is_transient_database() {
+                super::request_observability::record_failure(stage, cause);
+                reject(
+                    res,
+                    ctrl,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Authentication service temporarily unavailable",
+                );
+            } else {
+                tracing::error!(stage, cause, "Authentication database failed");
+                reject(
+                    res,
+                    ctrl,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error",
+                );
             }
         }
-        Err(_) if token_from_header => {
-            // JWT decoding failed. Fall back to a stored API key, which is
-            // deliberately accepted only from the Authorization header (not
-            // from a WebSocket URL query parameter).
-            let mut conn = match state.db.get() {
-                Ok(conn) => conn,
-                Err(error) => {
-                    tracing::warn!(stage = "api_key_connection_handle", %error, "Authentication database unavailable");
-                    database_unavailable(res, ctrl);
-                    return;
-                }
-            };
-            let token_hash = hash_token(&token);
-            let api_key = ak::api_keys
-                .inner_join(u::users.on(ak::user_id.eq(u::id)))
-                .filter(ak::key_hash.eq(&token_hash))
-                .filter(ak::is_active.eq(true))
-                .select((
-                    ak::id,
-                    ak::user_id,
-                    u::role,
-                    ak::permissions,
-                    ak::expires_at,
-                ))
-                .first::<(String, String, String, String, Option<String>)>(&mut conn)
-                .await
-                .optional();
-
-            match api_key {
-                Ok(Some((key_id, user_id, role, permissions, expires_at)))
-                    if role != "disabled"
-                        && expires_at.as_deref().is_none_or(|value| {
-                            chrono::DateTime::parse_from_rfc3339(value)
-                                .is_ok_and(|expires| expires > Utc::now())
-                        }) =>
-                {
-                    let path = match authorization_path(req.uri().path()) {
-                        Ok(path) => path,
-                        Err(message) => {
-                            res.status_code(StatusCode::BAD_REQUEST);
-                            res.render(Json(serde_json::json!({"success":false,"error":{"code":400,"message":message}})));
-                            ctrl.skip_rest();
-                            return;
-                        }
-                    };
-                    if path == "/api/v1/api-keys" || path.starts_with("/api/v1/api-keys/") {
-                        res.status_code(StatusCode::FORBIDDEN);
-                        res.render(Json(serde_json::json!({
-                            "success": false,
-                            "error": {
-                                "code": 403,
-                                "message": "A JWT session is required to manage API keys"
-                            }
-                        })));
-                        ctrl.skip_rest();
-                        return;
-                    }
-
-                    if !api_key_allows_request(&permissions, req.method(), &path) {
-                        res.status_code(StatusCode::FORBIDDEN);
-                        res.render(Json(serde_json::json!({
-                            "success": false,
-                            "error": {
-                                "code": 403,
-                                "message": "API key does not permit this operation"
-                            }
-                        })));
-                        ctrl.skip_rest();
-                        return;
-                    }
-
-                    let _ = diesel::update(ak::api_keys.filter(ak::id.eq(&key_id)))
-                        .set(ak::last_used_at.eq(Some(Utc::now().to_rfc3339())))
-                        .execute(&mut conn)
-                        .await;
-                    depot.insert(
-                        CREDENTIAL_KEY,
-                        AuthenticatedCredential {
-                            user_id: user_id.clone(),
-                            token_hash,
-                            api_key_id: Some(key_id),
-                            expires_at: expires_at
-                                .as_deref()
-                                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                                .map(|value| value.with_timezone(&Utc)),
-                        },
-                    );
-                    depot.insert(USER_ID_KEY, user_id.clone());
-                    let tenant = match crate::services::tenancy::ensure_active(&state, &user_id)
-                        .await
-                    {
-                        Ok(tenant) => tenant,
-                        Err(
-                            error @ (contrix_core::error::AppError::Database(_)
-                            | contrix_core::error::AppError::Internal(_)),
-                        ) => {
-                            tracing::warn!(stage = "api_key_tenant_activity", %error, "Authentication database unavailable");
-                            database_unavailable(res, ctrl);
-                            return;
-                        }
-                        Err(error) => {
-                            reject_tenant(res, ctrl, error);
-                            return;
-                        }
-                    };
-                    depot.insert(
-                        USER_ROLE_KEY,
-                        if tenant.is_some() && role == "admin" {
-                            "tenant_admin".to_owned()
-                        } else {
-                            role
-                        },
-                    );
-                }
-                Ok(_) => reject(res, ctrl, "Invalid or expired token"),
-                Err(error) => {
-                    tracing::warn!(stage = "active_api_key", %error, "Authentication database unavailable");
-                    database_unavailable(res, ctrl);
-                }
-            }
-        }
-        Err(_) => reject(res, ctrl, "Invalid or expired token"),
     }
 }
 
-// Capacity and database failures are retryable service errors, not bad tokens.
-fn database_unavailable(res: &mut Response, ctrl: &mut FlowCtrl) {
-    res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+fn reject(res: &mut Response, ctrl: &mut FlowCtrl, status: StatusCode, message: &str) {
+    res.status_code(status);
     res.render(Json(serde_json::json!({
         "success": false,
-        "error": {"code": 503, "message": "Authentication service temporarily unavailable"}
+        "error": { "code": status.as_u16(), "message": message }
     })));
     ctrl.skip_rest();
 }
-fn reject_tenant(res: &mut Response, ctrl: &mut FlowCtrl, error: contrix_core::error::AppError) {
-    res.status_code(StatusCode::FORBIDDEN);
-    res.render(Json(
-        serde_json::json!({"success":false,"error":{"code":403,"message":error.to_string()}}),
-    ));
-    ctrl.skip_rest();
-}
-fn reject(res: &mut Response, ctrl: &mut FlowCtrl, message: &str) {
-    res.status_code(StatusCode::UNAUTHORIZED);
-    res.render(Json(serde_json::json!({
-        "success": false,
-        "error": { "code": 401, "message": message }
-    })));
-    ctrl.skip_rest();
-}
-
 /// Extract the current user's UUID string from the depot.
 ///
 /// Returns `None` if the auth middleware has not run or injection failed.

@@ -1,7 +1,7 @@
 #requires -Version 7.2
 <#
 .SYNOPSIS
-Run an existing release ZIP without building or using application source files.
+Run an existing release ZIP or container image without using application sources.
 .DESCRIPTION
 All server processes start in a fresh extracted package. The test's config,
 SQLite database, storage, logs and optional Playwright artifacts live beneath
@@ -13,9 +13,16 @@ Browser tests use repository test code, but the application still runs only from
 its package; node receives its own API_URL/E2E_EXTERNAL_SERVER/artifacts values.
 .EXAMPLE
 ./scripts/test-package.ps1 -ArchivePath ./target/dist/contrix-office-x86_64-pc-windows-msvc.zip -BrowserTests
+.EXAMPLE
+./scripts/test-package.ps1 -Image office-smoke:local -BrowserTests
 #>
+[CmdletBinding(DefaultParameterSetName = 'Archive')]
 param(
+    [Parameter(ParameterSetName = 'Archive')]
     [string]$ArchivePath = '',
+    [Parameter(ParameterSetName = 'Container', Mandatory)]
+    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_./:@-]*$')]
+    [string]$Image,
     [switch]$BrowserTests
 )
 $ErrorActionPreference = 'Stop'
@@ -211,6 +218,30 @@ function Wait-OfficeSmokeSocket {
 
 function Start-OfficeSmokeServer {
     param([int]$Round)
+    if ($Image) {
+        if ($Round -eq 1) {
+            $container = Invoke-OfficeSmokeDocker create --pull never --name "office-smoke-$taskNonce" `
+                --publish '127.0.0.1::8080' --mount "type=volume,src=$taskVolume,dst=/data" `
+                --env "JWT_SECRET=$taskSecret" $taskImageId
+            Assert-OfficeSmoke ($container -match '^[0-9a-f]{64}$') 'Docker did not return the owned container ID.'
+            $script:taskContainer = $container
+        }
+        $null = Invoke-OfficeSmokeDocker start $taskContainer
+        $portMapping = Invoke-OfficeSmokeDocker port $taskContainer '8080/tcp'
+        Assert-OfficeSmoke ($portMapping -match '^127\.0\.0\.1:(\d+)$') 'Container requires exactly one loopback port mapping.'
+        $script:taskBaseUrl = "http://$portMapping"
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        while ($watch.Elapsed.TotalSeconds -lt 45) {
+            Assert-OfficeSmoke (Test-OfficeSmokeServerRunning $null) 'Container exited during startup.'
+            try {
+                $ready = Invoke-OfficeSmokeJson 'GET' '/api/v1/ready' 200
+                if ($ready.status -eq 'ready') { return }
+            }
+            catch { if (-not (Test-OfficeSmokeServerRunning $null)) { throw } }
+            Start-Sleep -Milliseconds 200
+        }
+        throw 'Container did not become ready within 45 seconds.'
+    }
     $port = Get-OfficeSmokePort
     # Write an isolated overlay in the copied package, using stable paths and
     # secret across both starts. The caller's config files are never modified.
@@ -259,17 +290,43 @@ enabled = false
     throw "Packaged server did not become ready within 45 seconds; inspect $taskLogs."
 }
 
+function Invoke-OfficeSmokeDocker {
+    $output = & docker @args
+    if ($LASTEXITCODE -ne 0) { throw "Docker $($args[0]) failed (exit $LASTEXITCODE)." }
+    return ($output -join "`n").Trim()
+}
+
+function Test-OfficeSmokeServerRunning {
+    param($Record)
+    if ($Image) { return (Invoke-OfficeSmokeDocker inspect --format '{{.State.Running}}' $taskContainer) -eq 'true' }
+    return -not $Record.Process.HasExited
+}
+
+function Stop-OfficeSmokeServer {
+    param($Record)
+    if ($Image) {
+        $null = Invoke-OfficeSmokeDocker kill --signal KILL $taskContainer
+        Assert-OfficeSmoke ((Invoke-OfficeSmokeDocker inspect --format '{{.State.ExitCode}}' $taskContainer) -eq '137') 'Container did not exit after SIGKILL.'
+    } else { Stop-OfficeSmokeProcess $Record }
+}
+
 function Assert-OfficeSmokeAsset {
     param([string]$Path, [string]$Mime)
     Assert-OfficeSmoke (-not $Path.Contains('..') -and -not $Path.Contains('\') -and -not $Path.Contains(':')) "Unsafe asset URL: $Path"
     $relative = if ($Path -eq '/') { 'index.html' } else { $Path.TrimStart('/') }
-    $file = Join-Path (Join-Path $taskPackage 'static') $relative
-    Assert-OfficeSmoke (Test-Path -LiteralPath $file -PathType Leaf) "Asset missing from ZIP: $Path"
+    if ($Image) {
+        $digest = Invoke-OfficeSmokeDocker exec $taskContainer sha256sum "/app/static/$relative"
+        Assert-OfficeSmoke ($digest -match '^[0-9a-f]{64}\s') "Image asset hash is missing: $Path"
+        $expectedHash = ($digest -split '\s+')[0]
+    } else {
+        $file = Join-Path (Join-Path $taskPackage 'static') $relative
+        Assert-OfficeSmoke (Test-Path -LiteralPath $file -PathType Leaf) "Asset missing from ZIP: $Path"
+        $expectedHash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+    }
     $result = Invoke-OfficeSmokeRequest 'GET' $Path
     Assert-OfficeSmoke ($result.Status -eq 200 -and $result.ContentType.Contains($Mime) -and $result.Bytes.Length -gt 0) "Packaged asset failed HTTP validation: $Path"
-    $expectedHash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
     $actualHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$result.Bytes))
-    Assert-OfficeSmoke ($actualHash -eq $expectedHash) "HTTP asset differs from its ZIP contents: $Path"
+    Assert-OfficeSmoke ($actualHash -eq $expectedHash) "HTTP asset differs from its distribution contents: $Path"
     $taskAssets.Add($Path)
     return $result
 }
@@ -278,7 +335,12 @@ $taskWorkspace = Split-Path -Parent $PSScriptRoot
 Push-Location $taskWorkspace
 try { $taskMetadata = Get-OfficeWorkspaceMetadata }
 finally { Pop-Location }
-if (-not $ArchivePath) {
+$taskArchive = $null
+$taskImageId = $null
+if ($Image) {
+    $taskImageId = Invoke-OfficeSmokeDocker image inspect --format '{{.Id}}' $Image
+    Assert-OfficeSmoke ($taskImageId -match '^sha256:[0-9a-f]{64}$') 'Image must identify an existing local image.'
+} elseif (-not $ArchivePath) {
     $hostDescription = & rustc -vV
     if ($LASTEXITCODE -ne 0) { throw 'rustc host discovery failed; provide -ArchivePath.' }
     $hostLine = $hostDescription | Select-String '^host: '
@@ -286,8 +348,10 @@ if (-not $ArchivePath) {
     $taskHost = $hostLine.ToString().Substring(6).Trim()
     $ArchivePath = Join-Path $taskMetadata.target_directory "dist/contrix-office-$taskHost.zip"
 }
-$taskArchive = (Resolve-Path -LiteralPath $ArchivePath).Path
-Assert-OfficeSmoke ((Get-Item -LiteralPath $taskArchive).PSIsContainer -eq $false -and [IO.Path]::GetExtension($taskArchive) -eq '.zip') 'ArchivePath must identify an existing ZIP.'
+if (-not $Image) {
+    $taskArchive = (Resolve-Path -LiteralPath $ArchivePath).Path
+    Assert-OfficeSmoke ((Get-Item -LiteralPath $taskArchive).PSIsContainer -eq $false -and [IO.Path]::GetExtension($taskArchive) -eq '.zip') 'ArchivePath must identify an existing ZIP.'
+}
 $taskRoot = [IO.Path]::GetFullPath((Join-Path $taskMetadata.target_directory ("package-smoke/" + [guid]::NewGuid().ToString('N'))))
 $taskPackage = Join-Path $taskRoot 'package'
 $taskRuntime = Join-Path $taskRoot 'runtime'
@@ -298,28 +362,42 @@ $taskAssets = [Collections.Generic.List[string]]::new()
 $taskClient = $null
 $taskBaseUrl = ''
 $taskNonce = [guid]::NewGuid().ToString('N')
+$taskVolume = "office-smoke-$taskNonce"
+$taskVolumeCreated = $false
+$taskContainer = $null
 $taskProbeName = "package-smoke-$taskNonce.txt"
 $taskSecret = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
 [IO.Directory]::CreateDirectory($taskRuntime) | Out-Null
 [IO.Directory]::CreateDirectory($taskLogs) | Out-Null
 Write-Host "Package smoke artifacts: $taskRoot"
 try {
-    Expand-OfficeSmokeArchive $taskArchive $taskPackage
-    Assert-OfficeSmoke (-not (Test-Path -LiteralPath (Join-Path $taskPackage 'Cargo.toml')) -and -not (Test-Path -LiteralPath (Join-Path $taskPackage 'crates'))) 'Release ZIP unexpectedly contains an application source workspace.'
-    $taskExecutable = Join-Path $taskPackage $(if ($IsWindows) { 'contrix-server.exe' } else { 'contrix-server' })
-    foreach ($required in @($taskExecutable, (Join-Path $taskPackage 'config/default.toml'), (Join-Path $taskPackage 'migrations/025_atomic_persistence.sql'), (Join-Path $taskPackage 'static/index.html'))) {
-        Assert-OfficeSmoke (Test-Path -LiteralPath $required -PathType Leaf) "Required package file is missing: $required"
+    if ($Image) {
+        $volume = Invoke-OfficeSmokeDocker volume create $taskVolume
+        Assert-OfficeSmoke ($volume -eq $taskVolume) 'Docker did not create the owned volume.'
+        $taskVolumeCreated = $true
+    } else {
+        Expand-OfficeSmokeArchive $taskArchive $taskPackage
+        Assert-OfficeSmoke (-not (Test-Path -LiteralPath (Join-Path $taskPackage 'Cargo.toml')) -and -not (Test-Path -LiteralPath (Join-Path $taskPackage 'crates'))) 'Release ZIP unexpectedly contains an application source workspace.'
+        $taskExecutable = Join-Path $taskPackage $(if ($IsWindows) { 'contrix-server.exe' } else { 'contrix-server' })
+        foreach ($required in @($taskExecutable, (Join-Path $taskPackage 'config/default.toml'), (Join-Path $taskPackage 'migrations/025_atomic_persistence.sql'), (Join-Path $taskPackage 'static/index.html'))) {
+            Assert-OfficeSmoke (Test-Path -LiteralPath $required -PathType Leaf) "Required package file is missing: $required"
+        }
+        if (-not $IsWindows) {
+            [IO.File]::SetUnixFileMode($taskExecutable, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute -bor [IO.UnixFileMode]::GroupRead -bor [IO.UnixFileMode]::GroupExecute -bor [IO.UnixFileMode]::OtherRead -bor [IO.UnixFileMode]::OtherExecute)
+        }
+        [IO.File]::WriteAllText((Join-Path (Join-Path $taskPackage 'static') $taskProbeName), $taskNonce)
     }
-    if (-not $IsWindows) {
-        [IO.File]::SetUnixFileMode($taskExecutable, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute -bor [IO.UnixFileMode]::GroupRead -bor [IO.UnixFileMode]::GroupExecute -bor [IO.UnixFileMode]::OtherRead -bor [IO.UnixFileMode]::OtherExecute)
-    }
-    [IO.File]::WriteAllText((Join-Path (Join-Path $taskPackage 'static') $taskProbeName), $taskNonce)
     $handler = [Net.Http.HttpClientHandler]::new()
     $handler.UseProxy = $false
     $handler.AllowAutoRedirect = $false
     $taskClient = [Net.Http.HttpClient]::new($handler)
     $taskClient.Timeout = [TimeSpan]::FromSeconds(10)
     $first = Start-OfficeSmokeServer 1
+    if ($Image) {
+        $uid = Invoke-OfficeSmokeDocker exec $taskContainer id -u
+        Assert-OfficeSmoke ($uid -match '^[1-9][0-9]*$') 'The image must run as a non-root user.'
+        $null = Invoke-OfficeSmokeDocker exec $taskContainer sh -ec 'test ! -e /app/Cargo.toml && test ! -d /app/crates && test -x /app/contrix-server && test -f /app/config/production.toml && test -f /app/migrations/025_atomic_persistence.sql'
+    }
     $html = Assert-OfficeSmokeAsset '/' 'text/html'
     # '/' must match the index.html bytes shipped in this ZIP.
     $htmlText = [Text.Encoding]::UTF8.GetString($html.Bytes)
@@ -370,7 +448,7 @@ try {
     Send-OfficeSmokeSocket $sender $operation
     $ack = Wait-OfficeSmokeSocket $sender 'Ack'
     Assert-OfficeSmoke ($ack.op_id.client_id -eq $opId.client_id -and $ack.op_id.counter -eq $opId.counter) 'ACK identifies a different operation.'
-    Stop-OfficeSmokeProcess $first
+    Stop-OfficeSmokeServer $first
     $sender.Abort()
 
     $second = Start-OfficeSmokeServer 2
@@ -409,27 +487,26 @@ try {
         } -Label 'browser'
         $watch = [Diagnostics.Stopwatch]::StartNew()
         while (-not $browser.Process.WaitForExit(1000)) {
-            Assert-OfficeSmoke (-not $second.Process.HasExited) 'Packaged server exited during the browser smoke test.'
+            Assert-OfficeSmoke (Test-OfficeSmokeServerRunning $second) 'Server exited during the browser smoke test.'
             Assert-OfficeSmoke ($watch.Elapsed.TotalSeconds -lt 600) 'Browser smoke test exceeded 10 minutes.'
         }
         $browserExit = $browser.Process.ExitCode
         Stop-OfficeSmokeProcess $browser
         Assert-OfficeSmoke ($browserExit -eq 0) "Browser smoke failed (exit $browserExit); inspect $taskLogs and browser artifacts."
     }
-    Stop-OfficeSmokeProcess $second
+    Stop-OfficeSmokeServer $second
     $report = [ordered]@{
         success = $true; archive = $taskArchive; package_directory = $taskPackage
+        image_id = $taskImageId
         source_free_server_start = $true; restart_persistence = $true; browser_tests = [bool]$BrowserTests
         websocket_ack_restart = $true; websocket_receipt_retry = $true
         websocket_document_id = $collaborative.id; websocket_version = $wsVersion
         document_id = $document.id; version = $saved.version; assets = @($taskAssets)
     }
-    $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $taskRoot 'result.json') -Encoding utf8NoBOM
-    Write-Host "Package smoke passed. Browser tests: $([bool]$BrowserTests). Artifacts: $taskRoot"
 }
 finally {
-    foreach ($socket in $taskOwnedSockets) {
-        try { $socket.Abort(); $socket.Dispose() }
+    foreach ($ownedSocket in $taskOwnedSockets) {
+        try { $ownedSocket.Abort(); $ownedSocket.Dispose() }
         catch { Write-Warning "Could not finish cleanup for an owned WebSocket: $_" }
     }
     # Only retained process objects created by this script are stopped. Never
@@ -438,5 +515,15 @@ finally {
         try { Stop-OfficeSmokeProcess $owned }
         catch { Write-Warning "Could not finish cleanup for owned process $($owned.Label): $_" }
     }
+    if ($taskContainer) {
+        try {
+            $log = Invoke-OfficeSmokeDocker logs $taskContainer 2>&1
+            [IO.File]::WriteAllLines((Join-Path $taskLogs 'container.log'), [string[]]$log)
+        }
+        finally { $null = Invoke-OfficeSmokeDocker rm --force $taskContainer }
+    }
+    if ($taskVolumeCreated) { $null = Invoke-OfficeSmokeDocker volume rm $taskVolume }
     if ($null -ne $taskClient) { $taskClient.Dispose() }
 }
+$report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $taskRoot 'result.json') -Encoding utf8NoBOM
+Write-Host "Package smoke passed. Browser tests: $([bool]$BrowserTests). Artifacts: $taskRoot"

@@ -1,5 +1,8 @@
 use contrix_core::dto::{ApiResponse, HealthResponse};
+use contrix_core::error::AppError;
 use salvo::prelude::*;
+
+use crate::middleware::request_observability::{database_cause, record_failure};
 
 #[handler]
 pub async fn health_check(depot: &mut Depot, res: &mut Response) {
@@ -26,10 +29,16 @@ pub async fn ready_check(depot: &mut Depot, res: &mut Response) {
         state.storage.check_ready().await?;
         Ok::<_, contrix_core::error::AppError>(())
     };
-    let ready = matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(2), probe).await,
-        Ok(Ok(()))
-    );
+    let failure = match tokio::time::timeout(std::time::Duration::from_secs(2), probe).await {
+        Ok(Ok(())) => None,
+        Err(_) => Some("readiness_deadline"),
+        Ok(Err(error @ AppError::Database(_))) => Some(database_cause(&error)),
+        Ok(Err(_)) => Some("storage_probe_failed"),
+    };
+    if let Some(cause) = failure {
+        record_failure("readiness", cause);
+    }
+    let ready = failure.is_none();
     res.status_code(if ready {
         StatusCode::OK
     } else {

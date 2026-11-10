@@ -6,6 +6,7 @@ use crate::handlers;
 use crate::middleware::auth::jwt_auth_middleware;
 use crate::middleware::ip_filter::IpFilter;
 use crate::middleware::rate_limit::RateLimiter;
+use crate::middleware::request_observability::observe_http_request;
 use crate::middleware::security_headers::SecurityHeaders;
 use crate::state::AppState;
 
@@ -33,6 +34,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     );
 
     Router::new()
+        .hoop(observe_http_request)
         .hoop(state_injector)
         .hoop(IpFilter)
         .hoop(rate_limiter)

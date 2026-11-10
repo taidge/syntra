@@ -192,7 +192,9 @@ New writes register ownership before object I/O. Unknown legacy objects are pres
 
 The admin backup endpoints create SQLite database snapshots only. They do not copy local storage or S3 objects, or preserve blobs referenced by older snapshots. Restoring a SQLite snapshot alone cannot guarantee file recovery: garbage collection can already have deleted objects that the live database no longer references.
 
-Coordinate database and blob backups and restore them together, preserving the object keys referenced by the database snapshot. This requires an external consistent backup or snapshot procedure that accounts for concurrent writes and garbage collection. The package restart tests reuse the same live database and storage; they do not validate full disaster recovery from database and blob backups.
+Coordinate database and blob backups and restore them together, preserving the object keys referenced by the database snapshot. For a cold backup, stop every writer and garbage collector before copying SQLite, its WAL if present, and the matching objects. Restore into a fresh location and verify downloads before directing traffic to it.
+
+Run `python scripts/test-disaster-recovery.py` with a native release ZIP to rehearse this procedure with isolated local storage. The drill restores into a fresh instance, checks current content, version history and original bytes, and detects missing or altered blobs with a SHA-256 manifest.
 
 ### Source dependencies
 

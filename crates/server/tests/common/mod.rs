@@ -35,15 +35,26 @@ impl TestServer {
     }
 
     pub async fn new_with_ai(ai_config: AiConfig) -> Self {
-        Self::new_configured(ai_config, 30, 900).await
+        Self::new_configured(ai_config, 30, 900, 15_000, 3_000).await
     }
 
     #[allow(dead_code)] // Only transport-specific integration binaries use this constructor.
     pub async fn new_with_body_timeouts(idle_secs: u64, total_secs: u64) -> Self {
-        Self::new_configured(AiConfig::default(), idle_secs, total_secs).await
+        Self::new_configured(AiConfig::default(), idle_secs, total_secs, 15_000, 3_000).await
     }
 
-    async fn new_configured(ai_config: AiConfig, idle_secs: u64, total_secs: u64) -> Self {
+    #[allow(dead_code)] // Save-deadline tests exercise the actual SQLite worker.
+    pub async fn new_with_database_deadlines(operation_ms: u64, busy_ms: u64) -> Self {
+        Self::new_configured(AiConfig::default(), 30, 900, operation_ms, busy_ms).await
+    }
+
+    async fn new_configured(
+        ai_config: AiConfig,
+        idle_secs: u64,
+        total_secs: u64,
+        operation_ms: u64,
+        busy_ms: u64,
+    ) -> Self {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let storage_path = temp_dir.path().join("files");
@@ -55,8 +66,8 @@ impl TestServer {
             &db_url,
             2,
             std::time::Duration::from_secs(3),
-            std::time::Duration::from_secs(15),
-            std::time::Duration::from_secs(3),
+            std::time::Duration::from_millis(operation_ms),
+            std::time::Duration::from_millis(busy_ms),
         )
         .unwrap();
 
@@ -79,8 +90,8 @@ impl TestServer {
                 url: db_url,
                 max_connections: 2,
                 checkout_timeout_ms: 3_000,
-                operation_timeout_ms: 15_000,
-                busy_timeout_ms: 3_000,
+                operation_timeout_ms: operation_ms,
+                busy_timeout_ms: busy_ms,
             },
             auth: AuthConfig {
                 jwt_secret: "test-secret-key-for-testing-only".to_string(),

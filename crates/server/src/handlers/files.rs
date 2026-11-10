@@ -22,6 +22,7 @@ use crate::services::{StorageBackend, StorageService};
 // ---------------------------------------------------------------------------
 
 fn render_error(res: &mut Response, error: AppError) {
+    crate::middleware::request_observability::record_database_response("files", &error);
     res.status_code(
         StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
     );

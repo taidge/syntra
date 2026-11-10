@@ -1,4 +1,4 @@
-import { test, expect, Page } from '@playwright/test';
+import { test, expect, APIRequestContext, Page } from '@playwright/test';
 import { resolve } from 'node:path';
 import { registerUser, createDocument, uniqueEmail, uniqueUsername } from './helpers';
 const BASE = (process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
@@ -96,4 +96,188 @@ test.describe('Review browser regressions @ui', () => {
     await expect(page.locator('.slide-canvas img[alt="Chart"]')).toHaveCount(1);
 
   });
+});
+
+test.describe('Ambiguous document saves @ui', () => {
+  test.use({ serviceWorkers: 'block' });
+
+  const unavailable = {
+    status: 503,
+    json: { success: false, error: { code: 503, message: 'Service unavailable' } },
+  };
+  const unconfirmed = /Save could not be confirmed/;
+
+  async function openEditor(page: Page, request: APIRequestContext, kind: 'writer' | 'calc') {
+    const auth = await registerUser(request, uniqueUsername(), uniqueEmail(), 'Test@12345');
+    const headers = { Authorization: `Bearer ${auth.token}` };
+    const user = (await (await request.get('/api/v1/auth/me', { headers })).json()).data;
+    const { response, body } = await createDocument(request, auth.token, 'Recover a save', kind);
+    expect(response.status()).toBe(201);
+    await authenticate(page, auth.token, user);
+    // The actual REST write must be verified even when no collaboration echo arrives.
+    await page.routeWebSocket('**/api/v1/ws/collab/**', () => {});
+    await page.goto(`${BASE}/${kind}/${body.data.id}`);
+    await expect(page.locator('.save-status')).toHaveText(kind === 'writer' ? 'All changes saved' : 'Saved');
+    return { document: body.data, headers, endpoint: `/api/v1/documents/${body.data.id}` };
+  }
+
+  test('Writer confirms a committed 503 and keeps edits typed during verification', async ({ page, request }) => {
+    const fixture = await openEditor(page, request, 'writer');
+    const writes: { expected_version: number; content: unknown }[] = [];
+    let reads = 0;
+    let release = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    await page.route(`**${fixture.endpoint}`, async route => {
+      if (route.request().method() === 'PUT') {
+        writes.push(route.request().postDataJSON());
+        if (writes.length === 1) {
+          expect((await route.fetch({ maxRetries: 0 })).status()).toBe(200);
+          await route.fulfill(unavailable);
+          return;
+        }
+      } else if (route.request().method() === 'GET') {
+        const response = await route.fetch({ maxRetries: 0 });
+        expect(response.status()).toBe(200);
+        const body = await response.json();
+        const fields = Object.entries(body.data.content);
+        expect(fields.length).toBeGreaterThan(1);
+        body.data.content = Object.fromEntries(fields.reverse());
+        reads++;
+        await gate;
+        await route.fulfill({ response, json: body });
+        return;
+      }
+      await route.continue();
+    });
+
+    try {
+      await page.clock.install();
+      const editor = page.getByRole('textbox', { name: 'Document body', exact: true });
+      const status = page.locator('.save-status');
+      await editor.fill('First save was committed');
+      await expect(status).toHaveText('Unsaved changes');
+      await page.clock.fastForward(1_100);
+      await expect.poll(() => reads).toBe(1);
+      await editor.fill('Newer draft typed during verification');
+      await expect(status).toHaveText('Unsaved changes');
+      await page.clock.fastForward(1_100);
+      expect(writes).toHaveLength(1);
+      release();
+
+      await expect.poll(() => writes.length).toBe(2);
+      await expect(status).toHaveText('All changes saved');
+      await page.clock.fastForward(2_000);
+      expect(writes).toHaveLength(2);
+      expect(writes[1].expected_version).toBe(writes[0].expected_version + 1);
+      expect(writes[1].content).not.toEqual(writes[0].content);
+      const persisted = await request.get(fixture.endpoint, { headers: fixture.headers });
+      expect(persisted.status()).toBe(200);
+      const body = (await persisted.json()).data;
+      expect(body.version).toBe(writes[0].expected_version + 2);
+      expect(body.content).toEqual(writes[1].content);
+    } finally {
+      release();
+    }
+  });
+
+  test('Calc verifies a committed save after the transport drops the response', async ({ page, request }) => {
+    const fixture = await openEditor(page, request, 'calc');
+    let writes = 0;
+    let reads = 0;
+    await page.route(`**${fixture.endpoint}`, async route => {
+      if (route.request().method() === 'PUT' && ++writes === 1) {
+        expect((await route.fetch({ maxRetries: 0 })).status()).toBe(200);
+        await route.abort('failed');
+        return;
+      }
+      if (route.request().method() === 'GET') reads++;
+      await route.continue();
+    });
+    await editCell(page, 'A1', 'Committed before disconnect');
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.locator('.save-status')).toHaveText('Saved');
+    expect({ writes, reads }).toEqual({ writes: 1, reads: 1 });
+    const persisted = await request.get(fixture.endpoint, { headers: fixture.headers });
+    const body = (await persisted.json()).data;
+    expect(body.version).toBe(fixture.document.version + 1);
+    expect(body.content.sheets[0].cells[0][1].value.value).toBe('Committed before disconnect');
+  });
+
+  test('Calc merges a newer snapshot after a 503 and waits for an explicit save', async ({ page, request }) => {
+    const fixture = await openEditor(page, request, 'calc');
+    const writes: number[] = [];
+    await page.route(`**${fixture.endpoint}`, async route => {
+      if (route.request().method() === 'PUT') {
+        writes.push(route.request().postDataJSON().expected_version);
+        if (writes.length === 1) {
+          const content = structuredClone(fixture.document.content);
+          content.sheets[0].cells.push([{ row: 0, col: 1 }, { formula: null, value: { type: 'Text', value: 'Remote B1' } }]);
+          const peer = await request.put(fixture.endpoint, {
+            headers: fixture.headers,
+            data: { content, expected_version: fixture.document.version },
+          });
+          expect(peer.status()).toBe(200);
+          await route.fulfill(unavailable);
+          return;
+        }
+      }
+      await route.continue();
+    });
+
+    await page.clock.install();
+    await editCell(page, 'A1', 'Local A1');
+    const save = page.getByRole('button', { name: 'Save', exact: true });
+    await save.click();
+    await expect(page.locator('.save-status')).toHaveText(unconfirmed);
+    await expect(page.getByRole('button', { name: 'A1', exact: true })).toHaveText('Local A1');
+    await expect(page.getByRole('button', { name: 'B1', exact: true })).toHaveText('Remote B1');
+    await page.clock.fastForward(2_000);
+    expect(writes).toEqual([fixture.document.version]);
+
+    await save.click();
+    await expect(page.locator('.save-status')).toHaveText('Saved');
+    expect(writes).toEqual([fixture.document.version, fixture.document.version + 1]);
+  });
+
+  for (const revoked of [false, true]) {
+    test(`Writer retains edits when verification ${revoked ? 'loses authorization' : 'sees the same version'}`, async ({ page, request }) => {
+      const fixture = await openEditor(page, request, 'writer');
+      let writes = 0;
+      let reads = 0;
+      await page.route(`**${fixture.endpoint}`, async route => {
+        if (route.request().method() === 'PUT' && ++writes === 1) {
+          if (revoked) {
+            expect((await route.fetch({ maxRetries: 0 })).status()).toBe(200);
+            const current = await request.get('/api/v1/sessions/current', { headers: fixture.headers });
+            expect(current.status()).toBe(200);
+            const session = (await current.json()).data.id;
+            expect((await request.delete(`/api/v1/sessions/${session}`, { headers: fixture.headers })).status()).toBe(200);
+          }
+          await route.fulfill(unavailable);
+          return;
+        }
+        if (route.request().method() === 'GET') {
+          reads++;
+          const response = await route.fetch({ maxRetries: 0 });
+          expect(response.status()).toBe(revoked ? 401 : 200);
+          if (!revoked) expect((await response.json()).data.version).toBe(fixture.document.version);
+          await route.fulfill({ response });
+          return;
+        }
+        await route.continue();
+      });
+
+      await page.clock.install();
+      const editor = page.getByRole('textbox', { name: 'Document body', exact: true });
+      const status = page.locator('.save-status');
+      await editor.fill('Local draft');
+      await expect(status).toHaveText('Unsaved changes');
+      await page.clock.fastForward(1_100);
+      await expect(status).toHaveText(unconfirmed);
+      await editor.fill('Still editing locally');
+      await page.clock.fastForward(2_000);
+      await expect(status).toHaveText(unconfirmed);
+      expect({ writes, reads }).toEqual({ writes: 1, reads: 1 });
+    });
+  }
 });

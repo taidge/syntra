@@ -2,11 +2,11 @@
 use crate::collab_client::{CollabHandle, RemoteCursor};
 #[cfg(target_arch = "wasm32")]
 use crate::collab_client::{CollabMessage, ConnectionState, connect_with_reconnect};
-use crate::state::{AuthState, api_get, api_put, export_document};
+use crate::state::{AuthState, DocumentSave, api_get, export_document, save_document};
 use gloo_timers::callback::Timeout;
 use glory::prelude::*;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -41,6 +41,7 @@ pub(super) struct EditorSession {
     pending: Rc<RefCell<Option<Value>>>,
     exports: Rc<RefCell<std::collections::VecDeque<&'static str>>>,
     saving: Rc<Cell<bool>>,
+    save_unconfirmed: Rc<Cell<bool>>,
     submitted: Rc<RefCell<Option<Value>>>,
     remote_version: Rc<Cell<i32>>,
 }
@@ -67,6 +68,7 @@ impl EditorSession {
             pending: Default::default(),
             exports: Default::default(),
             saving: Default::default(),
+            save_unconfirmed: Default::default(),
             submitted: Default::default(),
             remote_version: Default::default(),
         }
@@ -124,7 +126,9 @@ impl EditorSession {
         });
     }
     fn receive_snapshot(&self, content: Value, version: i32) {
-        if version <= self.version.get() {
+        if version <= self.version.get()
+            || self.remote.get().is_some() && version <= self.remote_version.get()
+        {
             return;
         }
         if self.submitted.borrow().as_ref() == Some(&content) {
@@ -294,6 +298,9 @@ impl EditorSession {
         }
     }
     pub fn schedule_save(&self) {
+        if self.save_unconfirmed.get() {
+            return;
+        }
         self.status
             .revise(|value| *value = crate::i18n::t("common.unsaved"));
         #[cfg(target_arch = "wasm32")]
@@ -310,6 +317,19 @@ impl EditorSession {
         ));
         (self.loaded.get() && self.remote.get().is_none()).then(|| self.content.get())
     }
+    fn cancel_queued_save(&self) {
+        self.pending.borrow_mut().take();
+        self.timer.borrow_mut().take();
+        self.exports.borrow_mut().clear();
+    }
+    fn leave_save_unconfirmed(&self) {
+        self.save_unconfirmed.set(true);
+        self.cancel_queued_save();
+        if self.remote.get().is_none() {
+            self.status
+                .revise(|value| *value = crate::i18n::t("editor.save_unconfirmed"));
+        }
+    }
     pub fn save(&self) {
         let Some(content) = self.snapshot_for_save() else {
             return;
@@ -322,6 +342,7 @@ impl EditorSession {
             self.saving.set(false);
             return;
         };
+        self.save_unconfirmed.set(false);
         let session = self.clone();
         let _ = scope.spawn(async move {
             loop {
@@ -345,40 +366,58 @@ impl EditorSession {
                 }
                 *session.submitted.borrow_mut() = Some(body.clone());
                 let expected_version = session.version.get();
+                let token = session.token();
                 session
                     .status
                     .revise(|value| *value = crate::i18n::t("common.saving"));
-                let result = api_put::<Value, _>(
-                    &format!("/documents/{}", session.id),
-                    &json!({"content":body,"expected_version":expected_version}),
-                    &session.token(),
-                )
-                .await;
+                let result = save_document(&session.id, &body, expected_version, &token).await;
                 if session.scope.upgrade().is_none() {
                     break;
                 }
+                if session.token() != token {
+                    session.leave_save_unconfirmed();
+                    break;
+                }
                 match result {
-                    Ok(response) => {
-                        if let Some(version) = response["version"].as_i64() {
-                            session
-                                .version
-                                .revise(|value| *value = (*value).max(version as i32));
+                    DocumentSave::Saved(version) => {
+                        if session.remote.get().is_some() {
+                            session.cancel_queued_save();
+                            break;
                         }
-                        if session.content.get() == body {
+                        if version < session.version.get() {
+                            continue;
+                        }
+                        session.version.revise(|value| *value = version);
+                        let current_is_saved = session.content.get() == body;
+                        if current_is_saved {
                             session.dirty.set(false);
+                            session.pending.borrow_mut().take();
+                            session.timer.borrow_mut().take();
                         }
                         session.status.revise(|value| {
-                            *value = if session.content.get() == body {
+                            *value = if current_is_saved {
                                 crate::i18n::t("common.saved")
                             } else {
                                 crate::i18n::t("common.unsaved")
                             }
                         });
                     }
-                    Err(error) => {
+                    DocumentSave::Changed(snapshot) => {
+                        session.cancel_queued_save();
+                        session.receive_snapshot(snapshot.content, snapshot.version);
+                        if session.remote.get().is_none() && session.dirty.get() {
+                            session.leave_save_unconfirmed();
+                        }
+                        break;
+                    }
+                    DocumentSave::Unconfirmed => {
+                        session.leave_save_unconfirmed();
+                        break;
+                    }
+                    DocumentSave::Rejected { message, .. } => {
                         session.exports.borrow_mut().clear();
                         session.status.revise(|value| {
-                            *value = crate::i18n::t("editor.save_failed").replace("{err}", &error)
+                            *value = crate::i18n::t("editor.save_failed").replace("{err}", &message)
                         });
                         break;
                     }
@@ -826,6 +865,7 @@ pub fn DocumentEditor(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl 
 #[cfg(test)]
 mod snapshot_regressions {
     use super::*;
+    use serde_json::json;
     #[test]
     fn all_actual_editor_protocol_kinds_can_queue_a_loaded_snapshot() {
         let app = App::memory();
@@ -863,11 +903,17 @@ mod snapshot_regressions {
             session.content.revise(|value| value["local"] = json!(true));
             let local = session.content.get();
             let remote = json!({"body":[],"professional":{"header":"other author"}});
-            session.receive_snapshot(remote.clone(), 3);
+            session.receive_snapshot(remote.clone(), 4);
             assert_eq!(session.content.get(), local);
             assert_eq!(session.version.get(), 2);
-            assert_eq!(session.remote.get(), Some(remote));
+            assert_eq!(session.remote.get(), Some(remote.clone()));
             assert!(session.dirty.get());
+            session.receive_snapshot(json!({"body":[]}), 3);
+            assert_eq!(
+                session.remote.get(),
+                Some(remote),
+                "a delayed GET cannot replace a newer conflict"
+            );
             session.receive_snapshot(initial, 1);
             assert_eq!(
                 session.content.get(),

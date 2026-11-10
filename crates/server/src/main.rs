@@ -168,7 +168,8 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // 4. Create an on-demand Horme / Diesel-async SQLite provider
     // -----------------------------------------------------------------------
-    let db = database::Database::connect(&config.database)?;
+    let db = database::Database::connect(&config.database)
+        .context("Failed to configure startup database pool")?;
 
     tracing::info!("Database pool created");
 
@@ -183,15 +184,19 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("Could not read required migration file {migration_path}"))?;
         migrations.push((migration_path, sql));
     }
-    db.run(move |conn| {
+    let migration_started_at = std::time::Instant::now();
+    db.run_startup_migrations(move |conn| {
         for (migration_path, sql) in migrations {
             contrix_server::migrations::run_migration_file(conn, &migration_path, &sql)?;
             tracing::info!("Migration applied: {migration_path}");
         }
-        Ok::<_, anyhow::Error>(())
+        Ok(())
     })
     .await?;
-    tracing::info!("All migrations applied successfully");
+    tracing::info!(
+        elapsed_ms = migration_started_at.elapsed().as_millis() as u64,
+        "Startup database connection and migrations completed"
+    );
 
     // -----------------------------------------------------------------------
     // 6. Ensure storage directories exist

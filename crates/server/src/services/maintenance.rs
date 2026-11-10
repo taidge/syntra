@@ -65,12 +65,11 @@ pub(crate) async fn begin_write(db: &DbPool, path: &str) -> Result<WriteLease, A
         // stop admission when durable cleanup cannot keep pace.
         let backlog=diesel::sql_query("SELECT COUNT(*) AS value FROM (SELECT path FROM storage_gc LIMIT 1024)").get_result::<Number>(conn)?.value;
         if backlog>=MAX_GC_BACKLOG {return Err(AppError::RateLimit("Deferred object cleanup is backlogged; retry after cleanup".into()));}
-        if diesel::sql_query("SELECT state,first_seen,lease_until FROM blob_inventory WHERE path=?")
-            .bind::<Text,_>(&key).get_result::<Inventory>(conn).optional()?.is_some() {
+        let reserved = diesel::sql_query("INSERT INTO blob_inventory(path,state,first_seen,lease_until,token) VALUES (?,'writing',?,?,?) ON CONFLICT(path) DO NOTHING")
+            .bind::<Text,_>(key).bind::<BigInt,_>(now).bind::<BigInt,_>(now+WRITE_LEASE_SECONDS).bind::<Text,_>(claim).execute(conn)?;
+        if reserved != 1 {
             return Err(AppError::Conflict("Object key already exists or is retired; use a new key".into()));
         }
-        diesel::sql_query("INSERT INTO blob_inventory(path,state,first_seen,lease_until,token) VALUES (?,'writing',?,?,?) ON CONFLICT(path) DO UPDATE SET state='writing',first_seen=excluded.first_seen,lease_until=excluded.lease_until,token=excluded.token")
-            .bind::<Text,_>(key).bind::<BigInt,_>(now).bind::<BigInt,_>(now+WRITE_LEASE_SECONDS).bind::<Text,_>(claim).execute(conn)?;
         Ok(())
     })).await?;
     let (stop, mut stopped) = tokio::sync::oneshot::channel();
@@ -107,16 +106,25 @@ pub(crate) async fn begin_write(db: &DbPool, path: &str) -> Result<WriteLease, A
 /// authoritative if GC claims the key after this check. Compatibility callers
 /// may supply an unregistered object, but cannot resurrect a tombstoned key.
 pub(crate) fn prepare_attachment(conn: &mut SqliteConnection, path: &str) -> Result<(), AppError> {
-    diesel::sql_query(
-        "INSERT OR IGNORE INTO blob_inventory(path,state,first_seen) VALUES (?,'ready',?)",
-    )
-    .bind::<Text, _>(path)
-    .bind::<BigInt, _>(chrono::Utc::now().timestamp())
-    .execute(conn)?;
-    let row =
+    fn inventory(conn: &mut SqliteConnection, path: &str) -> QueryResult<Option<Inventory>> {
         diesel::sql_query("SELECT state,first_seen,lease_until FROM blob_inventory WHERE path=?")
             .bind::<Text, _>(path)
-            .get_result::<Inventory>(conn)?;
+            .get_result::<Inventory>(conn)
+            .optional()
+    }
+    // Normal uploads already registered a ready key. An INSERT OR IGNORE
+    // would still acquire SQLite's writer lock even when the key exists.
+    let row = if let Some(row) = inventory(conn, path)? {
+        row
+    } else {
+        diesel::sql_query(
+            "INSERT OR IGNORE INTO blob_inventory(path,state,first_seen) VALUES (?,'ready',?)",
+        )
+        .bind::<Text, _>(path)
+        .bind::<BigInt, _>(chrono::Utc::now().timestamp())
+        .execute(conn)?;
+        inventory(conn, path)?.ok_or(diesel::result::Error::NotFound)?
+    };
     if !matches!(row.state.as_str(), "ready" | "observed") {
         return Err(AppError::Conflict(
             "Object is not attachable; retry with a new object key".into(),
@@ -446,6 +454,25 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+    #[tokio::test]
+    async fn ready_attachment_preflight_can_read_while_another_connection_holds_the_writer() {
+        let (temp, db, storage, owner) = fixture().await;
+        let key = storage
+            .save_file(&owner.parse().unwrap(), "ready", b"object")
+            .await
+            .unwrap();
+        let path = temp.path().join("test.db");
+        let mut writer = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        let mut reader = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        reader.batch_execute("PRAGMA busy_timeout=0").unwrap();
+        writer.batch_execute("BEGIN IMMEDIATE").unwrap();
+        prepare_attachment(&mut reader, &key).unwrap();
+        writer.batch_execute("ROLLBACK").unwrap();
+
+        let reused = begin_write(&db, &key).await;
+        assert!(matches!(reused, Err(AppError::Conflict(_))));
+        assert_eq!(storage.read_file(&key).await.unwrap(), b"object");
     }
     async fn file(db: &DbPool, storage: &StorageBackend, owner: &str) -> (String, String, i64) {
         let data = b"current object";
