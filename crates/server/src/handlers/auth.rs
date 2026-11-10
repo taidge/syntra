@@ -39,10 +39,20 @@ fn generate_jwt(
     expiry_hours: u64,
 ) -> Result<String, AppError> {
     let exp = (Utc::now().timestamp() as u64) + expiry_hours * 3600;
+    generate_jwt_with_expiry(user_id, role, secret, exp)
+}
+
+fn generate_jwt_with_expiry(
+    user_id: &str,
+    role: &str,
+    secret: &str,
+    exp: u64,
+) -> Result<String, AppError> {
     let claims = JwtClaims {
         sub: user_id.to_owned(),
         role: role.to_owned(),
         exp,
+        jti: Some(Uuid::new_v4().to_string()),
     };
     encode(
         &Header::default(),
@@ -50,6 +60,41 @@ fn generate_jwt(
         &EncodingKey::from_secret(secret.as_bytes()),
     )
     .map_err(|e| AppError::Internal(format!("JWT generation failed: {e}")))
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn same_user_role_and_expiry_still_generate_distinct_session_tokens() {
+        let secret = "test-only-jti-secret";
+        let expiry = Utc::now().timestamp() as u64 + 3600;
+        let first = generate_jwt_with_expiry("user", "editor", secret, expiry).unwrap();
+        let second = generate_jwt_with_expiry("user", "editor", secret, expiry).unwrap();
+        assert_ne!(first, second);
+        let decode = |token: &str| {
+            jsonwebtoken::decode::<JwtClaims>(
+                token,
+                &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
+                &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
+            )
+            .unwrap()
+            .claims
+        };
+        let (first, second) = (decode(&first), decode(&second));
+        assert_eq!(first.exp, second.exp);
+        assert_ne!(first.jti, second.jti);
+        assert!(first.jti.is_some());
+    }
+
+    #[test]
+    fn previously_issued_claims_without_a_nonce_are_still_decodable() {
+        let claims: JwtClaims =
+            serde_json::from_value(serde_json::json!({"sub":"legacy","role":"editor","exp":123}))
+                .unwrap();
+        assert!(claims.jti.is_none());
+    }
 }
 
 async fn create_session(
@@ -1019,25 +1064,62 @@ pub async fn reset_password(req: &mut Request, depot: &mut Depot, res: &mut Resp
         }
     };
 
-    // Update user's password_hash.
-    if let Err(e) = diesel::update(u::users.filter(u::id.eq(&token_row.user_id)))
-        .set(u::password_hash.eq(&new_hash))
-        .execute(&mut conn)
-        .await
-    {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::Database(e.to_string()).to_response(),
-        )));
+    // Consume the capability and update credentials in one write transaction.
+    // Argon2 stays outside the transaction, while the conditional claim makes
+    // simultaneous requests with the same token mutually exclusive.
+    let reset = state
+        .db
+        .run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                let now = Utc::now().to_rfc3339();
+                let claimed = diesel::RunQueryDsl::execute(
+                    diesel::update(
+                        prt::password_reset_tokens
+                            .filter(prt::id.eq(&token_row.id))
+                            .filter(prt::used.eq(false))
+                            .filter(prt::expires_at.gt(&now)),
+                    )
+                    .set(prt::used.eq(true)),
+                    conn,
+                )?;
+                if claimed != 1 {
+                    return Err(AppError::Validation(
+                        "Invalid or expired reset token".into(),
+                    ));
+                }
+                if diesel::RunQueryDsl::execute(
+                    diesel::update(u::users.filter(u::id.eq(&token_row.user_id)))
+                        .set((u::password_hash.eq(&new_hash), u::updated_at.eq(&now))),
+                    conn,
+                )? != 1
+                {
+                    return Err(AppError::NotFound("User not found".into()));
+                }
+                diesel::RunQueryDsl::execute(
+                    diesel::update(sess::sessions.filter(sess::user_id.eq(&token_row.user_id)))
+                        .set(sess::is_active.eq(false)),
+                    conn,
+                )?;
+                // Other outstanding reset emails must not remain credentials for
+                // the account after a successful password replacement.
+                diesel::RunQueryDsl::execute(
+                    diesel::update(
+                        prt::password_reset_tokens.filter(prt::user_id.eq(&token_row.user_id)),
+                    )
+                    .set(prt::used.eq(true)),
+                    conn,
+                )?;
+                Ok(())
+            })
+        })
+        .await;
+    if let Err(error) = reset {
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
         return;
     }
-    revoke_user_sessions(&mut conn, &token_row.user_id).await;
-
-    // Mark token as used.
-    let _ = diesel::update(prt::password_reset_tokens.filter(prt::id.eq(&token_row.id)))
-        .set(prt::used.eq(true))
-        .execute(&mut conn)
-        .await;
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(

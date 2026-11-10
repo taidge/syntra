@@ -16,6 +16,176 @@ use crate::handlers::access::{
 };
 use crate::middleware::auth::get_user_id;
 
+fn render_error(res: &mut Response, error: AppError) {
+    res.status_code(
+        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
+    res.render(Json(ApiResponse::<()>::err(error.to_response())));
+}
+
+fn descendant_ids(conn: &mut SqliteConnection, file_id: &str) -> Result<Vec<String>, AppError> {
+    #[derive(diesel::QueryableByName)]
+    struct Descendant {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        id: String,
+    }
+    // UNION rather than UNION ALL also terminates on a corrupt legacy cycle.
+    let rows = diesel::RunQueryDsl::load::<Descendant>(diesel::sql_query(
+        "WITH RECURSIVE subtree(id) AS (SELECT ? UNION SELECT files.id FROM files JOIN subtree ON files.parent_id = subtree.id) SELECT id FROM subtree"
+    ).bind::<diesel::sql_types::Text, _>(file_id), conn)?;
+    Ok(rows.into_iter().map(|row| row.id).collect())
+}
+
+fn load_existing_file(conn: &mut SqliteConnection, file_id: &str) -> Result<File, AppError> {
+    diesel::OptionalExtension::optional(diesel::RunQueryDsl::first::<File>(
+        f::files.find(file_id),
+        conn,
+    ))?
+    .ok_or_else(|| AppError::NotFound("File not found".into()))
+}
+
+pub async fn trash_file_tree(
+    db: &crate::state::DbPool,
+    file_id: &str,
+    user: &str,
+) -> Result<usize, AppError> {
+    let (file_id, user) = (file_id.to_owned(), user.to_owned());
+    db.run(move |conn| {
+        conn.immediate_transaction::<_, AppError, _>(|conn| {
+            let root = load_existing_file(conn, &file_id)?;
+            crate::services::persistence::authorize(conn, &root, &user, "editor")?;
+            let ids = descendant_ids(conn, &file_id)?;
+            for id in &ids {
+                let file = load_existing_file(conn, id)?;
+                crate::services::persistence::authorize_including_trashed(
+                    conn, &file, &user, "editor",
+                )?;
+                crate::services::persistence::check_file_lock(conn, id, &user, None)?;
+            }
+            let now = Utc::now().to_rfc3339();
+            Ok(diesel::RunQueryDsl::execute(
+                diesel::update(
+                    f::files
+                        .filter(f::id.eq_any(ids))
+                        .filter(f::is_trashed.eq(false)),
+                )
+                .set((
+                    f::is_trashed.eq(true),
+                    f::trashed_at.eq(Some(&now)),
+                    f::updated_at.eq(&now),
+                )),
+                conn,
+            )?)
+        })
+    })
+    .await
+}
+
+pub async fn move_file_tree(
+    db: &crate::state::DbPool,
+    file_id: &str,
+    target_id: &str,
+    user: &str,
+) -> Result<usize, AppError> {
+    let (file_id, target_id, user) = (file_id.to_owned(), target_id.to_owned(), user.to_owned());
+    db.run(move |conn| {
+        conn.immediate_transaction::<_, AppError, _>(|conn| {
+            let source = load_existing_file(conn, &file_id)?;
+            let target = load_existing_file(conn, &target_id)?;
+            if !target.is_folder || target.is_trashed {
+                return Err(AppError::Validation(
+                    "Target must be an active folder".into(),
+                ));
+            }
+            crate::services::persistence::authorize(conn, &target, &user, "editor")?;
+            let role = if source.room_id == target.room_id {
+                "editor"
+            } else {
+                "admin"
+            };
+            crate::services::persistence::authorize(conn, &source, &user, role)?;
+            let ids = descendant_ids(conn, &file_id)?;
+            if ids.contains(&target_id) {
+                return Err(AppError::Validation(
+                    "Cannot move a folder into itself or its descendants".into(),
+                ));
+            }
+            for id in &ids {
+                let file = load_existing_file(conn, id)?;
+                crate::services::persistence::authorize_including_trashed(
+                    conn, &file, &user, role,
+                )?;
+                crate::services::persistence::check_file_lock(conn, id, &user, None)?;
+                if target.room_id.is_none() && file.owner_id != user {
+                    return Err(AppError::Forbidden(
+                        "Cannot move another owner's content into private storage".into(),
+                    ));
+                }
+            }
+            ensure_available_name(
+                conn,
+                &source.owner_id,
+                Some(&target_id),
+                target.room_id.as_deref(),
+                &source.name,
+                Some(&file_id),
+            )?;
+            let now = Utc::now().to_rfc3339();
+            diesel::RunQueryDsl::execute(
+                diesel::update(f::files.filter(f::id.eq_any(&ids)))
+                    .set((f::room_id.eq(target.room_id), f::updated_at.eq(&now))),
+                conn,
+            )?;
+            Ok(diesel::RunQueryDsl::execute(
+                diesel::update(f::files.find(file_id)).set(f::parent_id.eq(Some(target_id))),
+                conn,
+            )?)
+        })
+    })
+    .await
+}
+
+pub(crate) fn ensure_available_name(
+    conn: &mut SqliteConnection,
+    owner: &str,
+    parent: Option<&str>,
+    room: Option<&str>,
+    name: &str,
+    exclude: Option<&str>,
+) -> Result<(), AppError> {
+    if name.trim().is_empty() || name.chars().count() > 255 {
+        return Err(AppError::Validation(
+            "A name of 1–255 characters is required".into(),
+        ));
+    }
+    let mut query = f::files
+        .into_boxed()
+        .filter(f::name.eq(name))
+        .filter(f::is_trashed.eq(false));
+    // All members share a room/folder namespace; private roots are per-owner.
+    query = if let Some(parent) = parent {
+        query.filter(f::parent_id.eq(parent))
+    } else {
+        query.filter(f::parent_id.is_null())
+    };
+    query = if let Some(room) = room {
+        query.filter(f::room_id.eq(room))
+    } else {
+        query
+            .filter(f::room_id.is_null())
+            .filter(f::owner_id.eq(owner))
+    };
+    if let Some(exclude) = exclude {
+        query = query.filter(f::id.ne(exclude));
+    }
+    if diesel::RunQueryDsl::get_result::<i64>(query.count(), conn)? > 0 {
+        return Err(AppError::Conflict(
+            "A sibling item with that name already exists".into(),
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // POST /folders
 // ---------------------------------------------------------------------------
@@ -136,11 +306,48 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
         sort_order: 0,
     };
 
-    match diesel::insert_into(f::files)
-        .values(&new_file)
-        .execute(&mut conn)
-        .await
-    {
+    let inserted = state
+        .db
+        .run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                // Revalidate the target under the same write lock as insertion.
+                if let Some(parent) = &new_file.parent_id {
+                    let parent = diesel::RunQueryDsl::first::<File>(f::files.find(parent), conn)?;
+                    if !parent.is_folder || parent.room_id != new_file.room_id {
+                        return Err(AppError::Conflict(
+                            "Parent folder changed; reload before creating".into(),
+                        ));
+                    }
+                    crate::services::persistence::authorize(
+                        conn,
+                        &parent,
+                        &new_file.owner_id,
+                        "editor",
+                    )?;
+                } else if new_file.room_id.is_some() {
+                    crate::services::persistence::authorize_room(
+                        conn,
+                        new_file.room_id.as_deref().expect("room checked"),
+                        &new_file.owner_id,
+                        "editor",
+                    )?;
+                }
+                ensure_available_name(
+                    conn,
+                    &new_file.owner_id,
+                    new_file.parent_id.as_deref(),
+                    new_file.room_id.as_deref(),
+                    &new_file.name,
+                    None,
+                )?;
+                Ok(diesel::RunQueryDsl::execute(
+                    diesel::insert_into(f::files).values(&new_file),
+                    conn,
+                )?)
+            })
+        })
+        .await;
+    match inserted {
         Ok(_) => {
             let resp = FileResponse {
                 id: folder_id,
@@ -160,12 +367,7 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
             res.status_code(StatusCode::CREATED);
             res.render(Json(ApiResponse::ok(resp)));
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-        }
+        Err(error) => render_error(res, error),
     }
 }
 
@@ -301,6 +503,12 @@ pub async fn list_folder_children(req: &mut Request, depot: &mut Depot, res: &mu
         Ok(rows) => {
             let mut children = Vec::with_capacity(rows.len());
             for row in rows {
+                if authorize_file_access(&mut conn, &row, &uid, "viewer")
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
                 let document_id = document_id_for_file(&mut conn, &row.id).await;
                 let shared_with_count =
                     crate::handlers::access::count_shares_for_file(&mut conn, &row.id).await;
@@ -401,11 +609,30 @@ pub async fn update_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    match diesel::update(f::files.filter(f::id.eq(&folder.id)))
-        .set((f::name.eq(&body.name), f::updated_at.eq(now.to_rfc3339())))
-        .execute(&mut conn)
-        .await
-    {
+    let actor = uid.clone();
+    let renamed = state
+        .db
+        .run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                let current = diesel::RunQueryDsl::first::<File>(f::files.find(&folder.id), conn)?;
+                crate::services::persistence::authorize(conn, &current, &actor, "editor")?;
+                ensure_available_name(
+                    conn,
+                    &current.owner_id,
+                    current.parent_id.as_deref(),
+                    current.room_id.as_deref(),
+                    &body.name,
+                    Some(&current.id),
+                )?;
+                Ok(diesel::RunQueryDsl::execute(
+                    diesel::update(f::files.find(&current.id))
+                        .set((f::name.eq(&body.name), f::updated_at.eq(now.to_rfc3339()))),
+                    conn,
+                )?)
+            })
+        })
+        .await;
+    match renamed {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
@@ -418,12 +645,7 @@ pub async fn update_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
                 serde_json::json!({ "message": "Folder renamed" }),
             )));
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-        }
+        Err(error) => render_error(res, error),
     }
 }
 
@@ -446,7 +668,6 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
     };
 
     let folder_id_param: String = req.param("id").unwrap_or_default();
-    let now = Utc::now();
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -475,59 +696,14 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    // Soft-delete the folder's children.
-    if folder.room_id.is_some() {
-        let _ = diesel::update(f::files.filter(f::parent_id.eq(&folder_id_param)))
-            .set((
-                f::is_trashed.eq(true),
-                f::trashed_at.eq(Some(now.to_rfc3339())),
-                f::updated_at.eq(now.to_rfc3339()),
-            ))
-            .execute(&mut conn)
-            .await;
-    } else {
-        let _ = diesel::update(
-            f::files
-                .filter(f::parent_id.eq(&folder_id_param))
-                .filter(f::owner_id.eq(&uid)),
-        )
-        .set((
-            f::is_trashed.eq(true),
-            f::trashed_at.eq(Some(now.to_rfc3339())),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await;
-    }
-
-    // Soft-delete the folder itself.
-    match diesel::update(f::files.filter(f::id.eq(&folder.id)))
-        .set((
-            f::is_trashed.eq(true),
-            f::trashed_at.eq(Some(now.to_rfc3339())),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await
-    {
-        Ok(0) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Folder not found".into()).to_response(),
-            )));
-        }
+    match trash_file_tree(&state.db, &folder.id, &uid).await {
         Ok(_) => {
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
-                serde_json::json!({ "message": "Folder trashed" }),
+                serde_json::json!({"message":"Folder trashed"}),
             )));
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-        }
+        Err(error) => render_error(res, error),
     }
 }
 
@@ -564,8 +740,16 @@ pub async fn get_folder_path(req: &mut Request, depot: &mut Depot, res: &mut Res
 
     let mut path = Vec::new();
     let mut current_id: Option<String> = Some(folder_id_param.clone());
+    let mut visited = std::collections::HashSet::new();
 
     while let Some(ref cid) = current_id {
+        if !visited.insert(cid.clone()) || visited.len() > 1024 {
+            render_error(
+                res,
+                AppError::Conflict("Folder hierarchy contains a cycle or is too deep".into()),
+            );
+            return;
+        }
         let folder = f::files
             .filter(f::id.eq(cid))
             .filter(f::is_folder.eq(true))
@@ -592,6 +776,11 @@ pub async fn get_folder_path(req: &mut Request, depot: &mut Depot, res: &mut Res
     }
 
     path.reverse();
+
+    if path.is_empty() {
+        render_error(res, AppError::NotFound("Folder not found".into()));
+        return;
+    }
 
     res.status_code(StatusCode::OK);
     res.render(Json(ApiResponse::ok(path)));

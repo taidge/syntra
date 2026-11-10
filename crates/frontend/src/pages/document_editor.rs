@@ -16,6 +16,7 @@ use std::{
 struct Document {
     name: String,
     content: Value,
+    version: i32,
 }
 
 #[derive(Clone)]
@@ -26,6 +27,7 @@ pub(super) struct EditorSession {
     pub content: Cage<Value>,
     pub status: Cage<String>,
     pub loaded: Cage<bool>,
+    pub version: Cage<i32>,
     pub peers: Cage<Vec<RemoteCursor>>,
     pub connection: Cage<String>,
     remote: Cage<Option<Value>>,
@@ -39,16 +41,19 @@ pub(super) struct EditorSession {
     pending: Rc<RefCell<Option<Value>>>,
     exports: Rc<RefCell<std::collections::VecDeque<&'static str>>>,
     saving: Rc<Cell<bool>>,
+    submitted: Rc<RefCell<Option<Value>>>,
+    remote_version: Rc<Cell<i32>>,
 }
 impl EditorSession {
-    pub fn new(scope: &Scope, auth: Cage<AuthState>, id: String, kind: &'static str) -> Self {
-        let session = Self {
+    fn prepare(scope: &Scope, auth: Cage<AuthState>, id: String, kind: &'static str) -> Self {
+        Self {
             id: Rc::new(id),
             auth,
             name: scope.cage(String::new()),
             content: scope.cage(Value::Null),
             status: scope.cage(crate::i18n::t("editor.loading_document")),
             loaded: scope.cage(false),
+            version: scope.cage(0),
             peers: scope.cage(Vec::new()),
             connection: scope.cage(String::new()),
             remote: scope.cage(None),
@@ -62,7 +67,12 @@ impl EditorSession {
             pending: Default::default(),
             exports: Default::default(),
             saving: Default::default(),
-        };
+            submitted: Default::default(),
+            remote_version: Default::default(),
+        }
+    }
+    pub fn new(scope: &Scope, auth: Cage<AuthState>, id: String, kind: &'static str) -> Self {
+        let session = Self::prepare(scope, auth, id, kind);
         let timer = session.timer.clone();
         let socket = session.socket.clone();
         let _ = scope.on_cleanup(move || {
@@ -92,6 +102,14 @@ impl EditorSession {
             match response {
                 Ok(document) => {
                     session.name.revise(|name| *name = document.name);
+                    if document.version < session.version.get() {
+                        return;
+                    }
+                    if session.dirty.get() {
+                        session.receive_snapshot(document.content, document.version);
+                        return;
+                    }
+                    session.version.revise(|value| *value = document.version);
                     session.content.revise(|value| *value = document.content);
                     session.loaded.revise(|value| *value = true);
                     session.dirty.set(false);
@@ -104,6 +122,28 @@ impl EditorSession {
                 Err(error) => session.status.revise(|value| *value = error),
             }
         });
+    }
+    fn receive_snapshot(&self, content: Value, version: i32) {
+        if version <= self.version.get() {
+            return;
+        }
+        if self.submitted.borrow().as_ref() == Some(&content) {
+            self.version.revise(|value| *value = version);
+        } else if self.dirty.get() && self.content.get() != content {
+            self.remote.revise(|value| *value = Some(content));
+            self.remote_version.set(version);
+            self.timer.borrow_mut().take();
+            self.status.revise(|value| {
+                *value = "Conflict: local changes preserved; choose a version before saving.".into()
+            });
+        } else {
+            self.version.revise(|value| *value = version);
+            self.content.revise(|value| *value = content);
+            self.loaded.revise(|value| *value = true);
+            self.dirty.set(false);
+            self.status
+                .revise(|value| *value = crate::i18n::t("common.saved"));
+        }
     }
     fn connect(&self) {
         #[cfg(target_arch = "wasm32")]
@@ -166,15 +206,11 @@ impl EditorSession {
                                 return;
                             }
                             let path = path.unwrap()[0].as_str().unwrap_or_default();
-                            let expected = if incoming.kind == "writer" {
-                                "body_text"
-                            } else {
-                                incoming.kind
-                            };
-                            if path != expected {
+                            let legacy_writer = incoming.kind == "writer" && path == "body_text";
+                            if path != incoming.kind && !legacy_writer {
                                 return;
                             }
-                            let next = if incoming.kind == "writer" {
+                            let next = if legacy_writer {
                                 super::writer::writer_content_with_text(
                                     &incoming.content.get(),
                                     operation["new_value"].as_str().unwrap_or_default(),
@@ -190,6 +226,12 @@ impl EditorSession {
                                     .status
                                     .revise(|value| *value = crate::i18n::t("common.saved"));
                             }
+                        }
+                        CollabMessage::DocumentState { content, version } => {
+                            incoming.receive_snapshot(
+                                content,
+                                i32::try_from(version).unwrap_or(i32::MAX),
+                            );
                         }
                         CollabMessage::Error { message } => {
                             incoming.status.revise(|value| *value = message)
@@ -230,23 +272,9 @@ impl EditorSession {
         self.redo.borrow_mut().clear();
         self.replace(next, previous);
     }
-    fn replace(&self, next: Value, previous: Value) {
+    fn replace(&self, next: Value, _previous: Value) {
         self.dirty.set(true);
         self.content.revise(|value| *value = next.clone());
-        if let Some(socket) = self.socket.borrow().as_ref() {
-            let user = self
-                .auth
-                .get()
-                .user
-                .map(|user| user.id.to_string())
-                .unwrap_or_default();
-            let operation = if self.kind == "writer" {
-                json!({"type":"Replace", "path":["body_text"], "old_value":super::writer::writer_content_to_plain(&previous), "new_value":super::writer::writer_content_to_plain(&next)})
-            } else {
-                json!({"type":"Replace", "path":[self.kind], "old_value":previous, "new_value":next})
-            };
-            let _ = socket.send_operation(&user, operation);
-        }
         self.schedule_save();
     }
     pub fn undo(&self, redo: bool) {
@@ -275,11 +303,18 @@ impl EditorSession {
         }
     }
     // Serialize PUTs and coalesce queued snapshots so older responses never win.
+    fn snapshot_for_save(&self) -> Option<Value> {
+        debug_assert!(matches!(
+            self.kind,
+            "writer" | "presentation" | "whiteboard"
+        ));
+        (self.loaded.get() && self.remote.get().is_none()).then(|| self.content.get())
+    }
     pub fn save(&self) {
-        if !self.loaded.get() {
+        let Some(content) = self.snapshot_for_save() else {
             return;
-        }
-        *self.pending.borrow_mut() = Some(self.content.get());
+        };
+        *self.pending.borrow_mut() = Some(content);
         if self.saving.replace(true) {
             return;
         }
@@ -305,12 +340,17 @@ impl EditorSession {
                     }
                     break;
                 };
+                if session.remote.get().is_some() {
+                    break;
+                }
+                *session.submitted.borrow_mut() = Some(body.clone());
+                let expected_version = session.version.get();
                 session
                     .status
                     .revise(|value| *value = crate::i18n::t("common.saving"));
                 let result = api_put::<Value, _>(
                     &format!("/documents/{}", session.id),
-                    &json!({"content":body}),
+                    &json!({"content":body,"expected_version":expected_version}),
                     &session.token(),
                 )
                 .await;
@@ -318,7 +358,12 @@ impl EditorSession {
                     break;
                 }
                 match result {
-                    Ok(_) => {
+                    Ok(response) => {
+                        if let Some(version) = response["version"].as_i64() {
+                            session
+                                .version
+                                .revise(|value| *value = (*value).max(version as i32));
+                        }
                         if session.content.get() == body {
                             session.dirty.set(false);
                         }
@@ -335,6 +380,7 @@ impl EditorSession {
                         session.status.revise(|value| {
                             *value = crate::i18n::t("editor.save_failed").replace("{err}", &error)
                         });
+                        break;
                     }
                 }
             }
@@ -441,8 +487,17 @@ pub(super) fn editor_header(
                             .on_press(move || {
                                 if let Some(next) = accept_remote.remote.get() {
                                     accept_remote.remote.revise(|value| *value = None);
-                                    accept_remote.edit(next);
-                                    accept_remote.save();
+                                    let version = accept_remote.remote_version.get();
+                                    accept_remote.version.revise(|value| *value = version);
+                                    accept_remote.pending.borrow_mut().take();
+                                    accept_remote.timer.borrow_mut().take();
+                                    accept_remote.content.revise(|value| *value = next);
+                                    accept_remote.dirty.set(false);
+                                    accept_remote.undo.borrow_mut().clear();
+                                    accept_remote.redo.borrow_mut().clear();
+                                    accept_remote
+                                        .status
+                                        .revise(|value| *value = crate::i18n::t("common.saved"));
                                 }
                             }),
                         sapid::button()
@@ -451,6 +506,9 @@ pub(super) fn editor_header(
                             .on_press(move || {
                                 if let Some(previous) = keep_local.remote.get() {
                                     keep_local.remote.revise(|value| *value = None);
+                                    keep_local
+                                        .version
+                                        .revise(|value| *value = keep_local.remote_version.get());
                                     keep_local.replace(keep_local.content.get(), previous);
                                     keep_local.save();
                                 }
@@ -664,7 +722,9 @@ pub(super) fn diagram_objects(
         .key(|item| format!("{}:{}", item.0, item.1["type"].as_str().unwrap_or_default()))
         .children(move |item_row| {
             let item = item_row.value;
-            let external = item.get().1["type"] == "Image";
+            let external = item.get().1["type"] == "Image"
+                && item.get().1["crop"].is_null()
+                && item.get().1["rotation"].as_f64().unwrap_or(0.0) == 0.0;
             image()
                 .class(if external {
                     "diagram-object diagram-image"
@@ -692,6 +752,8 @@ pub(super) fn diagram_objects(
                             .filter(|value| value.is_finite())
                             .unwrap_or(fallback)
                     };
+                    let width = number("_canvas_width", width).max(1.0);
+                    let height = number("_canvas_height", height).max(1.0);
                     let (x, y, w, h) = if external {
                         (
                             number("x", 0.),
@@ -759,4 +821,88 @@ pub fn DocumentEditor(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl 
             ))
             .show_in(scope)
     })
+}
+
+#[cfg(test)]
+mod snapshot_regressions {
+    use super::*;
+    #[test]
+    fn all_actual_editor_protocol_kinds_can_queue_a_loaded_snapshot() {
+        let app = App::memory();
+        app.mount(widget(|scope| {
+            for kind in ["writer","presentation","whiteboard"] {
+                let session=EditorSession::prepare(scope,scope.cage(AuthState::default()),"document".into(),kind);
+                session.loaded.revise(|value|*value=true);
+                let document=json!({"slides":[{"elements":[{"type":"TextBox","content":[{"text":"Quarterly review"}]}],"notes":"Discuss the margin"}]});
+                session.content.revise(|value|*value=document.clone());
+                assert_eq!(session.snapshot_for_save(),Some(document),"{kind} must reach the same save queue in debug and release builds");
+            }
+            view().build(scope)
+        })).unwrap();
+        app.clear().unwrap();
+    }
+    #[test]
+    fn reconnect_restores_full_rich_state_and_preserves_unsaved_conflicts() {
+        let app = App::memory();
+        app.mount(widget(|scope| {
+            let session = EditorSession::prepare(
+                scope,
+                scope.cage(AuthState::default()),
+                "document".into(),
+                "writer",
+            );
+            let initial =
+                json!({"body":[{"type":"Paragraph","runs":[{"text":"same","bold":false}]}]});
+            session.receive_snapshot(initial.clone(), 1);
+            let mut formatted = initial.clone();
+            formatted["body"][0]["runs"][0]["bold"] = json!(true);
+            session.receive_snapshot(formatted.clone(), 2);
+            assert_eq!(session.content.get(), formatted);
+            assert_eq!(session.version.get(), 2);
+            session.dirty.set(true);
+            session.content.revise(|value| value["local"] = json!(true));
+            let local = session.content.get();
+            let remote = json!({"body":[],"professional":{"header":"other author"}});
+            session.receive_snapshot(remote.clone(), 3);
+            assert_eq!(session.content.get(), local);
+            assert_eq!(session.version.get(), 2);
+            assert_eq!(session.remote.get(), Some(remote));
+            assert!(session.dirty.get());
+            session.receive_snapshot(initial, 1);
+            assert_eq!(
+                session.content.get(),
+                local,
+                "stale GET/snapshot cannot win"
+            );
+            view().build(scope)
+        }))
+        .unwrap();
+        app.clear().unwrap();
+    }
+    #[test]
+    fn own_persistent_echo_updates_version_without_overwriting_newer_typing() {
+        let app = App::memory();
+        app.mount(widget(|scope| {
+            let session = EditorSession::prepare(
+                scope,
+                scope.cage(AuthState::default()),
+                "document".into(),
+                "writer",
+            );
+            session.version.revise(|value| *value = 1);
+            session.dirty.set(true);
+            *session.submitted.borrow_mut() = Some(json!({"body":"submitted"}));
+            session
+                .content
+                .revise(|value| *value = json!({"body":"typed while saving"}));
+            session.receive_snapshot(json!({"body":"submitted"}), 2);
+            assert_eq!(session.version.get(), 2);
+            assert!(session.remote.get().is_none());
+            assert!(session.dirty.get());
+            assert_eq!(session.content.get()["body"], "typed while saving");
+            view().build(scope)
+        }))
+        .unwrap();
+        app.clear().unwrap();
+    }
 }

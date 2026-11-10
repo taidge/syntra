@@ -21,6 +21,8 @@ pub struct TestServer {
     pub base_url: String,
     pub client: reqwest::Client,
     pub db: DbPool,
+    #[allow(dead_code)] // Isolated handler backpressure tests reuse the real authenticated state.
+    pub state: Arc<AppState>,
     pub notifications: Arc<NotificationBus>,
     // Hold the tempdir so it is not deleted until the TestServer is dropped.
     pub _temp_dir: tempfile::TempDir,
@@ -33,6 +35,15 @@ impl TestServer {
     }
 
     pub async fn new_with_ai(ai_config: AiConfig) -> Self {
+        Self::new_configured(ai_config, 30, 900).await
+    }
+
+    #[allow(dead_code)] // Only transport-specific integration binaries use this constructor.
+    pub async fn new_with_body_timeouts(idle_secs: u64, total_secs: u64) -> Self {
+        Self::new_configured(AiConfig::default(), idle_secs, total_secs).await
+    }
+
+    async fn new_configured(ai_config: AiConfig, idle_secs: u64, total_secs: u64) -> Self {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let storage_path = temp_dir.path().join("files");
@@ -49,30 +60,11 @@ impl TestServer {
         )
         .unwrap();
 
-        // Run migrations by splitting the SQL file on semicolons.
+        // Use the same SQLite parser, atomic runner and catalog as production.
         db.run(move |conn| {
-            let migration_sql = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../migrations/001_init.sql"),
-            )
-            .unwrap();
-
-            for stmt in migration_sql.split(';') {
-                // Strip comment-only lines from the chunk before deciding whether
-                // to execute it.
-                let cleaned: String = stmt
-                    .lines()
-                    .filter(|line| !line.trim_start().starts_with("--"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let trimmed = cleaned.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                diesel::RunQueryDsl::execute(diesel::sql_query(trimmed), conn)
-                    .unwrap_or_else(|e| panic!("migration failed on:\n{trimmed}\nerror: {e}"));
-            }
-            Ok::<_, diesel::result::Error>(())
+            let directory =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+            contrix_server::migrations::run_directory(conn, &directory)
         })
         .await
         .unwrap();
@@ -96,6 +88,8 @@ impl TestServer {
                 refresh_expiry_days: 30,
             },
             storage: StorageConfig {
+                upload_idle_timeout_seconds: idle_secs,
+                upload_total_timeout_seconds: total_secs,
                 base_path: storage_path.to_string_lossy().into_owned(),
                 max_upload_size_mb: 10,
                 default_quota_mb: 100,
@@ -109,60 +103,12 @@ impl TestServer {
             rate_limit: RateLimitConfig::default(),
             ai: ai_config,
             trash: TrashConfig::default(),
+            maintenance: Default::default(),
         };
-
-        // Run additional migrations for new tables.
-        db.run(move |conn| {
-            let migration_dir =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-            let additional_migrations = [
-                "002_rooms_groups.sql",
-                "003_tags_favorites_recent.sql",
-                "004_security.sql",
-                "005_webhooks.sql",
-                "006_admin.sql",
-                "007_templates_invitations.sql",
-                "008_upload_thumbnails.sql",
-                "009_wopi_locking_presence.sql",
-                "010_password_resets.sql",
-                "011_share_passwords.sql",
-                "012_notification_preferences.sql",
-                "013_file_versions.sql",
-                "014_operation_log.sql",
-                "015_api_keys.sql",
-                "016_login_attempts.sql",
-                "017_file_properties.sql",
-                "018_file_ordering.sql",
-                "019_read_status.sql",
-                "020_room_enhancements.sql",
-                "021_document_signatures.sql",
-                "022_tenants.sql",
-                "023_remove_oauth.sql",
-                "024_remove_integration_settings.sql",
-            ];
-            for migration_file in &additional_migrations {
-                if let Ok(sql) = std::fs::read_to_string(migration_dir.join(migration_file)) {
-                    for stmt in sql.split(';') {
-                        let cleaned: String = stmt
-                            .lines()
-                            .filter(|line| !line.trim_start().starts_with("--"))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let trimmed = cleaned.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        let _ = diesel::RunQueryDsl::execute(diesel::sql_query(trimmed), conn);
-                    }
-                }
-            }
-            Ok::<_, diesel::result::Error>(())
-        })
-        .await
-        .unwrap();
 
         let db_clone = db.clone();
         let storage = Arc::new(StorageBackend::from_config(&config.storage).unwrap());
+        storage.attach_database(db.clone()).unwrap();
         let ai = config
             .ai
             .enabled
@@ -180,7 +126,7 @@ impl TestServer {
             wopi_sessions: Arc::new(WopiSessionStore::new()),
         });
 
-        let router = create_router(state);
+        let router = create_router(state.clone());
 
         // Bind to port 0 so the OS assigns an available port. Extract the
         // actual address from the acceptor *before* spawning the server so
@@ -201,12 +147,19 @@ impl TestServer {
         // Give the server a moment to start accepting connections.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let client = reqwest::Client::new();
+        // This client only talks to this test's loopback listener. Inheriting
+        // system/environment proxies lets unrelated network software replace
+        // application responses (including large-upload errors) with a 502.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build isolated loopback test client");
 
         TestServer {
             base_url,
             client,
             db,
+            state,
             notifications,
             _temp_dir: temp_dir,
         }
@@ -383,5 +336,104 @@ impl TestServer {
             .unwrap();
 
         notification_id
+    }
+}
+
+/// Own all real connections and queue positions after prior SQL/lease cleanup
+/// is genuinely idle. Pending admissions are polled inline in one executor
+/// turn, so a WS timer cannot take a slot between spawning queued tasks.
+#[allow(dead_code)]
+pub struct OccupiedPool {
+    db: DbPool,
+    leases: Vec<contrix_server::database::DatabaseLease>,
+    pending: Vec<
+        futures_util::future::BoxFuture<
+            'static,
+            std::result::Result<(), contrix_core::error::AppError>,
+        >,
+    >,
+}
+#[allow(dead_code)]
+impl OccupiedPool {
+    pub async fn hold(server: &TestServer) -> Self {
+        use horme::GetConnection;
+        use std::time::Duration;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut quiet = None;
+            let mut checkouts = server.db.state().checkouts;
+            loop {
+                let state = server.db.state();
+                if state.admitted_operations == 0
+                    && state.connections == state.idle_connections
+                    && state.checkouts == checkouts
+                {
+                    let since = quiet.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= Duration::from_millis(20) {
+                        break;
+                    }
+                } else {
+                    quiet = None;
+                    checkouts = state.checkouts;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("prior queries, initial WS timer, and connection cleanup retire before saturation");
+        let mut db = server.db.clone();
+        let leases = vec![
+            db.get_mut_conn().await.unwrap(),
+            db.get_mut_conn().await.unwrap(),
+        ];
+        assert_eq!(
+            server.db.state().admitted_operations,
+            2,
+            "both real connections are ours before queueing"
+        );
+        let mut pending: Vec<
+            futures_util::future::BoxFuture<
+                'static,
+                std::result::Result<(), contrix_core::error::AppError>,
+            >,
+        > = Vec::new();
+        for _ in 0..2 {
+            let db = server.db.clone();
+            let mut request =
+                Box::pin(
+                    async move { db.run(|_| Ok::<_, contrix_core::error::AppError>(())).await },
+                );
+            assert!(
+                futures_util::poll!(request.as_mut()).is_pending(),
+                "each queued request is actually admitted and waiting for our held connections"
+            );
+            pending.push(request);
+        }
+        assert_eq!(
+            server.db.state().admitted_operations,
+            4,
+            "all four slots belong to this fixture"
+        );
+        Self {
+            db: server.db.clone(),
+            leases,
+            pending,
+        }
+    }
+    pub async fn release(self) {
+        drop(self.leases);
+        for pending in self.pending {
+            pending.await.unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let state = self.db.state();
+                if state.admitted_operations == 0 && state.connections == state.idle_connections {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("every owned queued query and lease cleanup retires after release");
     }
 }

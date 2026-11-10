@@ -1,5 +1,9 @@
 name: Glory dependencies
-description: Initialize the repository's pinned Glory and Sapid submodules and build directories.
+description: Initialize pinned source dependencies and discover Cargo's configured artifact directory.
+outputs:
+  target-directory:
+    description: Cargo target directory reported by workspace metadata.
+    value: ${{ steps.metadata.outputs.target }}
 runs:
   using: composite
   steps:
@@ -7,22 +11,12 @@ runs:
       shell: pwsh
       run: |
         git submodule update --init --recursive -- .dependencies/glory .dependencies/sapid
-        if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the pinned Glory and Sapid submodules.' }
-    - name: Configure and verify build directories
+        if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the pinned source dependencies.' }
+    - name: Discover workspace artifacts
+      id: metadata
       shell: pwsh
       run: |
-        $build = if ($IsWindows) { 'D:/BuildCache/office-glory' } else { '${{ runner.temp }}/office-glory' }
-        New-Item -ItemType Directory -Force -Path "$build/tmp", "$build/cargo" | Out-Null
-        $buildEnvironment = @{
-          CARGO_TARGET_DIR = "$build/target"
-          CARGO_HOME = "$build/cargo"
-          TEMP = "$build/tmp"
-          TMP = "$build/tmp"
-          TMPDIR = "$build/tmp"
-        }
-        foreach ($entry in $buildEnvironment.GetEnumerator()) {
-          [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
-          "$($entry.Key)=$($entry.Value)" >> $env:GITHUB_ENV
-        }
-        $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($metadata.target_directory) -ne [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)) { throw 'Cargo target verification failed' }
+        . ./scripts/workspace.ps1
+        $metadata = Get-OfficeWorkspaceMetadata
+        "target=$($metadata.target_directory)" >> $env:GITHUB_OUTPUT
+        "OFFICE_TARGET_DIRECTORY=$($metadata.target_directory)" >> $env:GITHUB_ENV

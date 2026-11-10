@@ -27,6 +27,21 @@ async fn is_group_participant(
     group_id: &str,
     user_id: &str,
 ) -> bool {
+    let owner = match g::groups
+        .find(group_id)
+        .select(g::created_by)
+        .first::<String>(conn)
+        .await
+    {
+        Ok(owner) => owner,
+        Err(_) => return false,
+    };
+    if crate::services::tenancy::ensure_same_tenant_async(conn, user_id, &owner)
+        .await
+        .is_err()
+    {
+        return false;
+    }
     let is_creator = g::groups
         .filter(g::id.eq(group_id))
         .filter(g::created_by.eq(user_id))
@@ -412,19 +427,29 @@ pub async fn delete_group(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
-    // Delete group members first.
-    let _ = diesel::delete(gm::group_members.filter(gm::group_id.eq(&group_id_param)))
-        .execute(&mut conn)
-        .await;
-
-    match diesel::delete(
-        g::groups
-            .filter(g::id.eq(&group_id_param))
-            .filter(g::created_by.eq(&uid)),
-    )
-    .execute(&mut conn)
-    .await
-    {
+    let deletion: Result<usize, AppError> = horme::transaction(&mut conn, async |conn| {
+        diesel::delete(
+            gm::group_members.filter(
+                gm::group_id.eq_any(
+                    g::groups
+                        .filter(g::id.eq(&group_id_param))
+                        .filter(g::created_by.eq(&uid))
+                        .select(g::id),
+                ),
+            ),
+        )
+        .execute(conn)
+        .await?;
+        Ok(diesel::delete(
+            g::groups
+                .filter(g::id.eq(&group_id_param))
+                .filter(g::created_by.eq(&uid)),
+        )
+        .execute(conn)
+        .await?)
+    })
+    .await;
+    match deletion {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
@@ -514,6 +539,19 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
         return;
     }
 
+    if let Err(error) = crate::services::tenancy::ensure_same_tenant_async(
+        &mut conn,
+        &uid,
+        &body.user_id.to_string(),
+    )
+    .await
+    {
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
+        return;
+    }
     let member_id_val = Uuid::new_v4();
     let now = Utc::now();
 
@@ -699,19 +737,23 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .await
     {
         Ok(rows) => {
-            let members: Vec<GroupMemberResponse> = rows
-                .into_iter()
-                .map(
-                    |(mid, gid, muid, uname, dname, added)| GroupMemberResponse {
-                        id: mid.parse().unwrap_or_default(),
-                        group_id: gid.parse().unwrap_or_default(),
-                        user_id: muid.parse().unwrap_or_default(),
-                        username: uname,
-                        display_name: dname,
-                        added_at: added.parse().unwrap_or_else(|_| Utc::now()),
-                    },
-                )
-                .collect();
+            let mut members = Vec::with_capacity(rows.len());
+            for (mid, gid, muid, uname, dname, added) in rows {
+                if crate::services::tenancy::ensure_same_tenant_async(&mut conn, &uid, &muid)
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                members.push(GroupMemberResponse {
+                    id: mid.parse().unwrap_or_default(),
+                    group_id: gid.parse().unwrap_or_default(),
+                    user_id: muid.parse().unwrap_or_default(),
+                    username: uname,
+                    display_name: dname,
+                    added_at: added.parse().unwrap_or_else(|_| Utc::now()),
+                });
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(members)));
         }

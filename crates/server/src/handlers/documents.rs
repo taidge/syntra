@@ -9,10 +9,9 @@ use contrix_core::dto::{
     ApiResponse, CreateDocumentRequest, DocumentResponse, UpdateDocumentRequest,
 };
 use contrix_core::error::AppError;
-use contrix_core::models::{DocumentType, NewDocument, NewFile, NewVersion};
+use contrix_core::models::{DocumentType, NewDocument, NewFile};
 use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::users::dsl as u;
 use contrix_core::schema::versions::dsl as v;
 use contrix_export::ExportFormat;
 
@@ -77,26 +76,34 @@ async fn persist_document_blob(
     Ok((path, content.len() as i64))
 }
 
-async fn delete_previous_blob_if_safe(storage: &StorageBackend, old_path: &str) {
-    let path = std::path::Path::new(old_path);
-    if old_path.is_empty() || path.is_absolute() {
-        return;
-    }
+fn render_error(res: &mut Response, error: AppError) {
+    res.status_code(
+        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
+    res.render(Json(ApiResponse::<()>::err(error.to_response())));
+}
 
-    let _ = storage.delete_file(old_path).await;
+// Destination-access failures retain the endpoint's established 403 contract;
+// database failures use the shared 500/503 classification instead.
+fn render_access_error(res: &mut Response, error: AppError) {
+    let error = match error {
+        AppError::Database(_) | AppError::Internal(_) | AppError::Forbidden(_) => error,
+        other => AppError::Forbidden(other.to_string()),
+    };
+    render_error(res, error);
 }
 
 async fn resolve_document_id(
     conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     identifier: &str,
+    user: &str,
+    role: &str,
 ) -> Result<Option<String>, AppError> {
-    d::documents
-        .filter(d::id.eq(identifier))
-        .select(d::id)
-        .first::<String>(conn)
-        .await
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))
+    let file =
+        crate::handlers::access::load_accessible_document(conn, identifier, user, role).await?;
+    Ok(file
+        .filter(|file| !file.is_trashed)
+        .map(|_| identifier.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -136,23 +143,10 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let content = default_content(&body.document_type, &body.name);
     let content_str = serde_json::to_string(&content).unwrap_or_default();
     let storage_name = document_storage_name(&body.name);
-    let (path_val, size_val) =
-        match persist_document_blob(&state.storage, &uid, &storage_name, &content_str).await {
-            Ok(result) => result,
-            Err(e) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
-                return;
-            }
-        };
-
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
@@ -180,8 +174,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
                 return;
             }
             Err(e) => {
-                res.status_code(StatusCode::FORBIDDEN);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                render_access_error(res, e);
                 return;
             }
         }
@@ -189,8 +182,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         match check_room_access(&mut conn, &uid, room_id, "editor").await {
             Ok(()) => Some(room_id.to_string()),
             Err(e) => {
-                res.status_code(StatusCode::FORBIDDEN);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                render_access_error(res, e);
                 return;
             }
         }
@@ -198,6 +190,14 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         None
     };
 
+    let (path_val, size_val) =
+        match persist_document_blob(&state.storage, &uid, &storage_name, &content_str).await {
+            Ok(value) => value,
+            Err(error) => {
+                render_error(res, error);
+                return;
+            }
+        };
     // Create the file record.
     let new_file = NewFile {
         id: file_id_val.to_string(),
@@ -217,23 +217,6 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         sort_order: 0,
     };
 
-    if let Err(e) = diesel::insert_into(f::files)
-        .values(&new_file)
-        .execute(&mut conn)
-        .await
-    {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::Database(e.to_string()).to_response(),
-        )));
-        return;
-    }
-
-    let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
-        .set(u::storage_used.eq(u::storage_used + size_val))
-        .execute(&mut conn)
-        .await;
-
     // Create the document record.
     let new_doc = NewDocument {
         id: doc_id_val.to_string(),
@@ -245,15 +228,46 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         updated_at: now.to_rfc3339(),
     };
 
-    if let Err(e) = diesel::insert_into(d::documents)
-        .values(&new_doc)
-        .execute(&mut conn)
-        .await
-    {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::Database(e.to_string()).to_response(),
-        )));
+    let creating_user = uid.clone();
+    let result =
+        crate::services::persistence::commit_blob(&state.db, path_val.clone(), move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                if let Some(parent_id) = &new_file.parent_id {
+                    use contrix_core::models::File;
+                    let parent =
+                        diesel::RunQueryDsl::first::<File>(f::files.find(parent_id), conn)?;
+                    if !parent.is_folder || parent.room_id != new_file.room_id {
+                        return Err(AppError::Conflict("Parent folder changed".into()));
+                    }
+                    crate::services::persistence::authorize(
+                        conn,
+                        &parent,
+                        &creating_user,
+                        "editor",
+                    )?;
+                } else if let Some(room_id) = &new_file.room_id {
+                    crate::services::persistence::authorize_room(
+                        conn,
+                        room_id,
+                        &creating_user,
+                        "editor",
+                    )?;
+                }
+                crate::services::persistence::adjust_quota(conn, &creating_user, size_val)?;
+                diesel::RunQueryDsl::execute(
+                    diesel::insert_into(f::files).values(&new_file),
+                    conn,
+                )?;
+                diesel::RunQueryDsl::execute(
+                    diesel::insert_into(d::documents).values(&new_doc),
+                    conn,
+                )?;
+                Ok(())
+            })
+        })
+        .await;
+    if let Err(error) = result {
+        render_error(res, error);
         return;
     }
 
@@ -310,15 +324,13 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer").await
+    {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -328,8 +340,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_error(res, e);
             return;
         }
     };
@@ -337,7 +348,6 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
     let row = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(&resolved_doc_id))
-        .filter(f::owner_id.eq(&uid))
         .select((
             d::id,
             d::file_id,
@@ -401,10 +411,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
             )));
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
         }
     }
 }
@@ -416,181 +423,194 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
 #[handler]
 pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
-    let uid = match get_user_id(depot) {
-        Some(val) => val,
-        None => {
-            res.status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Auth("Not authenticated".into()).to_response(),
-            )));
-            return;
-        }
+    let Some(uid) = get_user_id(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
     };
-
-    let doc_id_param: String = req.param("id").unwrap_or_default();
-
-    let body: UpdateDocumentRequest = match req.parse_json().await {
-        Ok(b) => b,
-        Err(e) => {
-            res.status_code(StatusCode::BAD_REQUEST);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Validation(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    // Fetch current version and backing file details.
-    let current = d::documents
-        .inner_join(f::files.on(d::file_id.eq(f::id)))
-        .filter(d::id.eq(&doc_id_param))
-        .filter(f::owner_id.eq(&uid))
-        .select((
-            d::id,
-            d::file_id,
-            f::name,
-            f::path,
-            f::size,
-            f::owner_id,
-            d::version,
-            d::content,
-            d::doc_type,
-        ))
-        .first::<(
-            String,
-            String,
-            String,
-            String,
-            i64,
-            String,
-            i32,
-            Option<String>,
-            String,
-        )>(&mut conn)
-        .await
-        .optional();
-
-    let (
-        resolved_doc_id,
-        file_id_val,
-        file_name,
-        old_path,
-        old_size,
-        owner_id,
-        current_version,
-        old_content_opt,
-        doc_type_str,
-    ) = match current {
-        Ok(Some(r)) => r,
+    let id: String = req.param("id").unwrap_or_default();
+    // Check access before allocating a large body; the commit transaction
+    // checks it again after parsing, so a concurrent revocation still wins.
+    match resolve_document_id(&mut state.db.clone(), &id, &uid, "editor").await {
+        Ok(Some(_)) => {}
         Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Document not found".into()).to_response(),
-            )));
+            render_error(res, AppError::NotFound("Document not found".into()));
             return;
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+        Err(error) => {
+            render_error(res, error);
+            return;
+        }
+    }
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    static CAPACITY: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)));
+    let capacity = match CAPACITY.clone().try_acquire_owned() {
+        Ok(permit) => std::sync::Arc::new(permit),
+        Err(_) => {
+            render_error(
+                res,
+                AppError::RateLimit("Document save capacity is busy; retry later".into()),
+            );
             return;
         }
     };
-
-    let new_version = current_version + 1;
-    let now = Utc::now();
-    let content_str = serde_json::to_string(&body.content).unwrap_or_default();
-    let storage_name = document_storage_name(&file_name);
-    let (new_path, new_size) =
-        match persist_document_blob(&state.storage, &owner_id, &storage_name, &content_str).await {
-            Ok(result) => result,
-            Err(e) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
-                return;
-            }
-        };
-    let size_diff = new_size - old_size;
-
-    // Create a version snapshot of the old content.
-    let new_ver = NewVersion {
-        id: Uuid::new_v4().to_string(),
-        document_id: resolved_doc_id.clone(),
-        version_number: current_version,
-        content: old_content_opt,
-        created_by: uid.clone(),
-        label: None,
-        created_at: now.to_rfc3339(),
-    };
-    let _ = diesel::insert_into(v::versions)
-        .values(&new_ver)
-        .execute(&mut conn)
-        .await;
-
-    // Update the document.
-    match diesel::update(d::documents.filter(d::id.eq(&resolved_doc_id)))
-        .set((
-            d::content.eq(Some(&content_str)),
-            d::version.eq(new_version),
-            d::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await
+    const REQUEST_BYTES: usize = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 64 * 1024;
+    const REJECTION_BYTES: usize = REQUEST_BYTES + 1024 * 1024;
+    let retained = super::request_body::RetainedBody::install_with_timeouts(
+        req,
+        std::time::Duration::from_secs(state.config.storage.upload_idle_timeout_seconds),
+        std::time::Duration::from_secs(state.config.storage.upload_total_timeout_seconds),
+    );
+    if req
+        .headers()
+        .get("content-length")
+        .and_then(|length| length.to_str().ok())
+        .and_then(|length| length.parse::<u64>().ok())
+        .is_some_and(|length| length > REQUEST_BYTES as u64)
     {
-        Ok(_) => {
-            let _ = diesel::update(f::files.filter(f::id.eq(&file_id_val)))
-                .set((
-                    f::path.eq(&new_path),
-                    f::size.eq(new_size),
-                    f::updated_at.eq(now.to_rfc3339()),
-                ))
-                .execute(&mut conn)
-                .await;
-            let _ = diesel::update(u::users.filter(u::id.eq(&owner_id)))
-                .set(u::storage_used.eq(u::storage_used + size_diff))
-                .execute(&mut conn)
-                .await;
-            delete_previous_blob_if_safe(&state.storage, &old_path).await;
-
-            crate::services::WebhookService::fire_event(
-                &state.db,
-                "document.updated",
-                &serde_json::json!({
-                    "id": resolved_doc_id,
-                    "file_id": file_id_val,
-                    "name": file_name,
-                    "owner_id": owner_id,
-                    "document_type": doc_type_str,
-                    "version": new_version,
-                    "updated_at": now.to_rfc3339(),
-                }),
-            )
+        let drained = retained
+            .drain(REJECTION_BYTES, std::time::Duration::from_secs(2))
             .await;
-
-            res.status_code(StatusCode::OK);
-            res.render(Json(ApiResponse::ok(serde_json::json!({
-                "version": new_version,
-                "message": "Document updated"
-            }))));
+        super::request_body::close_if_incomplete(req, res, drained);
+        render_error(
+            res,
+            AppError::QuotaExceeded(
+                "Document request exceeds the 20 MiB model plus envelope budget".into(),
+            ),
+        );
+        return;
+    }
+    if !req
+        .content_type()
+        .is_some_and(|content_type| content_type.subtype().as_str() == "json")
+    {
+        let drained = retained
+            .drain(REJECTION_BYTES, std::time::Duration::from_secs(2))
+            .await;
+        super::request_body::close_if_incomplete(req, res, drained);
+        render_error(
+            res,
+            AppError::Validation("Expected a JSON request body".into()),
+        );
+        return;
+    }
+    req.set_secure_max_size(REQUEST_BYTES);
+    let payload = match req.payload().await {
+        Ok(payload) => payload.clone(),
+        Err(error) => {
+            let drained = retained
+                .drain(REJECTION_BYTES, std::time::Duration::from_secs(2))
+                .await;
+            super::request_body::close_if_incomplete(req, res, drained);
+            let error = if retained.timed_out() {
+                AppError::Timeout(
+                    "Reading the document body exceeded its configured deadline".into(),
+                )
+            } else if super::request_body::exceeds_limit(&error) {
+                AppError::QuotaExceeded(
+                    "Document request exceeds the configured JSON budget".into(),
+                )
+            } else {
+                AppError::Validation(error.to_string())
+            };
+            render_error(res, error);
+            return;
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
+    };
+    drop(retained);
+    let parse_capacity = capacity.clone();
+    let parsed = tokio::task::spawn_blocking(move || {
+        let _capacity = parse_capacity;
+        let body: UpdateDocumentRequest = serde_json::from_slice(&payload).map_err(|error| {
+            AppError::Validation(format!(
+                "Invalid document JSON at line {}, column {} ({:?})",
+                error.line(),
+                error.column(),
+                error.classify()
+            ))
+        })?;
+        let content = serde_json::to_string(&body.content)
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        if content.len() > contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES {
+            return Err(AppError::QuotaExceeded(
+                "Document content exceeds 20 MiB".into(),
+            ));
+        }
+        Ok::<_, AppError>((body, content))
+    })
+    .await;
+    let (body, content) = match parsed {
+        Ok(Ok(parsed)) => parsed,
+        Ok(Err(error)) => {
+            render_error(res, error);
+            return;
+        }
+        Err(_) => {
+            render_error(
+                res,
+                AppError::Internal("Document parsing worker failed".into()),
+            );
+            return;
+        }
+    };
+    let Some(expected) = body.expected_version.filter(|version| *version > 0) else {
+        render_error(
+            res,
+            AppError::Validation("A positive expected_version is required".into()),
+        );
+        return;
+    };
+    // The owned task retains admission through storage and SQL, even if the
+    // HTTP client disconnects while a background commit can still succeed.
+    let committed = tokio::spawn(async move {
+        let _capacity = capacity;
+        crate::middleware::auth::validate_credential_for_request(
+            &state,
+            &credential,
+            &salvo::http::Method::PUT,
+            &format!("/api/v1/documents/{id}"),
+        )
+        .await?;
+        let version = crate::services::persistence::commit_document_with_credential(
+            &state.db,
+            &state.storage,
+            &id,
+            &uid,
+            expected,
+            content,
+            None,
+            &credential,
+        )
+        .await?;
+        if let Ok(document_id) = Uuid::parse_str(&id) {
+            state
+                .collab
+                .publish_snapshot(document_id, body.content, version as u64)
+                .await;
+        }
+        crate::services::WebhookService::fire_event(
+            &state.db,
+            "document.updated",
+            &serde_json::json!({"id":id,"version":version}),
+        )
+        .await;
+        Ok::<_, AppError>(version)
+    })
+    .await;
+    match committed {
+        Ok(Ok(version)) => {
+            res.render(Json(ApiResponse::ok(
+                serde_json::json!({"version":version,"message":"Document updated"}),
             )));
         }
+        Ok(Err(error)) => render_error(res, error),
+        Err(_) => render_error(
+            res,
+            AppError::Internal("Document commit worker failed".into()),
+        ),
     }
 }
 
@@ -601,101 +621,50 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
 #[handler]
 pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
-    let uid = match get_user_id(depot) {
-        Some(val) => val,
-        None => {
-            res.status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Auth("Not authenticated".into()).to_response(),
-            )));
-            return;
-        }
+    let Some(uid) = get_user_id(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
     };
-
-    let doc_id_param: String = req.param("id").unwrap_or_default();
-    let now = Utc::now();
-
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Document not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
-            return;
-        }
-    };
-
-    // Fetch the associated file_id.
-    let file_id_row = d::documents
-        .inner_join(f::files.on(d::file_id.eq(f::id)))
-        .filter(d::id.eq(&resolved_doc_id))
-        .filter(f::owner_id.eq(&uid))
-        .select(d::file_id)
-        .first::<String>(&mut conn)
-        .await
-        .optional();
-
-    let file_id_val = match file_id_row {
-        Ok(Some(fid)) => fid,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Document not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    // Trash the file.
-    let _ = diesel::update(f::files.filter(f::id.eq(&file_id_val)))
-        .set((
-            f::is_trashed.eq(true),
-            f::trashed_at.eq(Some(now.to_rfc3339())),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
+    let id: String = req.param("id").unwrap_or_default();
+    let deleted_id = id.clone();
+    let result = state
+        .db
+        .run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                use contrix_core::models::{Document, File};
+                let document =
+                    diesel::RunQueryDsl::first::<Document>(d::documents.find(&id), conn)?;
+                let file =
+                    diesel::RunQueryDsl::first::<File>(f::files.find(&document.file_id), conn)?;
+                crate::services::persistence::authorize(conn, &file, &uid, "admin")?;
+                crate::services::persistence::check_file_lock(conn, &file.id, &uid, None)?;
+                let now = Utc::now().to_rfc3339();
+                diesel::RunQueryDsl::execute(
+                    diesel::update(f::files.find(&file.id)).set((
+                        f::is_trashed.eq(true),
+                        f::trashed_at.eq(Some(&now)),
+                        f::updated_at.eq(&now),
+                    )),
+                    conn,
+                )?;
+                Ok(())
+            })
+        })
         .await;
-
-    crate::services::WebhookService::fire_event(
-        &state.db,
-        "document.deleted",
-        &serde_json::json!({
-            "id": resolved_doc_id,
-            "file_id": file_id_val,
-            "owner_id": uid,
-            "deleted_at": now.to_rfc3339(),
-        }),
-    )
-    .await;
-
-    res.status_code(StatusCode::OK);
-    res.render(Json(ApiResponse::ok(
-        serde_json::json!({ "message": "Document deleted" }),
-    )));
+    match result {
+        Ok(()) => {
+            crate::services::WebhookService::fire_event(
+                &state.db,
+                "document.deleted",
+                &serde_json::json!({"id":deleted_id}),
+            )
+            .await;
+            res.render(Json(ApiResponse::ok(
+                serde_json::json!({"message":"Document deleted"}),
+            )));
+        }
+        Err(error) => render_error(res, error),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -721,15 +690,13 @@ pub async fn get_document_content(req: &mut Request, depot: &mut Depot, res: &mu
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer").await
+    {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -739,8 +706,7 @@ pub async fn get_document_content(req: &mut Request, depot: &mut Depot, res: &mu
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_error(res, e);
             return;
         }
     };
@@ -748,7 +714,6 @@ pub async fn get_document_content(req: &mut Request, depot: &mut Depot, res: &mu
     let row = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(&resolved_doc_id))
-        .filter(f::owner_id.eq(&uid))
         .select((d::content, d::version))
         .first::<(Option<String>, i32)>(&mut conn)
         .await
@@ -773,10 +738,7 @@ pub async fn get_document_content(req: &mut Request, depot: &mut Depot, res: &mu
             )));
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
         }
     }
 }
@@ -817,15 +779,13 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer").await
+    {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -835,8 +795,7 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_error(res, e);
             return;
         }
     };
@@ -844,7 +803,6 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let row = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(&resolved_doc_id))
-        .filter(f::owner_id.eq(&uid))
         .select((d::doc_type, d::content, f::name))
         .first::<(String, Option<String>, String)>(&mut conn)
         .await
@@ -860,10 +818,7 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
@@ -923,15 +878,13 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer").await
+    {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -941,8 +894,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_error(res, e);
             return;
         }
     };
@@ -951,7 +903,6 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let count: i64 = match d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(&resolved_doc_id))
-        .filter(f::owner_id.eq(&uid))
         .count()
         .get_result(&mut conn)
         .await
@@ -1004,10 +955,7 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
             res.render(Json(ApiResponse::ok(version_list)));
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
         }
     }
 }
@@ -1019,173 +967,91 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
 #[handler]
 pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
-    let uid = match get_user_id(depot) {
-        Some(val) => val,
-        None => {
-            res.status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Auth("Not authenticated".into()).to_response(),
-            )));
+    let Some(uid) = get_user_id(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let id: String = req.param("id").unwrap_or_default();
+    let version_id: String = req.param("version_id").unwrap_or_default();
+    #[derive(serde::Deserialize)]
+    struct RestoreRequest {
+        expected_version: i32,
+    }
+    let expected = match req.parse_json::<RestoreRequest>().await {
+        Ok(body) if body.expected_version > 0 => body.expected_version,
+        _ => {
+            render_error(
+                res,
+                AppError::Validation("A positive expected_version is required".into()),
+            );
             return;
         }
     };
-
-    let doc_id_param: String = req.param("id").unwrap_or_default();
-    let version_id_param: String = req.param("version_id").unwrap_or_default();
-
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    // Verify ownership and get current version.
-    let current = d::documents
-        .inner_join(f::files.on(d::file_id.eq(f::id)))
-        .filter(d::id.eq(&doc_id_param))
-        .filter(f::owner_id.eq(&uid))
-        .select((
-            d::id,
-            d::file_id,
-            f::name,
-            f::path,
-            f::size,
-            f::owner_id,
-            d::version,
-            d::content,
-        ))
-        .first::<(
-            String,
-            String,
-            String,
-            String,
-            i64,
-            String,
-            i32,
-            Option<String>,
-        )>(&mut conn)
-        .await
-        .optional();
-
-    let (
-        resolved_doc_id,
-        file_id_val,
-        file_name,
-        old_path,
-        old_size,
-        owner_id,
-        current_version,
-        current_content,
-    ) = match current {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Document not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    // Fetch the version to restore.
-    let version_row = v::versions
-        .filter(v::id.eq(&version_id_param))
-        .filter(v::document_id.eq(&resolved_doc_id))
+    let mut conn = state.db.clone();
+    if let Err(error) =
+        crate::handlers::access::load_accessible_document(&mut conn, &id, &uid, "editor")
+            .await
+            .and_then(|file| {
+                file.filter(|file| !file.is_trashed)
+                    .ok_or_else(|| AppError::NotFound("Document not found".into()))
+                    .map(|_| ())
+            })
+    {
+        render_error(res, error);
+        return;
+    }
+    let content = match v::versions
+        .filter(v::id.eq(version_id))
+        .filter(v::document_id.eq(&id))
         .select(v::content)
         .first::<Option<String>>(&mut conn)
         .await
-        .optional();
-
-    let restored_content = match version_row {
-        Ok(Some(c)) => c,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Version not found".into()).to_response(),
-            )));
+        .optional()
+    {
+        Ok(Some(Some(content))) => content,
+        Ok(_) => {
+            render_error(res, AppError::NotFound("Version content not found".into()));
             return;
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+        Err(error) => {
+            render_error(res, error.into());
             return;
         }
     };
-
-    let now = Utc::now();
-    let new_version = current_version + 1;
-    let restored_string = restored_content.clone().unwrap_or_default();
-    let storage_name = document_storage_name(&file_name);
-    let (new_path, new_size) =
-        match persist_document_blob(&state.storage, &owner_id, &storage_name, &restored_string)
-            .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
-                return;
+    let snapshot = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(content) => content,
+        Err(error) => {
+            render_error(
+                res,
+                AppError::Internal(format!("Invalid version content: {error}")),
+            );
+            return;
+        }
+    };
+    match crate::services::persistence::commit_document(
+        &state.db,
+        &state.storage,
+        &id,
+        &uid,
+        expected,
+        content,
+        Some("Before restore".into()),
+    )
+    .await
+    {
+        Ok(version) => {
+            if let Ok(document_id) = Uuid::parse_str(&id) {
+                state
+                    .collab
+                    .publish_snapshot(document_id, snapshot, version as u64)
+                    .await;
             }
-        };
-    let size_diff = new_size - old_size;
-
-    // Snapshot current content before restoring.
-    let snap = NewVersion {
-        id: Uuid::new_v4().to_string(),
-        document_id: resolved_doc_id.clone(),
-        version_number: current_version,
-        content: current_content,
-        created_by: uid.clone(),
-        label: Some("Before restore".to_string()),
-        created_at: now.to_rfc3339(),
-    };
-    let _ = diesel::insert_into(v::versions)
-        .values(&snap)
-        .execute(&mut conn)
-        .await;
-
-    // Apply the restored content.
-    let _ = diesel::update(d::documents.filter(d::id.eq(&resolved_doc_id)))
-        .set((
-            d::content.eq(&restored_content),
-            d::version.eq(new_version),
-            d::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await;
-    let _ = diesel::update(f::files.filter(f::id.eq(&file_id_val)))
-        .set((
-            f::path.eq(&new_path),
-            f::size.eq(new_size),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await;
-    let _ = diesel::update(u::users.filter(u::id.eq(&owner_id)))
-        .set(u::storage_used.eq(u::storage_used + size_diff))
-        .execute(&mut conn)
-        .await;
-    delete_previous_blob_if_safe(&state.storage, &old_path).await;
-
-    res.status_code(StatusCode::OK);
-    res.render(Json(ApiResponse::ok(serde_json::json!({
-        "version": new_version,
-        "message": "Version restored"
-    }))));
+            res.render(Json(ApiResponse::ok(
+                serde_json::json!({"version":version,"message":"Version restored"}),
+            )));
+        }
+        Err(error) => render_error(res, error),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1233,15 +1099,13 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
 
-    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param).await {
+    let resolved_doc_id = match resolve_document_id(&mut conn, &doc_id_param, &uid, "viewer").await
+    {
         Ok(Some(id)) => id,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -1251,8 +1115,7 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_error(res, e);
             return;
         }
     };
@@ -1261,7 +1124,6 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let count: i64 = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(&resolved_doc_id))
-        .filter(f::owner_id.eq(&uid))
         .count()
         .get_result(&mut conn)
         .await
@@ -1294,10 +1156,7 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
@@ -1321,10 +1180,7 @@ pub async fn diff_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };

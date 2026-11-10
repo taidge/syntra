@@ -674,6 +674,7 @@ fn escape_xml(s: &str) -> String {
 
 /// Convert a `.docx` byte slice into a [`WriterDocument`].
 pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
+    crate::ooxml::validate(bytes)?;
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("zip open: {e}"))?;
 
     let title = read_core_title(&mut archive).unwrap_or_else(|| "Imported Document".to_string());
@@ -681,7 +682,8 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
     let numbering = match archive.by_name("word/numbering.xml") {
         Ok(mut file) => {
             let mut xml = String::new();
-            file.read_to_string(&mut xml)
+            crate::ooxml::bounded(&mut file)
+                .read_to_string(&mut xml)
                 .map_err(|e| format!("read numbering.xml: {e}"))?;
             parse_numbering(&xml)?
         }
@@ -695,11 +697,13 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
     let endnotes = read_notes(&mut archive, "word/endnotes.xml", true)?;
 
     let mut document_xml = String::new();
-    archive
-        .by_name("word/document.xml")
-        .map_err(|e| format!("missing word/document.xml: {e}"))?
-        .read_to_string(&mut document_xml)
-        .map_err(|e| format!("read document.xml: {e}"))?;
+    crate::ooxml::bounded(
+        archive
+            .by_name("word/document.xml")
+            .map_err(|e| format!("missing word/document.xml: {e}"))?,
+    )
+    .read_to_string(&mut document_xml)
+    .map_err(|e| format!("read document.xml: {e}"))?;
 
     let blocks = parse_body(&document_xml, &numbering, &imported_images)?;
     let mut doc = WriterDocument::new(title);
@@ -713,6 +717,7 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
     if let Some(settings) = parse_page_settings(&document_xml) {
         doc.page_settings = settings;
     }
+    crate::ooxml_import::model_budget(&doc)?;
     Ok(doc)
 }
 
@@ -721,7 +726,9 @@ fn read_part_xml<R: Read + std::io::Seek>(
     name: &str,
 ) -> Option<String> {
     let mut xml = String::new();
-    archive.by_name(name).ok()?.read_to_string(&mut xml).ok()?;
+    crate::ooxml::bounded(archive.by_name(name).ok()?)
+        .read_to_string(&mut xml)
+        .ok()?;
     Some(xml)
 }
 
@@ -869,7 +876,7 @@ fn load_imported_images<R: Read + std::io::Seek>(
     let Ok(mut relationships_file) = archive.by_name("word/_rels/document.xml.rels") else {
         return Ok(HashMap::new());
     };
-    relationships_file
+    crate::ooxml::bounded(&mut relationships_file)
         .read_to_string(&mut relationships_xml)
         .map_err(|e| format!("read document relationships: {e}"))?;
     drop(relationships_file);
@@ -927,7 +934,8 @@ fn load_imported_images<R: Read + std::io::Seek>(
             continue;
         }
         let mut bytes = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut bytes)
+        crate::ooxml::bounded(&mut file)
+            .read_to_end(&mut bytes)
             .map_err(|e| format!("read embedded image: {e}"))?;
         total_bytes = total_bytes.saturating_add(bytes.len());
         if total_bytes > MAX_TOTAL_IMAGE_BYTES {
@@ -946,7 +954,9 @@ fn read_core_title<R: std::io::Read + std::io::Seek>(
 ) -> Option<String> {
     let mut file = archive.by_name("docProps/core.xml").ok()?;
     let mut s = String::new();
-    file.read_to_string(&mut s).ok()?;
+    crate::ooxml::bounded(&mut file)
+        .read_to_string(&mut s)
+        .ok()?;
     let mut reader = Reader::from_str(&s);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();

@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "measured_at_utc": "2026-11-09T19:50:03.1672370Z",
+  "scope": "Previous phase release binary; before maintenance and 20MiB document-body changes. Background host load was not controlled; descriptive baseline, not SLO.",
+  "binary_sha256": "17c667dfe0115c9d785c43a60fe048009135d3485017071ed9f440a8ebbc60ac",
+  "binary_mtime_utc": "2026-11-09T17:02:38Z",
+  "host": "Windows-11-10.0.26300-SP0",
+  "logical_cpus": 28,
+  "load": {
+    "workers": 2,
+    "requests_per_worker": 100,
+    "mix": "90% GET /documents/:id, 10% CAS PUT; one independent document per worker",
+    "hot_exports": 30,
+    "hot_title_bytes": 32768,
+    "warmup_reads_per_document": 5
+  },
+  "transport": "HTTP/1 loopback; fresh urllib connection per request; system proxies disabled",
+  "http_mixed": {
+    "elapsed_s": 6.92093069999828,
+    "attempted_requests_per_second": 28.89784751060283,
+    "successful_requests_per_second": 28.89784751060283,
+    "failures": [],
+    "failed_workload_requests": 0,
+    "get": {
+      "p50_ms": 37.05389999959152,
+      "p95_ms": 62.70520000543911,
+      "p99_ms": 99.84719999192748,
+      "count": 180,
+      "max_ms": 118.27289999928325
+    },
+    "put": {
+      "p50_ms": 165.083500003675,
+      "p95_ms": 828.5328000056325,
+      "p99_ms": 1320.0485999986995,
+      "count": 20,
+      "max_ms": 1320.0485999986995
+    }
+  },
+  "cross_document": {
+    "hot_document_title_bytes": 32768,
+    "hot_workload": "serial POST export/json",
+    "cold_workload": "up to 100 GETs of an independent Writer, stop after hot exports finish",
+    "cold_baseline": {
+      "p50_ms": 29.070300006424077,
+      "p95_ms": 49.23249999410473,
+      "p99_ms": 132.0115000125952,
+      "count": 100,
+      "max_ms": 182.33909999253228
+    },
+    "cold_while_hot": {
+      "p50_ms": 45.69079999055248,
+      "p95_ms": 91.58379999280442,
+      "p99_ms": 118.9382000011392,
+      "count": 31,
+      "max_ms": 118.9382000011392
+    }
+  },
+  "memory": {
+    "samples": 175,
+    "sampled_peak_rss_bytes": 18849792,
+    "method": "server process RSS sampled every 50ms"
+  },
+  "success": true,
+  "errors": [],
+  "raw_artifact": "target/performance/before-maintenance-http-overlap.json"
+}

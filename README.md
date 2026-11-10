@@ -51,7 +51,7 @@ A full-featured, open-source office suite built entirely in Rust. Contrix Office
 ### Collaboration
 
 - Real-time collaborative editing via WebSocket
-- CRDT-based conflict resolution (Operational Transform)
+- Durable versioned snapshots and operational transformation, with explicit conflict recovery that preserves local edits
 - Live cursor presence — see other users editing
 - User awareness (who's viewing/editing)
 - Comments and annotations with @mentions
@@ -82,9 +82,9 @@ A full-featured, open-source office suite built entirely in Rust. Contrix Office
 | Markdown | Export | —    | —      | —          |
 | CSV      | —      | Both | —      | —          |
 | JSON     | Both   | Both | Both   | Both       |
-| DOCX     | Planned | —  | —      | —          |
-| XLSX     | —      | Planned | —   | —          |
-| PPTX     | —      | —    | Planned | —         |
+| DOCX     | Both | — | — | — |
+| XLSX     | — | Both | — | — |
+| PPTX     | — | — | Element import/export (subset) | — |
 | PNG      | —      | —    | —      | Export     |
 | SVG      | —      | —    | —      | Export     |
 
@@ -114,9 +114,9 @@ A full-featured, open-source office suite built entirely in Rust. Contrix Office
 |-------|-----------|---------|
 | Backend | [Salvo](https://salvo.rs) | High-performance Rust web framework |
 | Frontend | [Glory](https://glory.rs) + [Sapid](https://github.com/sapid-ui/sapid) | Semantic Rust widgets and WebAssembly browser host |
-| Database | [SQLx](https://github.com/launchbadge/sqlx) + SQLite/PostgreSQL | Async database with compile-time safety |
+| Database | Diesel + Horme + SQLite | Short asynchronous query leases and transactions |
 | Auth | JWT + Argon2 | Stateless authentication + secure hashing |
-| Real-time | WebSocket + CRDT | Low-latency collaboration |
+| Real-time | WebSocket + durable versions and conditional commits | Online synchronization and explicit conflict recovery |
 | Search | SQLite | Transactionally consistent name/content search |
 | Config | [Figment](https://github.com/SergioBenitez/Figment) | Layered configuration (TOML + env) |
 | Logging | [tracing](https://github.com/tokio-rs/tracing) | Structured, async-aware logging |
@@ -162,22 +162,44 @@ pwsh ./scripts/dev.ps1
 ```
 
 Open `http://localhost:3000`. The server serves the API and browser app from the same origin.
-Compiler output, temporary files and generated browser assets stay under `D:/BuildCache/office-glory`.
-To build separately, run `pwsh ./scripts/build-frontend.ps1`, then
-`pwsh ./scripts/dev.ps1 -SkipFrontendBuild` from the repository root.
-The scripts set Cargo's registry cache, target directory and compiler temporaries on D:,
-then verify the effective target directory with `cargo metadata --no-deps --format-version 1`.
-Pass the same `-BuildRoot D:/BuildCache/<task>` to both scripts to use a separate build directory.
-Under WSL, the default is `/mnt/d/BuildCache/office-glory`; the scripts verify that `/mnt/d`
-is mounted from Windows D: before building. Remote GitHub Actions runners use their runner
-temporary directory on Linux/macOS and D: on Windows.
+Builds respect the caller's environment and normal Cargo configuration. Scripts do not redirect CARGO_HOME, target, or TEMP/TMP.
+They discover artifacts with cargo metadata in this workspace; generated browser assets default to its target_directory/web.
+Build separately with pwsh ./scripts/build-frontend.ps1, then pwsh ./scripts/dev.ps1 -SkipFrontendBuild.
+-OutputDirectory selects browser asset output without changing compiler caches or temporary directories.
+Initialize the pinned submodules and install wasm-bindgen-cli matching Cargo.lock before running the scripts.
+
+Office compatibility tests distinguish native custom-part round trips from independent external files.
+External PPTX imports actual slide order and page dimensions, inherited placeholder bounds and master/layout decorations, styled text runs and safe hyperlinks, positioned shapes/groups, embedded images with crop/rotation, supported chart caches, notes, transitions and basic animation timing. Representable content is exported through standard Office parts. Embedded video media and geometry are retained for export; the editing canvas shows a placeholder and does not play the full PowerPoint animation timeline. Complex paragraph layout, custom paths, mirroring, SmartArt/OLE and unsupported visual effects may be approximated or omitted, with specific import warnings and the uploaded original available for download.
+
+External XLSX imports cell styles/theme colors, date formats, row/column dimensions, frozen panes, rectangular named ranges, supported validation/conditional-format rules, cached charts and simple pivots. Chart bindings refresh from same-sheet rectangular ranges; other bindings retain cached series with warnings, and the Calc grid has no chart overlay. Pivots support one row field and one value field with sum/count/average and write standard cache/table parts; complex or filtered pivots retain worksheet values and an import warning. Standard pivot export requires a source header row and a target heading row before their data. Custom validation formulas are retained for Office export but are not enforced by the editor. Unsupported table/filter/visibility/print/rich-text features produce warnings when encountered.
+
+External media is never fetched automatically. Embedded media is limited to 2 MiB per object and 8 MiB per imported presentation before base64 encoding; document JSON is limited to 20 MiB. ZIP/XML expansion, chart-point expansion and numeric geometry also have explicit budgets. The original upload retains content outside this supported subset.
+Document saves and version restores require expected_version; conflicts return 409. Chunk uploads require an explicit chunk_index starting at 1.
+Collaboration does not provide offline CRDT merging.
+
+Run pwsh ./scripts/package.ps1 to generate a complete ZIP containing the server, configuration samples, migrations and browser assets under metadata's target_directory/dist.
+Run pwsh ./scripts/test-package.ps1 -BrowserTests to verify the ZIP from a source-free directory, including login, saving, and recovery after a process restart.
+Run pwsh ./scripts/test-e2e.ps1 for the full HTTP and browser suite after installing the e2e dependencies and Playwright Chromium. Each run uses its own database, storage and loopback port beneath the workspace target directory.
+
+
+### Storage maintenance
+
+`[maintenance]` in `config/default.toml` controls history retention and object reconciliation. Ordinary history converges in batches to the newest 100 versions within 30 days by default; original uploads, current snapshots and bounded active collaboration bases are protected. Physical deletion is asynchronous. When the database's deferred deletion queue reaches 1024 objects, new object writes are rejected until cleanup makes progress; this counts objects, not disk bytes.
+
+New writes register ownership before object I/O. Unknown legacy objects are preserved by default. Enable `reconcile_legacy_dedicated_namespace` only when one metadata database exclusively owns the entire S3 bucket or local storage root. Independent databases must use different physical keys; running divergent copies of the same database against shared original keys is unsupported. Uploads use the configured idle/total body deadlines; chunk sessions reserve quota, permit at most 4096 chunks of up to 8 MiB, and return their limits when created.
+
+### Database snapshots and blob backups
+
+The admin backup endpoints create SQLite database snapshots only. They do not copy local storage or S3 objects, or preserve blobs referenced by older snapshots. Restoring a SQLite snapshot alone cannot guarantee file recovery: garbage collection can already have deleted objects that the live database no longer references.
+
+Coordinate database and blob backups and restore them together, preserving the object keys referenced by the database snapshot. This requires an external consistent backup or snapshot procedure that accounts for concurrent writes and garbage collection. The package restart tests reuse the same live database and storage; they do not validate full disaster recovery from database and blob backups.
 
 ### Source dependencies
 
 Glory and Sapid live in `.dependencies/glory` and `.dependencies/sapid`. Cargo uses these
 relative paths, so no separate checkout or manifest editing is needed. The repository records
 an exact commit for each submodule; `branch = main` identifies the upstream branch used for
-deliberate upgrades. The build and development scripts automatically initialize missing sources.
+deliberate upgrades. Initialize missing sources with git submodule update --init --recursive before building.
 
 For an existing clone, or after pulling a commit that updates dependencies, run:
 
@@ -237,14 +259,18 @@ default_quota_mb = 5120        # 5 GB per user
 
 ### Docker
 
+Before building, verify the Docker builder stores its data on D: or remotely; Cargo artifact placement does not establish Docker cache placement.
+
 ```bash
 # Build and run with Docker Compose
 cd docker
-docker-compose up -d
+export JWT_SECRET="$(openssl rand -hex 32)"
+docker compose up -d
 
-# Or build the image directly
+# Or build the image directly from the repository root
+cd ..
 docker build -t contrix-office -f docker/Dockerfile .
-docker run -p 3000:3000 -v contrix-data:/app/data contrix-office
+docker run -p 3000:8080 -e JWT_SECRET -v contrix-data:/data contrix-office
 ```
 
 ## API Reference
@@ -375,7 +401,7 @@ cargo test -p contrix-export
 cargo fmt
 
 # Run clippy
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets --no-deps --features contrix-frontend/ssr -- -D warnings
 ```
 
 ### Database Migrations
@@ -454,5 +480,5 @@ You may choose either license at your option.
 
 - [Salvo](https://salvo.rs) — Fast and flexible Rust web framework
 - [Glory](https://glory.rs) + [Sapid](https://github.com/sapid-ui/sapid) — Cross-platform UI framework for Rust
-- [SQLx](https://github.com/launchbadge/sqlx) — Async SQL toolkit for Rust
+- [Diesel](https://diesel.rs/) — Typed SQL for Rust; Horme provides asynchronous query leases
 - Inspired by [Collabora Online](https://www.collaboraoffice.com/) and [ONLYOFFICE](https://www.onlyoffice.com/)

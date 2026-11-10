@@ -229,7 +229,7 @@ pub async fn list_invitations(depot: &mut Depot, res: &mut Response) {
 #[handler]
 pub async fn get_invitation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
-    let _uid = match get_user_id(depot) {
+    let uid = match get_user_id(depot) {
         Some(val) => val,
         None => {
             res.status_code(StatusCode::UNAUTHORIZED);
@@ -253,12 +253,14 @@ pub async fn get_invitation(req: &mut Request, depot: &mut Depot, res: &mut Resp
         }
     };
 
-    match inv::invitations
+    let is_admin = get_user_role(depot).as_deref() == Some("admin");
+    let mut query = inv::invitations
         .filter(inv::id.eq(&invitation_id_param))
-        .first::<Invitation>(&mut conn)
-        .await
-        .optional()
-    {
+        .into_boxed();
+    if !is_admin {
+        query = query.filter(inv::invited_by.eq(&uid));
+    }
+    match query.first::<Invitation>(&mut conn).await.optional() {
         Ok(Some(row)) => {
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(invitation_to_response(row))));
@@ -430,6 +432,31 @@ pub async fn accept_invitation_with_depot(
         return;
     }
 
+    // Invitations inherit their issuer's namespace and cannot reactivate a
+    // disabled tenant or a capability issued by an administrator since demoted.
+    if let Err(error) =
+        crate::services::tenancy::user_tenant_async(&mut conn, &invitation.invited_by).await
+    {
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
+        return;
+    }
+    let issuer_role = contrix_core::schema::users::table
+        .find(&invitation.invited_by)
+        .select(contrix_core::schema::users::role)
+        .first::<String>(&mut conn)
+        .await;
+    if !matches!(issuer_role.as_deref(), Ok("admin")) {
+        res.status_code(StatusCode::FORBIDDEN);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Forbidden("Invitation issuer no longer has administrator access".into())
+                .to_response(),
+        )));
+        return;
+    }
+
     // Verify email matches.
     if body.email != invitation.email {
         res.status_code(StatusCode::BAD_REQUEST);
@@ -448,11 +475,12 @@ pub async fn accept_invitation_with_depot(
     // Check if a user with this email already exists.
     use contrix_core::schema::users::dsl as u_dsl;
 
-    let existing_user_count: i64 = match u_dsl::users
+    let existing_user: Option<String> = match u_dsl::users
         .filter(u_dsl::email.eq(&body.email))
-        .count()
-        .get_result(&mut conn)
+        .select(u_dsl::id)
+        .first::<String>(&mut conn)
         .await
+        .optional()
     {
         Ok(c) => c,
         Err(e) => {
@@ -464,7 +492,21 @@ pub async fn accept_invitation_with_depot(
         }
     };
 
-    if existing_user_count > 0 {
+    if let Some(existing_user) = existing_user {
+        if let Err(error) = crate::services::tenancy::ensure_same_tenant_async(
+            &mut conn,
+            &invitation.invited_by,
+            &existing_user,
+        )
+        .await
+        {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
+            return;
+        }
         // User already exists - just mark invitation as accepted.
         let now = Utc::now();
         let _ = diesel::update(inv::invitations.filter(inv::id.eq(&invitation.id)))
@@ -535,26 +577,61 @@ pub async fn accept_invitation_with_depot(
         last_login_at: Some(now.to_rfc3339()),
     };
 
-    if let Err(e) = diesel::insert_into(u_dsl::users)
-        .values(&new_user)
-        .execute(&mut conn)
-        .await
-    {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::Database(e.to_string()).to_response(),
-        )));
+    let accepted = state
+        .db
+        .run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                let tenant = crate::services::tenancy::user_tenant(conn, &invitation.invited_by)?;
+                let issuer_role = diesel::RunQueryDsl::first::<String>(
+                    u_dsl::users
+                        .find(&invitation.invited_by)
+                        .select(u_dsl::role),
+                    conn,
+                )?;
+                if issuer_role != "admin" {
+                    return Err(AppError::Forbidden(
+                        "Invitation issuer no longer has administrator access".into(),
+                    ));
+                }
+                let claimed = diesel::RunQueryDsl::execute(
+                    diesel::update(
+                        inv::invitations
+                            .filter(inv::id.eq(&invitation.id))
+                            .filter(inv::is_accepted.eq(false))
+                            .filter(inv::expires_at.gt(now.to_rfc3339())),
+                    )
+                    .set((
+                        inv::is_accepted.eq(true),
+                        inv::accepted_at.eq(Some(now.to_rfc3339())),
+                    )),
+                    conn,
+                )?;
+                if claimed != 1 {
+                    return Err(AppError::Conflict(
+                        "Invitation was already accepted or expired".into(),
+                    ));
+                }
+                diesel::RunQueryDsl::execute(
+                    diesel::insert_into(u_dsl::users).values(&new_user),
+                    conn,
+                )?;
+                diesel::RunQueryDsl::execute(
+                    diesel::sql_query("UPDATE users SET tenant_id = ? WHERE id = ?")
+                        .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(tenant)
+                        .bind::<diesel::sql_types::Text, _>(&new_user.id),
+                    conn,
+                )?;
+                Ok(())
+            })
+        })
+        .await;
+    if let Err(error) = accepted {
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
         return;
     }
-
-    // Mark the invitation as accepted.
-    let _ = diesel::update(inv::invitations.filter(inv::id.eq(&invitation.id)))
-        .set((
-            inv::is_accepted.eq(true),
-            inv::accepted_at.eq(Some(now.to_rfc3339())),
-        ))
-        .execute(&mut conn)
-        .await;
 
     res.status_code(StatusCode::CREATED);
     res.render(Json(ApiResponse::ok(serde_json::json!({

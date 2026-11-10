@@ -1,2 +1,1 @@
-[build]
-target-dir = "D:/BuildCache/office-glory/target"
+# Build locations follow Cargo defaults and the caller's environment.

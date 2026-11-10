@@ -20,3 +20,6 @@ pub use calc::{CellRef, CellValue, Selection, Sheet, Workbook};
 pub use slides::{Presentation, Slide, SlideElement, SlideLayout};
 pub use whiteboard::{DrawElement, Layer, Whiteboard};
 pub use writer::{Block, TextRun, WriterDocument};
+
+/// Maximum persisted document JSON content, shared by uploads and editor saves.
+pub const MAX_DOCUMENT_CONTENT_BYTES: usize = 20 * 1024 * 1024;

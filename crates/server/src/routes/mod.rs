@@ -54,6 +54,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                         .hoop(jwt_auth_middleware)
                         .hoop(user_rate_limiter)
                         .push(auth_protected_routes())
+                        // Static batch actions must precede files/{id}/move.
+                        .push(batch_routes())
                         .push(file_routes())
                         .push(folder_routes())
                         .push(document_routes())
@@ -81,7 +83,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                         .push(file_lock_routes())
                         .push(convert_routes())
                         .push(notification_pref_routes())
-                        .push(batch_routes())
                         .push(api_key_routes())
                         .push(ai_routes()),
                 ),
@@ -130,7 +131,9 @@ fn auth_protected_routes() -> Router {
 }
 
 fn health_routes() -> Router {
-    Router::with_path("health").get(handlers::health::health_check)
+    Router::new()
+        .push(Router::with_path("health").get(handlers::health::health_check))
+        .push(Router::with_path("ready").get(handlers::health::ready_check))
 }
 
 fn openapi_routes() -> Router {

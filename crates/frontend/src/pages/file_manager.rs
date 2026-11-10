@@ -10,6 +10,14 @@ struct Breadcrumb {
     name: String,
 }
 
+#[derive(Clone)]
+struct ImportNotice {
+    id: Uuid,
+    name: String,
+    warnings: Vec<String>,
+    original_url: Option<String>,
+}
+
 fn refresh(
     scope: &Scope,
     auth: Cage<AuthState>,
@@ -42,6 +50,7 @@ struct UploadContext {
     parent: Cage<Option<Uuid>>,
     files: Cage<Vec<FileResponse>>,
     feedback: Cage<String>,
+    import_notices: Cage<Vec<ImportNotice>>,
 }
 
 fn read_upload(
@@ -57,6 +66,7 @@ fn read_upload(
         parent,
         files,
         feedback,
+        import_notices,
     } = context;
     let request = glory::render::FileRead {
         file: file.token,
@@ -94,6 +104,7 @@ fn read_upload(
                     parent,
                     files,
                     feedback,
+                    import_notices,
                 },
             );
             return;
@@ -122,8 +133,18 @@ fn read_upload(
         let weak = scope.downgrade();
         let _ = scope.spawn(async move {
             match state::upload_file(file, parent_id, &token).await {
-                Ok(_) => {
+                Ok(upload) => {
                     if let Some(scope) = weak.upgrade() {
+                        if !upload.import_warnings.is_empty() {
+                            import_notices.revise(|notices| {
+                                notices.push(ImportNotice {
+                                    id: upload.file.id,
+                                    name: upload.file.name,
+                                    warnings: upload.import_warnings,
+                                    original_url: upload.original_download_url,
+                                })
+                            });
+                        }
                         refresh(&scope, auth, parent, files, feedback);
                     }
                 }
@@ -140,6 +161,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     let parent = scope.cage(None::<Uuid>);
     let files = scope.cage(Vec::<FileResponse>::new());
     let feedback = scope.cage(crate::i18n::t("common.loading"));
+    let import_notices = scope.cage(Vec::<ImportNotice>::new());
     let query = scope.cage(String::new());
     let grid_view = scope.cage(true);
     let folder_name = scope.cage(String::new());
@@ -188,6 +210,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                             parent,
                             files,
                             feedback,
+                            import_notices,
                         },
                     );
                 }
@@ -244,6 +267,7 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
             ))
         },
     );
+    let import_weak = scope.downgrade();
     col().class("files-page").fill((
         Navbar(scope.clone(), auth),
         row().class("file-manager").fill((
@@ -311,6 +335,35 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                         .on_value_change(move |value| set(query, value)),
                 )),
                 status(feedback),
+                each(import_notices)
+                    .key(|notice| notice.id)
+                    .children(move |row| {
+                        let notice = row.value.get();
+                        let weak = import_weak.clone();
+                        col().class("import-warning").fill((
+                            text()
+                                .kind(TextKind::Heading(2))
+                                .content(format!("Import compatibility: {}", notice.name)),
+                            text().content(notice.warnings.join(" ")),
+                            action("Download original", move || {
+                                let Some(scope) = weak.upgrade() else {
+                                    return;
+                                };
+                                let url = notice.original_url.clone().unwrap_or_else(|| {
+                                    format!("/api/v1/files/{}/download", notice.id)
+                                });
+                                let name = notice.name.clone();
+                                let token = token(auth);
+                                let _ = scope.spawn(async move {
+                                    if let Err(error) =
+                                        state::download_original(&url, &name, &token).await
+                                    {
+                                        set(feedback, error);
+                                    }
+                                });
+                            }),
+                        ))
+                    }),
                 row().class("file-view-toggle").fill((
                     icon_button(
                         crate::i18n::t("file_list.view_grid"),

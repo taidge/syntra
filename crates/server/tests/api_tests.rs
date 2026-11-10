@@ -482,7 +482,7 @@ async fn test_update_document_content() {
         .client
         .put(server.url(&format!("/api/v1/documents/{}", doc_id)))
         .headers(server.auth_header(&token))
-        .json(&serde_json::json!({ "content": new_content }))
+        .json(&serde_json::json!({ "content": new_content, "expected_version": 1 }))
         .send()
         .await
         .unwrap();
@@ -528,10 +528,14 @@ async fn test_delete_document() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["data"]["message"], "Document deleted");
 
-    // After trashing, getting the document should fail (file is trashed, so
-    // the owner-based query should still find it, but the join excludes trashed...
-    // Actually the handler does not filter on is_trashed, so it should still return.
-    // Let's verify the file is marked as trashed via the files endpoint).
+    let trashed = server
+        .client
+        .get(server.url(&format!("/api/v1/documents/{doc_id}")))
+        .headers(server.auth_header(&token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(trashed.status(), 404);
 }
 
 #[tokio::test]
@@ -547,14 +551,19 @@ async fn test_document_version_history() {
     // Update twice to create version history.
     for i in 1..=2 {
         let content = serde_json::json!({ "title": "Versioned", "iteration": i });
-        server
+        let saved = server
             .client
             .put(server.url(&format!("/api/v1/documents/{}", doc_id)))
             .headers(server.auth_header(&token))
-            .json(&serde_json::json!({ "content": content }))
+            .json(&serde_json::json!({ "content": content, "expected_version": i }))
             .send()
             .await
             .unwrap();
+        assert_eq!(saved.status(), 200);
+        assert_eq!(
+            saved.json::<serde_json::Value>().await.unwrap()["data"]["version"],
+            i + 1
+        );
     }
 
     let resp = server
@@ -584,13 +593,18 @@ async fn test_restore_version() {
 
     // Update the document so we have a version to restore.
     let updated_content = serde_json::json!({ "title": "Restorable", "state": "modified" });
-    server
+    let saved = server
         .client
         .put(server.url(&format!("/api/v1/documents/{}", doc_id)))
         .headers(server.auth_header(&token))
-        .json(&serde_json::json!({ "content": updated_content }))
+        .json(&serde_json::json!({ "content": updated_content, "expected_version": 1 }))
         .send()
         .await
+        .unwrap();
+
+    assert_eq!(saved.status(), 200);
+    let saved_version = saved.json::<serde_json::Value>().await.unwrap()["data"]["version"]
+        .as_i64()
         .unwrap();
 
     // List versions to get the version id of the first snapshot.
@@ -613,6 +627,7 @@ async fn test_restore_version() {
             doc_id, version_id
         )))
         .headers(server.auth_header(&token))
+        .json(&serde_json::json!({ "expected_version": saved_version }))
         .send()
         .await
         .unwrap();
@@ -1188,7 +1203,8 @@ async fn test_search_matches_document_content_without_external_index() {
         .put(server.url(&format!("/api/v1/documents/{document_id}")))
         .headers(server.auth_header(&token))
         .json(&serde_json::json!({
-            "content": { "text": "The internal phrase is sapphire-orbit" }
+            "content": { "text": "The internal phrase is sapphire-orbit" },
+            "expected_version": 1
         }))
         .send()
         .await
@@ -1230,7 +1246,8 @@ async fn test_content_search_never_crosses_document_ownership() {
         .put(server.url(&format!("/api/v1/documents/{document_id}")))
         .headers(server.auth_header(&owner_token))
         .json(&serde_json::json!({
-            "content": { "text": "owner-only-needle" }
+            "content": { "text": "owner-only-needle" },
+            "expected_version": 1
         }))
         .send()
         .await
@@ -1320,7 +1337,8 @@ async fn test_ai_assistant_calls_provider_sanitizes_output_and_audits() {
         .put(server.url(&format!("/api/v1/documents/{document_id}")))
         .headers(server.auth_header(&token))
         .json(&serde_json::json!({
-            "content": { "text": "confidential-marker" }
+            "content": { "text": "confidential-marker" },
+            "expected_version": 1
         }))
         .send()
         .await
@@ -1801,10 +1819,18 @@ async fn test_file_upload_enforces_configured_limit() {
             .multipart(reqwest::multipart::Form::new().part("file", part))
             .send()
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("size={size}, upload request failed: {error:?}"));
         let status = response.status();
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(status, 413, "size={size}, body={body}");
+        let headers = response.headers().clone();
+        let text = response.text().await.unwrap_or_else(|error| {
+            panic!(
+                "size={size}, status={status}, headers={headers:?}, response read failed: {error}"
+            )
+        });
+        let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|error| {
+            panic!("size={size}, status={status}, headers={headers:?}, body={text:?}, invalid JSON: {error}")
+        });
+        assert_eq!(status, 413, "size={size}, headers={headers:?}, body={body}");
         assert_eq!(body["success"], false);
         assert_eq!(body["error"]["code"], 413);
     }
@@ -1817,6 +1843,70 @@ async fn test_file_upload_enforces_configured_limit() {
         .unwrap();
     let body: serde_json::Value = response.json().await.unwrap();
     assert!(body["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn oversized_uploads_with_stalled_or_extreme_declared_bodies_return_bounded_json_errors() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let server = TestServer::new().await;
+    let (token, _) = server
+        .register("slow_upload", "slow_upload@test.com", "password123")
+        .await;
+    let address = server.base_url.strip_prefix("http://").unwrap();
+    // Keep the write side open, but never send the declared remainder. Neither
+    // the ordinary over-limit size nor an extreme declaration may force the
+    // server to allocate the body or wait indefinitely before its JSON error.
+    for declared in [11 * 1024 * 1024_u64, 1024_u64.pow(4)] {
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket
+            .write_all(
+                format!(
+                    "POST /api/v1/files/upload HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: multipart/form-data; boundary=slow\r\nContent-Length: {declared}\r\n\r\n--slow\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            socket.read_to_end(&mut response),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("declared={declared}, upload rejection waited for the body"))
+        .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        let (headers, text) = response
+            .split_once("\r\n\r\n")
+            .unwrap_or_else(|| panic!("declared={declared}, invalid HTTP response={response:?}"));
+        assert!(headers.starts_with("HTTP/1.1 413"), "{response}");
+        assert!(
+            headers.to_ascii_lowercase().contains("connection: close"),
+            "{response}"
+        );
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{response}"
+        );
+        let body: serde_json::Value = serde_json::from_str(text)
+            .unwrap_or_else(|error| panic!("declared={declared}, response={response:?}: {error}"));
+        assert_eq!(body["success"], false);
+        assert_eq!(body["error"]["code"], 413);
+    }
+    let files: serde_json::Value = server
+        .client
+        .get(server.url("/api/v1/files"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(files["data"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

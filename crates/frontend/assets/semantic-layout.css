@@ -2,7 +2,7 @@
 #main { min-height: 100vh; }
 #main [data-gly-kind] { min-width: 0; }
 #main .form-group > [data-gly-kind=text]:first-child { margin-bottom: 4px; font-weight: 500; font-size: .875rem; }
-#main .form-input.sapid-text-field { box-sizing: border-box; width: 100%; min-height: 40px; padding: 10px 14px; font: inherit; font-size: .9375rem; line-height: normal; color:var(--text); background:var(--bg-white); border:1px solid var(--border-dark); border-radius:var(--radius-md); }
+#main .form-input.sapid-text-field { box-sizing: border-box; width: 100%; min-height: 42px; padding: 10px 14px; font: inherit; font-size: .9375rem; line-height: normal; color:var(--text); background:var(--bg-white); border:1px solid var(--border-dark); border-radius:var(--radius-md); }
 #main .form-input.sapid-text-field:focus { outline:2px solid color-mix(in srgb,var(--primary) 20%,transparent); border-color:var(--primary); }
 #main .sapid-button.btn { min-height:0; height:auto; font-family:Arial,sans-serif; font-size:.9375rem; font-weight:500; line-height:normal; border-radius:var(--radius-md); padding:10px 20px; color:var(--primary); background:transparent; border:1px solid var(--border-dark); }
 #main .sapid-button.btn-primary { color:var(--text-white); background:var(--primary); border-color:var(--primary); }
@@ -58,6 +58,11 @@
   #main .mobile-bar { display:flex !important; position:fixed; bottom:0; left:0; right:0; height:52px; justify-content:space-around; align-items:center; z-index:140; padding:8px; background:var(--bg-white); border-top:1px solid var(--border); }
   #main .comments-pane, #main .version-pane { top:110px; bottom:52px; }
   #main .notification-panel { position:fixed; top:56px; right:12px; }
+}
+@media(max-width:600px) {
+  /* Keep account controls at their intrinsic width and let the brand wrap. */
+  #main .navbar .navbar-end { flex-shrink:0; }
+  #main .navbar .brand-text { white-space:normal; }
 }
 
 /* Shared dialogs retain the original title, close icon, and padded form body. */

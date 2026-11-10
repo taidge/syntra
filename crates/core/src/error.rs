@@ -23,11 +23,15 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    /// 408 - The request body stopped making progress or exceeded its deadline.
+    #[error("Request timeout: {0}")]
+    Timeout(String),
+
     /// 409 - Conflicting state (e.g., duplicate username, concurrent edit)
     #[error("Conflict: {0}")]
     Conflict(String),
 
-    /// 500 - Database query or connection failure
+    /// 500/503 - Database failure (503 only for known temporary contention)
     #[error("Database error: {0}")]
     Database(String),
 
@@ -60,6 +64,35 @@ pub struct ErrorResponse {
 }
 
 impl AppError {
+    /// Temporary admission/checkout pressure and SQLite lock contention are
+    /// retryable service failures. Match only canonical diagnostics, never a
+    /// broad "database"/"timeout" substring that could hide corruption or SQL
+    /// errors. Horme adds one documented prefix for acquisition failures.
+    pub fn is_transient_database(&self) -> bool {
+        let Self::Database(message) = self else {
+            return false;
+        };
+        let message = message
+            .strip_prefix("connection acquisition failed: ")
+            .unwrap_or(message);
+        matches!(
+            message,
+            "database admission capacity exceeded"
+                | "database checkout timed out"
+                | "database operation timed out; cleanup remains admitted"
+                | "database is locked"
+                | "database is busy"
+                | "database table is locked"
+                | "database schema is locked"
+        ) || ["database table is locked: ", "database schema is locked: "]
+            .iter()
+            .any(|prefix| {
+                message
+                    .strip_prefix(prefix)
+                    .is_some_and(|table| !table.is_empty() && !table.contains('\n'))
+            })
+    }
+
     /// Returns the HTTP status code that corresponds to this error variant.
     pub fn status_code(&self) -> u16 {
         match self {
@@ -67,9 +100,11 @@ impl AppError {
             AppError::NotFound(_) => 404,
             AppError::Forbidden(_) => 403,
             AppError::Validation(_) => 400,
+            AppError::Timeout(_) => 408,
             AppError::Conflict(_) => 409,
             AppError::RateLimit(_) => 429,
             AppError::QuotaExceeded(_) => 413,
+            AppError::Database(_) if self.is_transient_database() => 503,
             AppError::Database(_) | AppError::Storage(_) | AppError::Internal(_) => 500,
         }
     }
@@ -95,5 +130,47 @@ impl From<diesel::result::Error> for AppError {
 impl From<horme::Error> for AppError {
     fn from(error: horme::Error) -> Self {
         Self::Database(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+    #[test]
+    fn only_known_temporary_database_contention_is_503() {
+        for message in [
+            "database admission capacity exceeded",
+            "connection acquisition failed: database checkout timed out",
+            "database operation timed out; cleanup remains admitted",
+            "database is locked",
+            "database is busy",
+            "database table is locked: documents",
+            "database schema is locked: main",
+        ] {
+            let error = AppError::Database(message.into());
+            assert!(error.is_transient_database(), "{message}");
+            assert_eq!(error.status_code(), 503);
+            assert_eq!(error.to_response().code, 503);
+        }
+        for message in [
+            "database disk image is malformed",
+            "file is not a database",
+            "near INSERT: syntax error",
+            "no such table: database is locked",
+            "database admission capacity too large",
+            "database checkout task failed",
+            "UNIQUE constraint failed: documents.id",
+            "disk I/O error",
+            "other timeout",
+        ] {
+            let error = AppError::Database(message.into());
+            assert!(!error.is_transient_database(), "{message}");
+            assert_eq!(error.status_code(), 500);
+            assert_eq!(error.to_response().code, 500);
+        }
+        assert_eq!(
+            AppError::Internal("database is locked".into()).status_code(),
+            500
+        );
     }
 }

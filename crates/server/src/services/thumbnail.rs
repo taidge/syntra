@@ -35,7 +35,7 @@ impl ThumbnailService {
             .map_err(|e| AppError::Storage(format!("Cannot open image: {e}")))?;
         let thumb = img.resize(200, 200, FilterType::Lanczos3);
 
-        let thumb_rel = format!("thumbnails/{}.jpg", file_id);
+        let thumb_rel = format!("thumbnails/{file_id}/{}.jpg", uuid::Uuid::new_v4());
         let mut output = Cursor::new(Vec::new());
         thumb
             .write_to(&mut output, image::ImageFormat::Jpeg)

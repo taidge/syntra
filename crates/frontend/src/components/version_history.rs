@@ -23,6 +23,7 @@ pub fn VersionHistory(
     auth: Cage<AuthState>,
     doc_id: String,
     open: Cage<bool>,
+    document_version: Cage<i32>,
 ) -> impl Widget {
     let items = scope.cage(Vec::<VersionItem>::new());
     let feedback = scope.cage(String::new());
@@ -78,10 +79,11 @@ pub fn VersionHistory(
                                 };
                                 let token = token(auth);
                                 let path = format!("/documents/{id}/restore/{version_id}");
+                                let expected_version = document_version.get();
                                 let _ = scope.spawn(async move {
                                     match state::api_post::<serde_json::Value, _>(
                                         &path,
-                                        &serde_json::json!({}),
+                                        &serde_json::json!({"expected_version":expected_version}),
                                         &token,
                                     )
                                     .await

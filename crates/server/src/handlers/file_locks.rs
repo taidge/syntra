@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use contrix_core::dto::ApiResponse;
 use contrix_core::error::AppError;
-use contrix_core::models::{FileLock, NewFileLock};
+use contrix_core::models::FileLock;
 use contrix_core::schema::file_locks::dsl as fl;
 
 use crate::handlers::access::load_accessible_file;
@@ -80,91 +80,26 @@ pub async fn acquire_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
         return;
     }
 
-    // Check for existing lock.
-    match fl::file_locks
-        .filter(fl::file_id.eq(&file_id_param))
-        .first::<FileLock>(&mut conn)
-        .await
-        .optional()
+    match crate::services::persistence::acquire_file_lock(
+        &state.db,
+        &file_id_param,
+        &uid,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
     {
-        Ok(Some(existing)) => {
-            // Check if expired.
-            if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(&existing.expires_at)
-                && exp.with_timezone(&Utc) > Utc::now()
-            {
-                if existing.locked_by == uid {
-                    // Already locked by the same user — return the existing lock.
-                    res.status_code(StatusCode::OK);
-                    res.render(Json(ApiResponse::ok(serde_json::json!({
-                        "id": existing.id,
-                        "file_id": existing.file_id,
-                        "locked_by": existing.locked_by,
-                        "lock_token": existing.lock_token,
-                        "lock_type": existing.lock_type,
-                        "expires_at": existing.expires_at,
-                        "created_at": existing.created_at,
-                    }))));
-                    return;
-                }
-                res.status_code(StatusCode::CONFLICT);
-                res.render(Json(ApiResponse::<()>::err(
-                    AppError::Conflict("File is already locked by another user".into())
-                        .to_response(),
-                )));
-                return;
-            }
-            // Lock is expired — remove it and proceed.
-            let _ = diesel::delete(fl::file_locks.filter(fl::id.eq(&existing.id)))
-                .execute(&mut conn)
-                .await;
+        Ok(lock) => {
+            res.status_code(StatusCode::CREATED);
+            res.render(Json(ApiResponse::ok(lock)));
         }
-        Ok(None) => {}
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
+        Err(error) => {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
         }
     }
-
-    let now = Utc::now();
-    let lock_id = Uuid::new_v4().to_string();
-    let lock_token_val = Uuid::new_v4().to_string();
-    let expires = (now + Duration::minutes(30)).to_rfc3339();
-
-    let new_lock = NewFileLock {
-        id: lock_id.clone(),
-        file_id: file_id_param.clone(),
-        locked_by: uid.clone(),
-        lock_token: lock_token_val.clone(),
-        lock_type: "exclusive".to_string(),
-        expires_at: expires.clone(),
-        created_at: now.to_rfc3339(),
-    };
-
-    if let Err(e) = diesel::insert_into(fl::file_locks)
-        .values(&new_lock)
-        .execute(&mut conn)
-        .await
-    {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::Database(e.to_string()).to_response(),
-        )));
-        return;
-    }
-
-    res.status_code(StatusCode::CREATED);
-    res.render(Json(ApiResponse::ok(serde_json::json!({
-        "id": lock_id,
-        "file_id": file_id_param,
-        "locked_by": uid,
-        "lock_token": lock_token_val,
-        "lock_type": "exclusive",
-        "expires_at": expires,
-        "created_at": now.to_rfc3339(),
-    }))));
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +200,7 @@ pub async fn check_lock(req: &mut Request, depot: &mut Depot, res: &mut Response
 
     match fl::file_locks
         .filter(fl::file_id.eq(&file_id_param))
+        .filter(fl::expires_at.gt(Utc::now().to_rfc3339()))
         .first::<FileLock>(&mut conn)
         .await
         .optional()
@@ -335,12 +271,16 @@ pub async fn refresh_lock(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
+    if !ensure_file_access(&mut conn, &file_id_param, &uid, "editor", res).await {
+        return;
+    }
     let new_expires = (Utc::now() + Duration::minutes(30)).to_rfc3339();
 
     match diesel::update(
         fl::file_locks
             .filter(fl::file_id.eq(&file_id_param))
-            .filter(fl::locked_by.eq(&uid)),
+            .filter(fl::locked_by.eq(&uid))
+            .filter(fl::expires_at.gt(Utc::now().to_rfc3339())),
     )
     .set(fl::expires_at.eq(&new_expires))
     .execute(&mut conn)

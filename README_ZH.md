@@ -51,7 +51,7 @@
 ### 协作功能
 
 - 基于 WebSocket 的实时协作编辑
-- 基于 CRDT 的冲突解决（操作变换）
+- 持久化版本快照与操作变换；冲突会保留本地修改并要求显式处理
 - 实时光标显示——查看其他用户的编辑位置
 - 用户感知（谁在查看/编辑）
 - 评论和批注，支持 @提及
@@ -82,9 +82,9 @@
 | Markdown | 导出   | —    | —      | —          |
 | CSV      | —      | 双向 | —      | —          |
 | JSON     | 双向   | 双向 | 双向   | 双向       |
-| DOCX     | 计划中 | —    | —      | —          |
-| XLSX     | —      | 计划中 | —    | —          |
-| PPTX     | —      | —    | 计划中 | —          |
+| DOCX     | 导入/导出 | — | — | — |
+| XLSX     | — | 导入/导出 | — | — |
+| PPTX     | — | — | 元素导入/导出（部分能力） | — |
 | PNG      | —      | —    | —      | 导出       |
 | SVG      | —      | —    | —      | 导出       |
 
@@ -114,9 +114,9 @@
 |------|------|------|
 | 后端 | [Salvo](https://salvo.rs) | 高性能 Rust Web 框架 |
 | 前端 | [Glory](https://glory.rs) + [Sapid](https://github.com/sapid-ui/sapid) | Rust 语义控件与 WebAssembly 浏览器前端 |
-| 数据库 | [SQLx](https://github.com/launchbadge/sqlx) + SQLite/PostgreSQL | 异步数据库，编译时安全检查 |
+| 数据库 | Diesel + Horme + SQLite | 短时异步查询租约与事务 |
 | 认证 | JWT + Argon2 | 无状态认证 + 安全哈希 |
-| 实时协作 | WebSocket + CRDT | 低延迟协作 |
+| 实时协作 | WebSocket + 持久化版本与条件提交 | 在线同步与显式冲突恢复 |
 | 搜索 | SQLite | 与事务一致的名称/正文搜索 |
 | 配置 | [Figment](https://github.com/SergioBenitez/Figment) | 分层配置（TOML + 环境变量） |
 | 日志 | [tracing](https://github.com/tokio-rs/tracing) | 结构化异步日志 |
@@ -153,7 +153,7 @@ office/
 
 ```bash
 # 克隆仓库
-git clone https://github.com/contrix-org/office.git
+git clone --recurse-submodules https://github.com/arkret-org/office.git
 cd office
 
 # 构建 Glory + Sapid 前端并启动后端
@@ -162,9 +162,37 @@ pwsh ./scripts/dev.ps1
 ```
 
 打开 `http://localhost:3000`，前端和 API 使用同一源。
-编译输出、临时文件和生成的浏览器资源都位于 `D:/BuildCache/office-glory`。
-单独构建前端可运行 `pwsh ./scripts/build-frontend.ps1`，然后在仓库根目录运行
-`pwsh ./scripts/dev.ps1 -SkipFrontendBuild`。脚本会将 Cargo 依赖缓存、编译输出和编译临时文件都设到 D 盘。
+构建遵循调用者环境和 Cargo 正常配置，不改写 CARGO_HOME、target 或 TEMP/TMP。
+脚本在当前 workspace 运行 cargo metadata，使用返回的 target_directory 定位产物，前端资源默认在其中的 web 子目录。
+单独构建前端可运行 pwsh ./scripts/build-frontend.ps1，然后运行 pwsh ./scripts/dev.ps1 -SkipFrontendBuild。
+前端资源目录可用 -OutputDirectory 指定；这不改变编译缓存或临时目录。
+运行脚本前需初始化固定版本子模块，并安装与 Cargo.lock 相同版本的 wasm-bindgen-cli。
+
+Office 导入导出使用标准格式解析；原生自定义部件的无损往返与外部文件兼容性分别验证。
+外部 PPTX 可读取真实页序和页面尺寸、继承的占位符坐标与母版/版式装饰、文本运行段样式和安全超链接，以及带坐标的形状、组合、嵌入图片及其裁剪/旋转、支持的图表缓存、备注、转场和基础动画时序。模型可表达的内容写入标准 Office 部件。嵌入视频的媒体与位置会保留供导出；编辑画布显示视频占位符，不完整播放 PowerPoint 动画时间线。复杂段落排版、自定义路径、镜像、SmartArt/OLE 和不支持的视觉效果可能被近似或省略；导入时会显示具体警告，并保留原件下载。
+
+外部 XLSX 可读取单元格样式与主题颜色、日期格式、行列尺寸、冻结窗格、矩形命名范围、支持的数据验证/条件格式规则、图表缓存和简单透视表。图表可从同一工作表的矩形范围刷新绑定，其余绑定保留缓存系列并告警；当前 Calc 网格不显示图表覆盖层。透视表支持一个行字段、一个值字段及求和/计数/平均值，并写入标准缓存和表定义部件；复杂或带筛选的透视表保留工作表中的缓存值并告警。标准透视表导出要求源数据前有表头行、目标数据前有标题行。自定义验证公式会保留供 Office 导出，但编辑器不执行这些验证公式。遇到不支持的结构化表/筛选/隐藏状态/打印/单元格富文本功能时会提示警告。
+
+外部媒体不会自动加载。嵌入媒体在 base64 编码前限制为每项 2 MiB、每份导入演示文稿合计 8 MiB；文档 JSON 上限为 20 MiB。ZIP/XML 展开、图表点展开和数值几何也有明确预算。超出当前支持范围的内容仍保留在上传原件中。
+保存与版本恢复必须携带 expected_version；冲突返回 409。分块上传必须携带从 1 开始的 chunk_index。
+这套协作机制不提供离线 CRDT 合并。
+
+使用 pwsh ./scripts/package.ps1 生成包含服务器、配置示例、迁移与浏览器资源的完整 ZIP 分发包，路径位于 metadata 返回的 target_directory/dist。
+使用 pwsh ./scripts/test-package.ps1 -BrowserTests 从无源码目录验证 ZIP，包括登录、保存及进程重启后的恢复。
+安装 e2e 依赖与 Playwright Chromium 后，使用 pwsh ./scripts/test-e2e.ps1 运行完整 HTTP 和浏览器套件。每次运行在 workspace 的 target 目录下使用独立数据库、存储与回环端口。
+
+
+### 存储维护
+
+`config/default.toml` 的 `[maintenance]` 控制历史版本保留与对象对账。普通历史默认分批收敛到最近 100 个且不超过 30 天的版本；上传原件、当前快照和有界的活跃协作基础版本受到保护。物理删除异步执行。本数据库的待删除队列达到 1024 个对象时，新的对象写入会被拒绝，直到清理取得进展；该限制统计对象数量，并非磁盘字节数。
+
+新写入会在对象 I/O 前登记所有权，默认保留未知旧对象。只有一个元数据数据库独占整个 S3 桶或本地存储根目录时，才可启用 `reconcile_legacy_dedicated_namespace`。独立数据库必须使用不同的物理键；不支持复制数据库后分叉运行并继续共享原有对象键。上传读取遵循配置中的空闲及总时限；分块会话预留配额，最多 4096 块、每块最多 8 MiB，创建会话时返回相应限制。
+
+### 数据库快照与对象备份
+
+管理员备份接口只生成 SQLite 数据库快照，不复制本地文件或 S3 对象，也不为旧快照保留 blob。单独恢复 SQLite 快照不能保证文件恢复：垃圾回收可能已经删除当前数据库不再引用、但旧快照仍引用的对象。
+
+必须协调备份并一起恢复数据库与 blob 对象，保留数据库快照所引用的对象键；需要使用能处理并发写入和垃圾回收的外部一致性备份或存储快照流程。发布包重启测试复用同一份实时数据库与存储，并未验证从数据库和对象备份进行完整灾难恢复。
 
 ### 配置
 
@@ -196,14 +224,18 @@ default_quota_mb = 5120        # 每用户 5 GB
 
 ### Docker 部署
 
+构建前必须确认 Docker builder 的实际数据存储在 D 盘或远端；Cargo 产物在其他盘不代表 Docker 缓存位置。
+
 ```bash
 # 使用 Docker Compose 构建并运行
 cd docker
-docker-compose up -d
+export JWT_SECRET="$(openssl rand -hex 32)"
+docker compose up -d
 
-# 或直接构建镜像
+# 或在仓库根目录直接构建镜像
+cd ..
 docker build -t contrix-office -f docker/Dockerfile .
-docker run -p 3000:3000 -v contrix-data:/app/data contrix-office
+docker run -p 3000:8080 -e JWT_SECRET -v contrix-data:/data contrix-office
 ```
 
 ## API 参考
@@ -334,7 +366,7 @@ cargo test -p contrix-export
 cargo fmt --all
 
 # 运行 clippy 检查
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets --no-deps --features contrix-frontend/ssr -- -D warnings
 ```
 
 ### 数据库迁移
@@ -411,5 +443,5 @@ Writer 富文本编辑支持粗体、斜体、代码和链接；其他原生格�
 
 - [Salvo](https://salvo.rs) — 快速灵活的 Rust Web 框架
 - [Glory](https://glory.rs) + [Sapid](https://github.com/sapid-ui/sapid) — Rust 跨平台 UI 框架
-- [SQLx](https://github.com/launchbadge/sqlx) — Rust 异步 SQL 工具包
+- [Diesel](https://diesel.rs/) — Rust 类型化 SQL；Horme 提供异步查询租约
 - 灵感来源于 [Collabora Online](https://www.collaboraoffice.com/) 和 [ONLYOFFICE](https://www.onlyoffice.com/)

@@ -3,7 +3,7 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 
 use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
+use contrix_core::error::{AppError, ErrorResponse};
 use contrix_core::schema::conversion_jobs::dsl as cj;
 use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::files::dsl as f;
@@ -12,6 +12,20 @@ use contrix_core::schema::users::dsl as u;
 use contrix_core::schema::webhook_deliveries::dsl as wd;
 
 use crate::middleware::auth::get_user_role;
+
+macro_rules! count_or_unavailable {
+    ($query:expr, $res:expr) => {
+        match $query.await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error,"Monitoring collection failed");
+                $res.status_code(StatusCode::SERVICE_UNAVAILABLE);
+                $res.render(Json(ApiResponse::<()>::err(ErrorResponse{code:503,message:"Monitoring temporarily unavailable".into(),details:None})));
+                return;
+            }
+        }
+    };
+}
 
 // ---------------------------------------------------------------------------
 // GET /admin/monitoring  (Get current server metrics)
@@ -40,42 +54,38 @@ pub async fn get_monitoring(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    let total_users = u::users
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
+    let total_users = count_or_unavailable!(u::users.count().get_result::<i64>(&mut conn), res);
 
-    let total_documents = d::documents
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
+    let total_documents =
+        count_or_unavailable!(d::documents.count().get_result::<i64>(&mut conn), res);
 
-    let total_files = f::files
-        .filter(f::is_trashed.eq(false))
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
+    let total_files = count_or_unavailable!(
+        f::files
+            .filter(f::is_trashed.eq(false))
+            .count()
+            .get_result::<i64>(&mut conn),
+        res
+    );
 
-    let active_users = up::user_presence
-        .filter(up::is_active.eq(true))
-        .select(up::user_id)
-        .distinct()
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
+    let active_users = count_or_unavailable!(
+        up::user_presence
+            .filter(up::is_active.eq(true))
+            .select(up::user_id)
+            .distinct()
+            .count()
+            .get_result::<i64>(&mut conn),
+        res
+    );
 
-    let active_documents = up::user_presence
-        .filter(up::is_active.eq(true))
-        .select(up::document_id)
-        .distinct()
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
+    let active_documents = count_or_unavailable!(
+        up::user_presence
+            .filter(up::is_active.eq(true))
+            .select(up::document_id)
+            .distinct()
+            .count()
+            .get_result::<i64>(&mut conn),
+        res
+    );
 
     // Try to read memory info from /proc/self/status on Linux
     let rss_bytes: Option<u64> = {
@@ -218,40 +228,36 @@ pub async fn prometheus_metrics(depot: &mut Depot, res: &mut Response) {
             return;
         }
     };
-    let users = u::users
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
-    let documents = d::documents
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
-    let active = up::user_presence
-        .filter(up::is_active.eq(true))
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
-    let pending = cj::conversion_jobs
-        .filter(cj::status.eq_any(["pending", "processing"]))
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
-    let failed = cj::conversion_jobs
-        .filter(cj::status.eq("failed"))
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
-    let webhook_failed = wd::webhook_deliveries
-        .filter(wd::success.eq(false))
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0);
+    let users = count_or_unavailable!(u::users.count().get_result::<i64>(&mut conn), res);
+    let documents = count_or_unavailable!(d::documents.count().get_result::<i64>(&mut conn), res);
+    let active = count_or_unavailable!(
+        up::user_presence
+            .filter(up::is_active.eq(true))
+            .count()
+            .get_result::<i64>(&mut conn),
+        res
+    );
+    let pending = count_or_unavailable!(
+        cj::conversion_jobs
+            .filter(cj::status.eq_any(["pending", "processing"]))
+            .count()
+            .get_result::<i64>(&mut conn),
+        res
+    );
+    let failed = count_or_unavailable!(
+        cj::conversion_jobs
+            .filter(cj::status.eq("failed"))
+            .count()
+            .get_result::<i64>(&mut conn),
+        res
+    );
+    let webhook_failed = count_or_unavailable!(
+        wd::webhook_deliveries
+            .filter(wd::success.eq(false))
+            .count()
+            .get_result::<i64>(&mut conn),
+        res
+    );
     let uptime = (chrono::Utc::now() - state.started_at).num_seconds().max(0);
     let database = state.db.state();
     let db_connections = database.connections;

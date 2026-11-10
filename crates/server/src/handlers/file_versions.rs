@@ -1,6 +1,5 @@
 use chrono::Utc;
 use diesel::prelude::*;
-use horme::OptionalExtension;
 use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
@@ -44,27 +43,23 @@ pub async fn list_versions(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    // Verify the file exists and belongs to the user.
-    match f::files
-        .filter(f::id.eq(&file_id_param))
-        .filter(f::owner_id.eq(&uid))
-        .first::<File>(&mut conn)
+    match crate::handlers::access::load_accessible_file(&mut conn, &file_id_param, &uid, "viewer")
         .await
-        .optional()
     {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+        Ok(Some(file)) if !file.is_trashed => {}
+        Ok(_) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
                 AppError::NotFound("File not found".into()).to_response(),
             )));
             return;
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+        Err(error) => {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
             return;
         }
     }
@@ -122,86 +117,56 @@ pub async fn create_version(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
     let file_id_param: String = req.param("id").unwrap_or_default();
 
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    // Fetch the file (must belong to user and not be a folder).
-    let file_row = match f::files
-        .filter(f::id.eq(&file_id_param))
-        .filter(f::owner_id.eq(&uid))
-        .filter(f::is_folder.eq(false))
-        .first::<File>(&mut conn)
-        .await
-        .optional()
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("File not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    // Determine the next version number.
-    let max_version: Option<i32> = fv::file_versions
-        .filter(fv::file_id.eq(&file_id_param))
-        .select(diesel::dsl::max(fv::version_number))
-        .first::<Option<i32>>(&mut conn)
-        .await
-        .unwrap_or(None);
-
-    let next_version = max_version.unwrap_or(0) + 1;
-    let now = Utc::now();
-
-    let new_version = NewFileVersion {
-        id: Uuid::new_v4().to_string(),
-        file_id: file_id_param.clone(),
-        version_number: next_version,
-        path: file_row.path.clone(),
-        size: file_row.size,
-        created_by: uid.clone(),
-        created_at: now.to_rfc3339(),
-    };
-
-    match diesel::insert_into(fv::file_versions)
-        .values(&new_version)
-        .execute(&mut conn)
-        .await
-    {
-        Ok(_) => {
+    let result = state
+        .db
+        .run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                let file = diesel::RunQueryDsl::first::<File>(f::files.find(&file_id_param), conn)?;
+                crate::services::persistence::authorize(conn, &file, &uid, "editor")?;
+                if file.is_folder {
+                    return Err(AppError::Validation("Cannot snapshot a folder".into()));
+                }
+                let max: Option<i32> = diesel::RunQueryDsl::first(
+                    fv::file_versions
+                        .filter(fv::file_id.eq(&file_id_param))
+                        .select(diesel::dsl::max(fv::version_number)),
+                    conn,
+                )?;
+                let next = max
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or_else(|| AppError::Conflict("Version exhausted".into()))?;
+                let version = NewFileVersion {
+                    id: Uuid::new_v4().to_string(),
+                    file_id: file_id_param,
+                    version_number: next,
+                    path: file.path,
+                    size: file.size,
+                    created_by: uid,
+                    created_at: Utc::now().to_rfc3339(),
+                };
+                diesel::RunQueryDsl::execute(
+                    diesel::insert_into(fv::file_versions).values(&version),
+                    conn,
+                )?;
+                Ok(diesel::RunQueryDsl::first::<FileVersion>(
+                    fv::file_versions.find(version.id),
+                    conn,
+                )?)
+            })
+        })
+        .await;
+    match result {
+        Ok(version) => {
             res.status_code(StatusCode::CREATED);
-            res.render(Json(ApiResponse::ok(serde_json::json!({
-                "id": new_version.id,
-                "file_id": new_version.file_id,
-                "version_number": new_version.version_number,
-                "path": new_version.path,
-                "size": new_version.size,
-                "created_by": new_version.created_by,
-                "created_at": new_version.created_at,
-            }))));
+            res.render(Json(ApiResponse::ok(version)));
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+        Err(error) => {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
         }
     }
 }

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
-use diesel::SqliteConnection;
-use diesel::result::Error as DieselError;
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use horme::prelude::*;
@@ -17,48 +15,6 @@ use contrix_server::{database, handlers, routes, services, state};
 use state::AppState;
 
 const DEFAULT_JWT_SECRET: &str = "change-me-in-production-use-a-long-random-string";
-
-/// Run a single migration SQL file, splitting by semicolons.
-fn run_migration_file(
-    conn: &mut SqliteConnection,
-    migration_path: &str,
-    sql: &str,
-) -> anyhow::Result<()> {
-    for statement in sql.split(';') {
-        let cleaned: String = statement
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("--"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let trimmed = cleaned.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match diesel::RunQueryDsl::execute(diesel::sql_query(trimmed), conn) {
-            Ok(_) => {}
-            Err(e) if is_idempotent_migration_error(&e, trimmed) => {
-                tracing::debug!("Ignoring idempotent migration statement in {migration_path}: {e}");
-            }
-            Err(e) => {
-                bail!(
-                    "Migration {migration_path} failed: {e}\nSQL: {}",
-                    &trimmed[..trimmed.len().min(240)]
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn is_idempotent_migration_error(err: &DieselError, statement: &str) -> bool {
-    let lower_statement = statement.trim_start().to_ascii_lowercase();
-    let lower_error = err.to_string().to_ascii_lowercase();
-
-    lower_statement.starts_with("alter table")
-        && lower_statement.contains(" add column ")
-        && lower_error.contains("duplicate column")
-}
 
 fn load_config() -> anyhow::Result<(AppConfig, String)> {
     let environment = std::env::var("CONTRIX_ENV")
@@ -88,6 +44,23 @@ fn load_config() -> anyhow::Result<(AppConfig, String)> {
 }
 
 fn validate_config(config: &AppConfig, environment: &str) -> anyhow::Result<()> {
+    if config.storage.upload_idle_timeout_seconds == 0
+        || config.storage.upload_total_timeout_seconds == 0
+        || config.storage.upload_idle_timeout_seconds > config.storage.upload_total_timeout_seconds
+    {
+        bail!("Upload timeouts must be positive and idle timeout must not exceed total timeout");
+    }
+    let maintenance = &config.maintenance;
+    if !(1..=10000).contains(&maintenance.history_max_versions)
+        || !(1..=1000).contains(&maintenance.history_batch_size)
+        || !(1..=1000).contains(&maintenance.scan_page_size)
+        || maintenance.interval_seconds == 0
+        || maintenance.orphan_grace_seconds < 300
+    {
+        bail!(
+            "Maintenance requires max_versions 1..10000, batch/page 1..1000, positive interval and orphan grace >=300 seconds"
+        );
+    }
     services::database_backup::sqlite_url_to_path(&config.database.url)?;
 
     let storage_backend = config
@@ -200,45 +173,19 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Database pool created");
 
     // -----------------------------------------------------------------------
-    // 5. Run all migrations (glob migration files in order)
+    // 5. Run the shared migration catalog in order
     // -----------------------------------------------------------------------
-    let migration_files = [
-        "migrations/001_init.sql",
-        "migrations/002_rooms_groups.sql",
-        "migrations/003_tags_favorites_recent.sql",
-        "migrations/004_security.sql",
-        "migrations/005_webhooks.sql",
-        "migrations/006_admin.sql",
-        "migrations/007_templates_invitations.sql",
-        "migrations/008_upload_thumbnails.sql",
-        "migrations/009_wopi_locking_presence.sql",
-        "migrations/010_password_resets.sql",
-        "migrations/011_share_passwords.sql",
-        "migrations/012_notification_preferences.sql",
-        "migrations/013_file_versions.sql",
-        "migrations/014_operation_log.sql",
-        "migrations/015_api_keys.sql",
-        "migrations/016_login_attempts.sql",
-        "migrations/017_file_properties.sql",
-        "migrations/018_file_ordering.sql",
-        "migrations/019_read_status.sql",
-        "migrations/020_room_enhancements.sql",
-        "migrations/021_document_signatures.sql",
-        "migrations/022_tenants.sql",
-        "migrations/023_remove_oauth.sql",
-        "migrations/024_remove_integration_settings.sql",
-    ];
-
     let mut migrations = Vec::new();
-    for migration_path in &migration_files {
-        let sql = tokio::fs::read_to_string(migration_path)
+    for filename in contrix_server::migrations::MIGRATION_FILES {
+        let migration_path = format!("migrations/{filename}");
+        let sql = tokio::fs::read_to_string(&migration_path)
             .await
             .with_context(|| format!("Could not read required migration file {migration_path}"))?;
-        migrations.push((migration_path.to_string(), sql));
+        migrations.push((migration_path, sql));
     }
     db.run(move |conn| {
         for (migration_path, sql) in migrations {
-            run_migration_file(conn, &migration_path, &sql)?;
+            contrix_server::migrations::run_migration_file(conn, &migration_path, &sql)?;
             tracing::info!("Migration applied: {migration_path}");
         }
         Ok::<_, anyhow::Error>(())
@@ -256,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
         services::StorageBackend::from_config(&config.storage)
             .context("Failed to initialize storage backend")?,
     );
+    storage_backend.attach_database(db.clone())?;
     handlers::convert::resume_pending_conversions(&db, storage_backend.clone()).await;
 
     // Ensure the database-specific backup directory exists.
@@ -299,43 +247,113 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // -----------------------------------------------------------------------
-    // 8b. Spawn trash auto-cleanup background task
+    // 8b. Shared transactional trash purge and retryable object cleanup.
     // -----------------------------------------------------------------------
-    if config.trash.auto_delete_enabled {
+    {
+        let maintenance_db = state.db.clone();
+        let maintenance_storage = state.storage.clone();
+        let maintenance_config = config.maintenance.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                maintenance_config.interval_seconds.max(1),
+            ));
+            let mut history = services::maintenance::HistoryCursor::default();
+            let mut scan = None;
+            loop {
+                interval.tick().await;
+                if let Err(error) = services::maintenance::expire_uploads_page(
+                    &maintenance_db,
+                    &maintenance_config,
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    tracing::warn!(%error,"Expired upload cleanup will retry");
+                }
+                if maintenance_config.history_enabled
+                    && let Err(error) = services::maintenance::retain_history_page(
+                        &maintenance_db,
+                        &mut history,
+                        &maintenance_config,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error,"History retention page will retry");
+                }
+                if maintenance_config.reconcile_enabled {
+                    if scan
+                        .as_ref()
+                        .is_none_or(services::storage::ScanCursor::finished)
+                    {
+                        match maintenance_storage.begin_scan().await {
+                            Ok(cursor) => scan = Some(cursor),
+                            Err(error) => {
+                                tracing::warn!(%error,"Storage reconciliation scan will retry");
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(cursor) = scan.as_mut()
+                        && let Err(error) = services::maintenance::reconcile_page(
+                            &maintenance_db,
+                            &maintenance_storage,
+                            cursor,
+                            &maintenance_config,
+                            chrono::Utc::now().timestamp(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%error,"Storage reconciliation page will retry");
+                        scan = None;
+                    }
+                }
+            }
+        });
         let cleanup_db = state.db.clone();
         let cleanup_storage = state.storage.clone();
         let cleanup_days = config.trash.auto_delete_days;
+        let auto_delete = config.trash.auto_delete_enabled;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut ticks = 0_u64;
             loop {
                 interval.tick().await;
-                {
-                    let mut conn = cleanup_db.clone();
+                if auto_delete && ticks.is_multiple_of(60) {
                     let cutoff = (chrono::Utc::now() - chrono::Duration::days(cleanup_days as i64))
                         .to_rfc3339();
+                    let mut conn = cleanup_db.clone();
                     use contrix_core::schema::files::dsl as f;
-                    let old_files: Vec<contrix_core::models::File> = f::files
+                    match f::files
                         .filter(f::is_trashed.eq(true))
                         .filter(f::trashed_at.lt(&cutoff))
-                        .load(&mut conn)
+                        .select(f::id)
+                        .load::<String>(&mut conn)
                         .await
-                        .unwrap_or_default();
-                    for file in &old_files {
-                        if !file.is_folder {
-                            let _ = cleanup_storage.delete_file(&file.path).await;
+                    {
+                        Ok(ids) => {
+                            for id in ids {
+                                match contrix_server::services::persistence::purge_trashed(
+                                    &cleanup_db,
+                                    &id,
+                                    None,
+                                    Some(&cutoff),
+                                )
+                                .await
+                                {
+                                    Ok(count) => tracing::info!(count, "Expired trash removed"),
+                                    Err(contrix_core::error::AppError::NotFound(_)) => {}
+                                    Err(error) => {
+                                        tracing::warn!(%error, file_id = %id, "Trash purge will retry")
+                                    }
+                                }
+                            }
                         }
-                    }
-                    let _ = diesel::delete(
-                        f::files
-                            .filter(f::is_trashed.eq(true))
-                            .filter(f::trashed_at.lt(&cutoff)),
-                    )
-                    .execute(&mut conn)
-                    .await;
-                    if !old_files.is_empty() {
-                        tracing::info!("Trash cleanup: removed {} expired items", old_files.len());
+                        Err(error) => tracing::error!(%error, "Could not enumerate expired trash"),
                     }
                 }
+                ticks = ticks.wrapping_add(1);
+                contrix_server::services::persistence::request_gc(&cleanup_db, &cleanup_storage);
             }
         });
     }

@@ -1,9 +1,7 @@
 import { defineConfig } from '@playwright/test';
 import { join } from 'node:path';
 
-const artifacts = process.env.CONTRIX_E2E_ARTIFACTS || (process.platform === 'win32'
-  ? 'D:/BuildCache/office-glory/e2e'
-  : join(process.env.RUNNER_TEMP || '/tmp', 'office-glory/e2e'));
+const artifacts = process.env.CONTRIX_E2E_ARTIFACTS || process.cwd();
 
 export default defineConfig({
   testDir: './tests',
@@ -12,7 +10,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: 1,
-  reporter: process.env.CI ? 'github' : [['html', { outputFolder: join(artifacts, 'report'), open: 'never' }]],
+  reporter: process.env.CI ? 'github' : [['html', { outputFolder: join(artifacts, 'playwright-report'), open: 'never' }]],
   use: {
     baseURL: process.env.API_URL || 'http://localhost:3000',
     extraHTTPHeaders: {

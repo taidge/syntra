@@ -49,6 +49,7 @@ pub mod password_policy;
 pub mod presence;
 pub mod quota;
 pub mod recent;
+mod request_body;
 pub mod rooms;
 pub mod search;
 pub mod sessions;

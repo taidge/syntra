@@ -4,21 +4,24 @@
 //! Open XML) and parses a `.pptx` byte slice back into a [`Presentation`].
 
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Seek, Write};
+#[cfg(test)]
+use std::io::Read;
+use std::io::{Cursor, Seek, Write};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use contrix_doc_engine::slides::{
     ChartType, ElementGroup, Presentation, Shape, ShapeType, Slide, SlideChart, SlideElement,
-    SlideImage, SlideLayout, SlideTextRun, SlideVideo, TextBox,
+    SlideImage, SlideTextRun, SlideVideo, TextBox,
 };
-use quick_xml::Reader;
-use quick_xml::events::Event;
 use uuid::Uuid;
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
-const MAX_MEDIA_BYTES: usize = 50 * 1024 * 1024;
+#[path = "pptx_import.rs"]
+pub(crate) mod external_import;
+
+const MAX_MEDIA_BYTES: usize = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 3 / 4;
 
 #[derive(Clone)]
 struct MediaPart {
@@ -33,10 +36,22 @@ struct SlideResources {
     images: HashMap<Uuid, MediaPart>,
     videos: HashMap<Uuid, MediaPart>,
     charts: HashMap<Uuid, (String, usize)>,
+    links: HashMap<String, String>,
+    background_id: Option<Uuid>,
 }
 
 /// Convert a [`Presentation`] to a `.pptx` byte vector (ZIP archive with Open XML).
 pub fn presentation_to_pptx(pres: &Presentation) -> Result<Vec<u8>, String> {
+    crate::ooxml_import::model_budget(pres)?;
+    let to_emu = |pixels: f32| -> Result<i64, String> {
+        if !pixels.is_finite() || pixels <= 0.0 || pixels > 100_000.0 {
+            return Err("Unsupported presentation page dimensions".into());
+        }
+        Ok((f64::from(pixels) * 9525.0).round() as i64)
+    };
+    let slide_width = to_emu(pres.metadata.slide_width)?;
+    let slide_height = to_emu(pres.metadata.slide_height)?;
+
     let mut buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut buf);
     let options = SimpleFileOptions::default();
@@ -133,7 +148,7 @@ pub fn presentation_to_pptx(pres: &Presentation) -> Result<Vec<u8>, String> {
             i + 1
         ));
     }
-    p.push_str("\n  </p:sldIdLst>\n</p:presentation>");
+    p.push_str(&format!("\n  </p:sldIdLst>\n  <p:sldSz cx=\"{slide_width}\" cy=\"{slide_height}\" type=\"custom\"/>\n  <p:notesSz cx=\"6858000\" cy=\"9144000\"/>\n</p:presentation>"));
     write!(zip, "{}", p).map_err(|e| e.to_string())?;
 
     // Preserve the complete native model for lossless Contrix round-trips.
@@ -250,6 +265,24 @@ fn collect_slide_resources(
         chart_index: &mut usize,
     ) {
         for element in elements {
+            let runs = match element {
+                SlideElement::TextBox(t) => Some(t.content.as_slice()),
+                SlideElement::Shape(s) => s.text.as_deref(),
+                _ => None,
+            };
+            for run in runs.into_iter().flatten() {
+                if let Some(url) = run
+                    .link
+                    .as_ref()
+                    .filter(|url| crate::ooxml_import::safe_url(url))
+                    && !resources.links.contains_key(url)
+                {
+                    *relationship_index += 1;
+                    resources
+                        .links
+                        .insert(url.clone(), format!("rId{relationship_index}"));
+                }
+            }
             match element {
                 SlideElement::Image(image) => {
                     *relationship_index += 1;
@@ -321,6 +354,28 @@ fn collect_slide_resources(
         media_index,
         chart_index,
     );
+    if let contrix_doc_engine::slides::Background::Image(url) = &slide.background {
+        let id = Uuid::new_v4();
+        resources.background_id = Some(id);
+        let image = SlideElement::Image(SlideImage {
+            id,
+            x: 0.,
+            y: 0.,
+            width: 1.,
+            height: 1.,
+            rotation: 0.,
+            url: url.clone(),
+            alt_text: String::new(),
+            crop: None,
+        });
+        visit(
+            &[image],
+            &mut resources,
+            &mut relationship_index,
+            media_index,
+            chart_index,
+        );
+    }
     resources
 }
 
@@ -365,6 +420,9 @@ fn slide_relationships_xml(
         xml.push_str(&format!(
             "<Relationship Id=\"{relationship_id}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart\" Target=\"../charts/chart{chart_number}.xml\"/>"
         ));
+    }
+    for (url, id) in &resources.links {
+        xml.push_str(&format!("<Relationship Id=\"{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"{}\" TargetMode=\"External\"/>",escape_xml(id),escape_xml(url)));
     }
     if has_notes {
         xml.push_str(&format!(
@@ -417,7 +475,7 @@ fn slide_layout_xml() -> &'static str {
 
 fn notes_slide_xml(notes: &str) -> String {
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>{}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>{}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>"#,
         escape_xml(notes)
     )
 }
@@ -428,7 +486,7 @@ fn slide_to_xml(slide: &Slide, resources: &SlideResources) -> String {
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
 <p:cSld>"#,
     );
-    background_to_xml(&slide.background, &mut xml);
+    background_to_xml(&slide.background, resources, &mut xml);
     xml.push_str(
         r#"<p:spTree>
 <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
@@ -467,8 +525,8 @@ fn element_to_xml(
     };
     shape_ids.insert(element_id, sp_id);
     match element {
-        SlideElement::TextBox(value) => text_box_to_xml(value, sp_id, xml),
-        SlideElement::Shape(value) => shape_to_xml(value, sp_id, xml),
+        SlideElement::TextBox(value) => text_box_to_xml(value, sp_id, resources, xml),
+        SlideElement::Shape(value) => shape_to_xml(value, sp_id, resources, xml),
         SlideElement::Image(value) => {
             image_to_xml(value, resources.images.get(&value.id), sp_id, xml)
         }
@@ -501,7 +559,17 @@ fn shape_preset(shape_type: ShapeType) -> &'static str {
     }
 }
 
-fn shape_to_xml(shape: &Shape, sp_id: u32, xml: &mut String) {
+fn slide_border_to_xml(border: Option<&contrix_doc_engine::slides::SlideBorder>, xml: &mut String) {
+    if let Some(border) = border {
+        xml.push_str(&format!(
+            "<a:ln w=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></a:ln>",
+            (border.width * 9525.0) as i64,
+            escape_xml(border.color.trim_start_matches('#'))
+        ));
+    }
+}
+fn shape_to_xml(shape: &Shape, sp_id: u32, resources: &SlideResources, xml: &mut String) {
+    let rotation = (shape.rotation * 60000.0) as i64;
     let x_emu = (shape.x * 9525.0) as i64;
     let y_emu = (shape.y * 9525.0) as i64;
     let w_emu = (shape.width * 9525.0) as i64;
@@ -512,7 +580,7 @@ fn shape_to_xml(shape: &Shape, sp_id: u32, xml: &mut String) {
         "<p:sp><p:nvSpPr><p:cNvPr id=\"{sp_id}\" name=\"Shape {sp_id}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"
     ));
     xml.push_str(&format!(
-        "<p:spPr><a:xfrm><a:off x=\"{x_emu}\" y=\"{y_emu}\"/><a:ext cx=\"{w_emu}\" cy=\"{h_emu}\"/></a:xfrm><a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>"
+        "<p:spPr><a:xfrm rot=\"{rotation}\"><a:off x=\"{x_emu}\" y=\"{y_emu}\"/><a:ext cx=\"{w_emu}\" cy=\"{h_emu}\"/></a:xfrm><a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>"
     ));
     if let Some(ref fill) = shape.fill_color {
         let c = fill.trim_start_matches('#');
@@ -521,11 +589,12 @@ fn shape_to_xml(shape: &Shape, sp_id: u32, xml: &mut String) {
             escape_xml(c)
         ));
     }
+    slide_border_to_xml(shape.border.as_ref(), xml);
     xml.push_str("</p:spPr>");
     xml.push_str("<p:txBody><a:bodyPr/><a:lstStyle/><a:p>");
     if let Some(ref runs) = shape.text {
         for run in runs {
-            run_to_xml(run, xml);
+            run_to_xml(run, resources, xml);
         }
     }
     xml.push_str("</a:p></p:txBody></p:sp>");
@@ -675,7 +744,11 @@ fn group_bounds(elements: &[SlideElement]) -> (f32, f32, f32, f32) {
     (min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
-fn background_to_xml(background: &contrix_doc_engine::slides::Background, xml: &mut String) {
+fn background_to_xml(
+    background: &contrix_doc_engine::slides::Background,
+    resources: &SlideResources,
+    xml: &mut String,
+) {
     use contrix_doc_engine::slides::Background;
     match background {
         Background::Solid(color) => xml.push_str(&format!(
@@ -688,7 +761,12 @@ fn background_to_xml(background: &contrix_doc_engine::slides::Background, xml: &
             escape_xml(end.trim_start_matches('#')),
             (*angle * 60_000.0) as i64
         )),
-        Background::Image(_) => {}
+        Background::Image(_) => {
+            if let Some(media)=resources.background_id.and_then(|id|resources.images.get(&id)).filter(|m|!m.bytes.is_empty()||m.external_url.is_some()) {
+                let attr=if media.external_url.is_some(){"link"}else{"embed"};
+                xml.push_str(&format!("<p:bg><p:bgPr><a:blipFill><a:blip r:{attr}=\"{}\"/><a:stretch><a:fillRect/></a:stretch></a:blipFill><a:effectLst/></p:bgPr></p:bg>",escape_xml(&media.relationship_id)));
+            }
+        }
     }
 }
 
@@ -706,38 +784,55 @@ fn transition_to_xml(slide: &Slide, xml: &mut String) {
         TransitionType::Dissolve => "<p:dissolve/>",
     };
     xml.push_str(&format!(
-        "<p:transition advTm=\"{}\">{effect}</p:transition>",
+        "<p:transition xmlns:p14=\"http://schemas.microsoft.com/office/powerpoint/2010/main\" p14:dur=\"{}\">{effect}</p:transition>",
         transition.duration_ms
     ));
 }
 
 fn animations_to_xml(slide: &Slide, shape_ids: &HashMap<Uuid, u32>, xml: &mut String) {
+    use contrix_doc_engine::slides::{AnimationEffect, AnimationTrigger};
     if slide.animations.is_empty() {
         return;
     }
     let mut animations = slide.animations.clone();
-    animations.sort_by_key(|animation| animation.order);
-    xml.push_str("<p:timing><p:tnLst><p:seq concurrent=\"1\" nextAc=\"seek\"><p:cTn id=\"1\" dur=\"indefinite\" nodeType=\"tmRoot\"><p:childTnLst>");
+    animations.sort_by_key(|a| a.order);
+    xml.push_str("<p:timing><p:tnLst><p:par><p:cTn id=\"1\" dur=\"indefinite\" nodeType=\"tmRoot\"><p:childTnLst><p:seq concurrent=\"1\" nextAc=\"seek\"><p:cTn id=\"2\" dur=\"indefinite\" nodeType=\"mainSeq\"><p:childTnLst>");
     for (index, animation) in animations.iter().enumerate() {
         let Some(shape_id) = shape_ids.get(&animation.target_id) else {
             continue;
         };
-        let filter = match animation.effect {
-            contrix_doc_engine::slides::AnimationEffect::Appear => "appear",
-            contrix_doc_engine::slides::AnimationEffect::Fade => "fade",
-            contrix_doc_engine::slides::AnimationEffect::FlyIn => "fly",
-            contrix_doc_engine::slides::AnimationEffect::Zoom => "zoom",
-            contrix_doc_engine::slides::AnimationEffect::Pulse => "pulse",
-            contrix_doc_engine::slides::AnimationEffect::Disappear => "disappear",
+        let (filter, preset) = match animation.effect {
+            AnimationEffect::Appear => ("appear", 1),
+            AnimationEffect::Fade => ("fade", 10),
+            AnimationEffect::FlyIn => ("slide", 2),
+            AnimationEffect::Zoom => ("zoom", 23),
+            AnimationEffect::Pulse => ("pulse", 26),
+            AnimationEffect::Disappear => ("fade", 10),
         };
-        xml.push_str(&format!(
-            "<p:animEffect transition=\"in\" filter=\"{filter}\"><p:cBhvr><p:cTn id=\"{}\" dur=\"{}\" delay=\"{}\"/><p:tgtEl><p:spTgt spid=\"{shape_id}\"/></p:tgtEl></p:cBhvr></p:animEffect>",
-            index + 2,
-            animation.duration_ms.max(1),
-            animation.delay_ms,
-        ));
+        let trigger = match animation.trigger {
+            AnimationTrigger::OnClick => "clickEffect",
+            AnimationTrigger::WithPrevious => "withEffect",
+            AnimationTrigger::AfterPrevious => "afterEffect",
+        };
+        let transition = if animation.effect == AnimationEffect::Disappear {
+            "out"
+        } else {
+            "in"
+        };
+        let class = if animation.effect == AnimationEffect::Disappear {
+            "exit"
+        } else if animation.effect == AnimationEffect::Pulse {
+            "emph"
+        } else {
+            "entr"
+        };
+        let outer = 3 + index * 2;
+        let effect = outer + 1;
+        xml.push_str(&format!("<p:par><p:cTn id=\"{outer}\" presetID=\"{preset}\" presetClass=\"{class}\" nodeType=\"{trigger}\" fill=\"hold\"><p:stCondLst><p:cond delay=\"{}\"/></p:stCondLst><p:childTnLst><p:animEffect transition=\"{transition}\" filter=\"{filter}\"><p:cBhvr><p:cTn id=\"{effect}\" dur=\"{}\" fill=\"hold\"/><p:tgtEl><p:spTgt spid=\"{shape_id}\"/></p:tgtEl></p:cBhvr></p:animEffect></p:childTnLst></p:cTn></p:par>",animation.delay_ms,animation.duration_ms.max(1)));
     }
-    xml.push_str("</p:childTnLst></p:cTn></p:seq></p:tnLst></p:timing>");
+    xml.push_str(
+        "</p:childTnLst></p:cTn></p:seq></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>",
+    );
 }
 
 /// Emit a simple rectangle text box used as a placeholder for elements that are
@@ -791,7 +886,7 @@ fn write_chart_parts<W: Write + Seek>(
     Ok(())
 }
 
-fn chart_part_xml(chart: &SlideChart) -> String {
+pub(crate) fn chart_part_xml(chart: &SlideChart) -> String {
     let (tag, prefix, suffix, axes) = match chart.chart_type {
         ChartType::Bar => (
             "barChart",
@@ -880,7 +975,8 @@ fn chart_part_xml(chart: &SlideChart) -> String {
     xml
 }
 
-fn text_box_to_xml(tb: &TextBox, sp_id: u32, xml: &mut String) {
+fn text_box_to_xml(tb: &TextBox, sp_id: u32, resources: &SlideResources, xml: &mut String) {
+    let rotation = (tb.rotation * 60000.0) as i64;
     let x_emu = (tb.x * 9525.0) as i64;
     let y_emu = (tb.y * 9525.0) as i64;
     let w_emu = (tb.width * 9525.0) as i64;
@@ -891,17 +987,26 @@ fn text_box_to_xml(tb: &TextBox, sp_id: u32, xml: &mut String) {
         sp_id, sp_id
     ));
     xml.push_str(&format!(
-        "<p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>",
+        "<p:spPr><a:xfrm rot=\"{rotation}\"><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>",
         x_emu, y_emu, w_emu, h_emu
     ));
-    xml.push_str("<p:txBody><a:bodyPr/><a:lstStyle/><a:p>");
+    if let Some(color) = &tb.background_color {
+        xml.push_str(&format!(
+            "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+            escape_xml(color.trim_start_matches('#'))
+        ));
+    }
+    slide_border_to_xml(tb.border.as_ref(), xml);
+    xml.push_str("</p:spPr>");
+    let padding = (tb.padding.max(0.0) * 9525.0) as i64;
+    xml.push_str(&format!("<p:txBody><a:bodyPr lIns=\"{padding}\" rIns=\"{padding}\" tIns=\"{padding}\" bIns=\"{padding}\"/><a:lstStyle/><a:p>"));
     for run in &tb.content {
-        run_to_xml(run, xml);
+        run_to_xml(run, resources, xml);
     }
     xml.push_str("</a:p></p:txBody></p:sp>");
 }
 
-fn run_to_xml(run: &SlideTextRun, xml: &mut String) {
+fn run_to_xml(run: &SlideTextRun, resources: &SlideResources, xml: &mut String) {
     xml.push_str("<a:r>");
     let has_props = run.bold
         || run.italic
@@ -909,7 +1014,8 @@ fn run_to_xml(run: &SlideTextRun, xml: &mut String) {
         || run.strikethrough
         || run.font_size.is_some()
         || run.color.is_some()
-        || run.font_family.is_some();
+        || run.font_family.is_some()
+        || run.link.is_some();
     if has_props {
         xml.push_str("<a:rPr lang=\"en-US\"");
         if run.bold {
@@ -938,6 +1044,9 @@ fn run_to_xml(run: &SlideTextRun, xml: &mut String) {
         if let Some(ref font) = run.font_family {
             xml.push_str(&format!("<a:latin typeface=\"{}\"/>", escape_xml(font)));
         }
+        if let Some(id) = run.link.as_ref().and_then(|url| resources.links.get(url)) {
+            xml.push_str(&format!("<a:hlinkClick r:id=\"{}\"/>", escape_xml(id)));
+        }
         xml.push_str("</a:rPr>");
     } else {
         xml.push_str("<a:rPr lang=\"en-US\"/>");
@@ -956,6 +1065,7 @@ fn escape_xml(s: &str) -> String {
 
 /// Parse a `.pptx` byte slice into a [`Presentation`].
 pub fn pptx_to_presentation(bytes: &[u8]) -> Result<Presentation, String> {
+    crate::ooxml::validate(bytes)?;
     let reader = Cursor::new(bytes);
     let mut archive = ZipArchive::new(reader).map_err(|e| e.to_string())?;
 
@@ -967,163 +1077,33 @@ pub fn pptx_to_presentation(bytes: &[u8]) -> Result<Presentation, String> {
 
     let title = read_title(&mut archive).unwrap_or_else(|| "Imported Presentation".to_string());
 
-    let mut slide_names: Vec<String> = Vec::new();
-    for i in 0..archive.len() {
-        let name = archive
-            .by_index(i)
-            .map_err(|e| e.to_string())?
-            .name()
-            .to_string();
-        if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
-            slide_names.push(name);
-        }
-    }
-    slide_names.sort_by_key(|n| slide_index(n).unwrap_or(u32::MAX));
+    let slide_names = ordered_slide_parts(&mut archive)?;
 
-    let mut pres = Presentation {
-        id: Uuid::new_v4(),
-        title,
-        slides: Vec::new(),
-        master: Default::default(),
-        theme: Default::default(),
-        metadata: Default::default(),
-    };
-
-    for name in &slide_names {
-        let mut xml = String::new();
-        archive
-            .by_name(name)
-            .map_err(|e| e.to_string())?
-            .read_to_string(&mut xml)
-            .map_err(|e| e.to_string())?;
-        let texts = parse_slide_texts(&xml)?;
-        let mut slide = Slide::new(SlideLayout::Blank);
-        for (idx, text) in texts.into_iter().enumerate() {
-            let y = 50.0 + (idx as f32) * 110.0;
-            slide.elements.push(SlideElement::TextBox(TextBox {
-                id: Uuid::new_v4(),
-                x: 50.0,
-                y,
-                width: 600.0,
-                height: 100.0,
-                rotation: 0.0,
-                content: vec![SlideTextRun::plain(text)],
-                background_color: None,
-                border: None,
-                padding: 8.0,
-            }));
-        }
-        pres.slides.push(slide);
-    }
-
-    Ok(pres)
+    external_import::import(&mut archive, &slide_names, title)
 }
 
-fn slide_index(name: &str) -> Option<u32> {
-    let stem = name
-        .strip_prefix("ppt/slides/slide")?
-        .strip_suffix(".xml")?;
-    stem.parse().ok()
+/// The presentation relationship list defines slide order, independently of ZIP names.
+fn ordered_slide_parts(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Result<Vec<String>, String> {
+    let links = crate::ooxml_import::relationships(archive, "ppt/presentation.xml")?;
+    let presentation = crate::ooxml_import::part(archive, "ppt/presentation.xml")?;
+    let mut slides = Vec::new();
+    for slide in presentation.descendants("sldId") {
+        let relation = slide
+            .attr("r:id")
+            .and_then(|id| links.get(id))
+            .filter(|r| !r.external && r.kind.ends_with("/slide"))
+            .ok_or("Unresolved slide relationship")?;
+        if !relation.target.starts_with("ppt/slides/") || !relation.target.ends_with(".xml") {
+            return Err("Invalid slide relationship target".into());
+        }
+        slides.push(relation.target.clone());
+    }
+    Ok(slides)
 }
-
 fn read_title(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Option<String> {
-    let mut xml = String::new();
-    archive
-        .by_name("docProps/core.xml")
-        .ok()?
-        .read_to_string(&mut xml)
-        .ok()?;
-    let mut reader = Reader::from_str(&xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut in_title = false;
-    let mut title = String::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                if e.name().as_ref() == b"dc:title" {
-                    in_title = true;
-                }
-            }
-            Ok(Event::End(e)) => {
-                if e.name().as_ref() == b"dc:title" {
-                    in_title = false;
-                }
-            }
-            Ok(Event::Text(t)) => {
-                if in_title {
-                    let decoded = t.decode().ok()?;
-                    title.push_str(&quick_xml::escape::unescape(&decoded).ok()?);
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => return None,
-            _ => {}
-        }
-        buf.clear();
-    }
-    if title.is_empty() { None } else { Some(title) }
-}
-
-fn parse_slide_texts(xml: &str) -> Result<Vec<String>, String> {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(false);
-    let mut buf = Vec::new();
-    let mut texts: Vec<String> = Vec::new();
-    let mut sp_depth: i32 = 0;
-    let mut in_txbody = false;
-    let mut in_t = false;
-    let mut current = String::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => match e.name().as_ref() {
-                b"p:sp" => {
-                    sp_depth += 1;
-                    current.clear();
-                }
-                b"p:txBody" => {
-                    if sp_depth > 0 {
-                        in_txbody = true;
-                    }
-                }
-                b"a:t" if in_txbody => {
-                    in_t = true;
-                }
-                _ => {}
-            },
-            Ok(Event::End(e)) => match e.name().as_ref() {
-                b"p:sp" => {
-                    if sp_depth > 0 {
-                        sp_depth -= 1;
-                        if !current.is_empty() {
-                            texts.push(std::mem::take(&mut current));
-                        }
-                    }
-                }
-                b"p:txBody" => {
-                    in_txbody = false;
-                }
-                b"a:t" => {
-                    in_t = false;
-                }
-                _ => {}
-            },
-            Ok(Event::Text(t)) => {
-                if in_t {
-                    let decoded = t.decode().map_err(|e| e.to_string())?;
-                    let s = quick_xml::escape::unescape(&decoded).map_err(|e| e.to_string())?;
-                    current.push_str(&s);
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(e.to_string()),
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    Ok(texts)
+    let root = crate::ooxml_import::optional(archive, "docProps/core.xml").ok()??;
+    let title = root.desc("title")?.all_text();
+    (!title.is_empty()).then_some(title)
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1113,7 @@ fn parse_slide_texts(xml: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use contrix_doc_engine::slides::SlideLayout;
 
     #[test]
     fn test_pptx_starts_with_zip_magic() {

@@ -5,7 +5,7 @@
 //! Microsoft Excel, LibreOffice Calc, and other spreadsheet applications that
 //! support the OOXML format.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Write};
 
 use calamine::{Data, Reader, Xlsx};
@@ -16,6 +16,13 @@ use contrix_doc_engine::calc::{
 };
 use serde::{Deserialize, Serialize};
 use zip::write::{SimpleFileOptions, ZipWriter};
+
+#[path = "xlsx_import.rs"]
+mod external_import;
+#[path = "xlsx_pivots.rs"]
+mod pivots;
+#[path = "xlsx_styles.rs"]
+mod styles;
 
 #[derive(Serialize, Deserialize)]
 struct NativeWorkbook {
@@ -106,13 +113,60 @@ impl From<NativeWorkbook> for Workbook {
 
 /// Convert a [`Workbook`] to a `.xlsx` byte vector (ZIP archive with Open XML).
 pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
+    crate::ooxml_import::model_budget(&NativeWorkbook::from(wb))?;
+    if wb
+        .sheets
+        .iter()
+        .flat_map(|sheet| sheet.cells.keys())
+        .any(|reference| reference.row >= 1_048_576 || reference.col >= 16_384)
+    {
+        return Err("Cell coordinates exceed XLSX worksheet dimensions".into());
+    }
     let mut buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut buf);
     let options = SimpleFileOptions::default();
+    let mut points_remaining = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
+    for chart in wb.sheets.iter().flat_map(|s| &s.charts) {
+        let range_points = |start: &CellRef, end: &CellRef| -> usize {
+            if start.row > end.row
+                || start.col > end.col
+                || end.row >= 1_048_576
+                || end.col >= 16_384
+            {
+                return usize::MAX;
+            }
+            (u64::from(end.row - start.row + 1) * u64::from(end.col - start.col + 1))
+                .try_into()
+                .unwrap_or(usize::MAX)
+        };
+        let count = if !chart.series_sources.is_empty() {
+            chart.series_sources.iter().fold(0usize, |sum, s| {
+                sum.saturating_add(range_points(&s.value_start, &s.value_end))
+                    .saturating_add(
+                        s.label_start
+                            .as_ref()
+                            .zip(s.label_end.as_ref())
+                            .map(|(a, b)| range_points(a, b))
+                            .unwrap_or(0),
+                    )
+            })
+        } else if let Some(data) = &chart.cached_data {
+            data.datasets.iter().fold(data.labels.len(), |sum, s| {
+                sum.saturating_add(s.values.len())
+            })
+        } else {
+            range_points(&chart.data_start, &chart.data_end).saturating_mul(2)
+        };
+        points_remaining = points_remaining
+            .checked_sub(count)
+            .ok_or("Chart point expansion budget exceeded")?;
+    }
+    let pivot_parts = pivots::build(wb)?;
     let chart_count: usize = wb.sheets.iter().map(|sheet| sheet.charts.len()).sum();
 
     // Build the shared strings table across all sheets.
     let (shared_strings, ss_index) = build_shared_strings(wb);
+    let styles = styles::Styles::new(wb);
 
     // [Content_Types].xml
     zip.start_file("[Content_Types].xml", options)
@@ -144,6 +198,7 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
             "\n  <Override PartName=\"/xl/charts/chart{chart_number}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.chart+xml\"/>"
         ));
     }
+    ct.push_str(&pivots::content_types(&pivot_parts));
     ct.push_str("\n</Types>");
     write!(zip, "{}", ct).map_err(|e| e.to_string())?;
 
@@ -191,6 +246,7 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
         }
         wbxml.push_str("</definedNames>");
     }
+    wbxml.push_str(&pivots::workbook_caches(&pivot_parts));
     wbxml.push_str("</workbook>");
     write!(zip, "{}", wbxml).map_err(|e| e.to_string())?;
 
@@ -218,37 +274,13 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
         "\n  <Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/>",
         ss_rid
     ));
+    wbrels.push_str(&pivots::workbook_rels(&pivot_parts));
     wbrels.push_str("\n</Relationships>");
     write!(zip, "{}", wbrels).map_err(|e| e.to_string())?;
 
-    // xl/styles.xml — base style plus differential styles used by
-    // conditional formatting.
     zip.start_file("xl/styles.xml", options)
         .map_err(|e| e.to_string())?;
-    let differential_formats = wb
-        .sheets
-        .iter()
-        .flat_map(|sheet| sheet.conditional_formats.iter())
-        .map(|conditional| differential_format_xml(&conditional.format))
-        .collect::<String>();
-    write!(
-        zip,
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
-  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
-  <dxfs count="{}">{}</dxfs>
-</styleSheet>"#,
-        wb.sheets
-            .iter()
-            .map(|sheet| sheet.conditional_formats.len())
-            .sum::<usize>(),
-        differential_formats,
-    )
-    .map_err(|e| e.to_string())?;
+    write!(zip, "{}", styles.xml(wb)).map_err(|e| e.to_string())?;
 
     // xl/sharedStrings.xml
     zip.start_file("xl/sharedStrings.xml", options)
@@ -271,28 +303,38 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
     for (i, sheet) in wb.sheets.iter().enumerate() {
         zip.start_file(format!("xl/worksheets/sheet{}.xml", i + 1), options)
             .map_err(|e| e.to_string())?;
-        let sheet_xml = sheet_to_xml(
+        let mut sheet_xml = sheet_to_xml(
             sheet,
             &ss_index,
+            &styles,
             differential_offset,
             (!sheet.charts.is_empty()).then_some(i + 1),
+        );
+        sheet_xml = sheet_xml.replace(
+            "</worksheet>",
+            &format!("{}</worksheet>", pivots::sheet_refs(&pivot_parts, i)),
         );
         write!(zip, "{}", sheet_xml).map_err(|e| e.to_string())?;
         differential_offset += sheet.conditional_formats.len();
 
-        if !sheet.charts.is_empty() {
+        let pivot_rels = pivots::sheet_rels(&pivot_parts, i);
+        if !sheet.charts.is_empty() || !pivot_rels.is_empty() {
             zip.start_file(
                 format!("xl/worksheets/_rels/sheet{}.xml.rels", i + 1),
                 options,
             )
             .map_err(|e| e.to_string())?;
-            write!(
-                zip,
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdDrawing\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"../drawings/drawing{}.xml\"/></Relationships>",
-                i + 1
-            )
-            .map_err(|e| e.to_string())?;
-
+            let drawing = if !sheet.charts.is_empty() {
+                format!(
+                    "<Relationship Id=\"rIdDrawing\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"../drawings/drawing{}.xml\"/>",
+                    i + 1
+                )
+            } else {
+                String::new()
+            };
+            write!(zip,"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{drawing}{pivot_rels}</Relationships>").map_err(|e|e.to_string())?;
+        }
+        if !sheet.charts.is_empty() {
             zip.start_file(format!("xl/drawings/drawing{}.xml", i + 1), options)
                 .map_err(|e| e.to_string())?;
             write!(zip, "{}", drawing_xml(sheet, chart_offset)).map_err(|e| e.to_string())?;
@@ -314,6 +356,39 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
         }
     }
 
+    for pivot in pivot_parts {
+        let number = pivot.index;
+        for (path, content) in [
+            (
+                format!("xl/pivotTables/pivotTable{number}.xml"),
+                pivot.definition,
+            ),
+            (
+                format!("xl/pivotCache/pivotCacheDefinition{number}.xml"),
+                pivot.cache,
+            ),
+            (
+                format!("xl/pivotCache/pivotCacheRecords{number}.xml"),
+                pivot.records,
+            ),
+            (
+                format!("xl/pivotTables/_rels/pivotTable{number}.xml.rels"),
+                format!(
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdCache\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition\" Target=\"../pivotCache/pivotCacheDefinition{number}.xml\"/></Relationships>"
+                ),
+            ),
+            (
+                format!("xl/pivotCache/_rels/pivotCacheDefinition{number}.xml.rels"),
+                format!(
+                    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdRecords\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords\" Target=\"pivotCacheRecords{number}.xml\"/></Relationships>"
+                ),
+            ),
+        ] {
+            zip.start_file(path, options).map_err(|e| e.to_string())?;
+            zip.write_all(content.as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+    }
     zip.start_file("customXml/contrix-workbook.json", options)
         .map_err(|e| e.to_string())?;
     serde_json::to_writer(&mut zip, &NativeWorkbook::from(wb)).map_err(|e| e.to_string())?;
@@ -349,6 +424,7 @@ fn build_shared_strings(wb: &Workbook) -> (Vec<String>, HashMap<String, usize>) 
 fn sheet_to_xml(
     sheet: &Sheet,
     ss_index: &HashMap<String, usize>,
+    styles: &styles::Styles,
     differential_offset: usize,
     drawing_number: Option<usize>,
 ) -> String {
@@ -372,44 +448,73 @@ fn sheet_to_xml(
             sheet.frozen_cols, sheet.frozen_rows
         ));
     }
-    xml.push_str("</sheetView></sheetViews><sheetData>");
+    xml.push_str("</sheetView></sheetViews>");
+    if !sheet.column_widths.is_empty() {
+        xml.push_str("<cols>");
+        let mut widths: Vec<_> = sheet.column_widths.iter().collect();
+        widths.sort_by_key(|(col, _)| **col);
+        for (col, width) in widths {
+            if width.is_finite() && *col < 16_384 {
+                xml.push_str(&format!(
+                    "<col min=\"{}\" max=\"{}\" width=\"{}\" customWidth=\"1\"/>",
+                    col + 1,
+                    col + 1,
+                    (width / 7.0).max(0.0)
+                ));
+            }
+        }
+        xml.push_str("</cols>");
+    }
+    xml.push_str("<sheetData>");
 
     if !sheet.cells.is_empty() {
-        // Determine bounding rectangle.
-        let max_row = sheet.cells.keys().map(|r| r.row).max().unwrap_or(0);
-        let max_col = sheet.cells.keys().map(|r| r.col).max().unwrap_or(0);
-
-        for row in 0..=max_row {
-            // Collect cells in this row.
-            let mut row_cells: Vec<(u32, &contrix_doc_engine::calc::Cell)> = Vec::new();
-            for col in 0..=max_col {
-                if let Some(cell) = sheet.get_cell(row, col) {
-                    row_cells.push((col, cell));
-                }
-            }
-            if row_cells.is_empty() {
-                continue;
-            }
-
-            xml.push_str(&format!("<row r=\"{}\">", row + 1)); // 1-based row number
+        // Enumerate occupied coordinates: a distant single cell is still O(1).
+        let mut rows: BTreeMap<u32, Vec<(u32, &Cell)>> = BTreeMap::new();
+        for (reference, cell) in &sheet.cells {
+            rows.entry(reference.row)
+                .or_default()
+                .push((reference.col, cell));
+        }
+        for (row, mut row_cells) in rows {
+            row_cells.sort_by_key(|(col, _)| *col);
+            let height = sheet
+                .row_heights
+                .get(&row)
+                .filter(|height| height.is_finite())
+                .map(|height| format!(" ht=\"{}\" customHeight=\"1\"", height * 0.75))
+                .unwrap_or_default();
+            xml.push_str(&format!("<row r=\"{}\"{height}>", row + 1)); // 1-based row number
 
             for (col, cell) in &row_cells {
                 let cell_ref = CellRef::new(row, *col).to_a1();
 
+                let cell_start = xml.len();
                 match (&cell.value, &cell.formula) {
                     // Formula cell — emit <f> and optionally a cached <v>.
                     (_, Some(formula)) => {
-                        xml.push_str(&format!("<c r=\"{}\">", cell_ref));
-                        xml.push_str(&format!("<f>{}</f>", escape_xml(formula)));
+                        let value_type = match &cell.value {
+                            CellValue::Text(_) | CellValue::Date(_) => " t=\"str\"",
+                            CellValue::Boolean(_) => " t=\"b\"",
+                            CellValue::Error(_) => " t=\"e\"",
+                            _ => "",
+                        };
+                        xml.push_str(&format!("<c r=\"{}\"{value_type}>", cell_ref));
+                        xml.push_str(&format!(
+                            "<f>{}</f>",
+                            escape_xml(formula.trim_start_matches('='))
+                        ));
                         // If there is a cached value, emit it.
                         match &cell.value {
                             CellValue::Number(n) => {
                                 xml.push_str(&format!("<v>{}</v>", n));
                             }
-                            CellValue::Text(s) => {
+                            CellValue::Text(s) | CellValue::Date(s) | CellValue::Error(s) => {
                                 // For formula cells with text results, inline the
                                 // string rather than using the shared strings table.
                                 xml.push_str(&format!("<v>{}</v>", escape_xml(s)));
+                            }
+                            CellValue::Boolean(value) => {
+                                xml.push_str(if *value { "<v>1</v>" } else { "<v>0</v>" })
                             }
                             _ => {}
                         }
@@ -453,7 +558,11 @@ fn sheet_to_xml(
                         ));
                     }
                     // Empty
-                    (CellValue::Empty, None) => {}
+                    (CellValue::Empty, None) => xml.push_str(&format!("<c r=\"{cell_ref}\"/>")),
+                }
+                if xml.len() > cell_start {
+                    let style = styles.index(&cell.format);
+                    xml.insert_str(cell_start + 2, &format!(" s=\"{style}\""));
                 }
             }
 
@@ -563,7 +672,11 @@ fn conditional_rule_xml(rule: &ConditionalRule) -> (&'static str, String, String
         ConditionalRule::EqualTo(value) => (
             "cellIs",
             " operator=\"equal\"".into(),
-            format!("<formula>\"{}\"</formula>", escape_xml(value)),
+            if value.parse::<f64>().is_ok() {
+                format!("<formula>{}</formula>", escape_xml(value))
+            } else {
+                format!("<formula>\"{}\"</formula>", escape_xml(value))
+            },
         ),
         ConditionalRule::ContainsText(value) => (
             "containsText",
@@ -671,33 +784,130 @@ fn drawing_relationships_xml(sheet: &Sheet, chart_offset: usize) -> String {
 }
 
 fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet) -> String {
-    let chart_tag = match chart.chart_type {
-        SheetChartType::Bar => "barChart",
-        SheetChartType::Line => "lineChart",
-        SheetChartType::Pie => "pieChart",
-        SheetChartType::Area => "areaChart",
+    use contrix_doc_engine::slides::{ChartData, ChartType, Dataset, SlideChart};
+    fn values(sheet: &Sheet, start: &CellRef, end: &CellRef) -> Vec<CellValue> {
+        let mut values = Vec::new();
+        for row in start.row..=end.row {
+            for col in start.col..=end.col {
+                if values.len() >= 100_000 {
+                    return values;
+                }
+                values.push(
+                    sheet
+                        .get_cell(row, col)
+                        .map(|c| c.value.clone())
+                        .unwrap_or(CellValue::Empty),
+                );
+            }
+        }
+        values
+    }
+    let mut data = chart.cached_data.clone().unwrap_or_else(|| ChartData {
+        labels: Vec::new(),
+        datasets: vec![Dataset {
+            name: chart.title.clone(),
+            values: Vec::new(),
+            color: None,
+        }],
+    });
+    if chart.cached_data.is_none() {
+        data.datasets[0].values = values(sheet, &chart.data_start, &chart.data_end)
+            .into_iter()
+            .map(|v| if let CellValue::Number(n) = v { n } else { 0.0 })
+            .collect();
+        data.labels = (1..=data.datasets[0].values.len())
+            .map(|i| i.to_string())
+            .collect();
+    }
+    for (dataset, source) in data.datasets.iter_mut().zip(&chart.series_sources) {
+        dataset.values = values(sheet, &source.value_start, &source.value_end)
+            .into_iter()
+            .map(|v| if let CellValue::Number(n) = v { n } else { 0.0 })
+            .collect();
+        if let (Some(start), Some(end)) = (&source.label_start, &source.label_end) {
+            data.labels = values(sheet, start, end)
+                .into_iter()
+                .map(|v| match v {
+                    CellValue::Text(v) | CellValue::Date(v) | CellValue::Error(v) => v,
+                    CellValue::Number(v) => v.to_string(),
+                    CellValue::Boolean(v) => if v { "TRUE" } else { "FALSE" }.into(),
+                    CellValue::Empty => String::new(),
+                })
+                .collect();
+        }
+    }
+    let kind = match chart.chart_type {
+        SheetChartType::Bar => ChartType::Bar,
+        SheetChartType::Line => ChartType::Line,
+        SheetChartType::Pie => ChartType::Pie,
+        SheetChartType::Area => ChartType::Area,
+        SheetChartType::Doughnut => ChartType::Doughnut,
+        SheetChartType::Scatter => ChartType::Scatter,
     };
-    let range = format!(
-        "'{}'!{}:{}",
-        sheet.name.replace('\'', "''"),
-        chart.data_start.to_a1(),
-        chart.data_end.to_a1()
-    );
-    let mut xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>{}</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:layout/><c:{chart_tag}>"#,
+    let slide = SlideChart {
+        id: chart.id,
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+        chart_type: kind,
+        data,
+    };
+    let mut xml = crate::pptx::chart_part_xml(&slide);
+    // Keep the worksheet title in a standard DrawingML chart title.
+    let title = format!(
+        "<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{}</a:t></a:r></a:p></c:rich></c:tx></c:title>",
         escape_xml(&chart.title)
     );
-    if matches!(chart.chart_type, SheetChartType::Bar) {
-        xml.push_str("<c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>");
+    xml = xml
+        .replacen("<c:chart>", &format!("<c:chart>{title}"), 1)
+        .replace("<c:autoTitleDeleted val=\"1\"/>", "");
+    fn reference(sheet: &Sheet, start: &CellRef, end: &CellRef) -> String {
+        escape_xml(&format!(
+            "'{}'!{}:{}",
+            sheet.name.replace('\'', "''"),
+            start.to_a1(),
+            end.to_a1()
+        ))
     }
-    xml.push_str(&format!(
-        "<c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:tx><c:v>{}</c:v></c:tx><c:val><c:numRef><c:f>{}</c:f></c:numRef></c:val></c:ser>",
-        escape_xml(&chart.title),
-        escape_xml(&range)
-    ));
-    xml.push_str(&format!(
-        "</c:{chart_tag}></c:plotArea><c:plotVisOnly val=\"1\"/></c:chart></c:chartSpace>"
-    ));
+    // Keep standard range bindings as well as cached values, so Office refreshes
+    // an imported chart after the user changes cells outside Contrix.
+    let mut offset = 0;
+    for source in &chart.series_sources {
+        let Some(start) = xml[offset..].find("<c:ser>").map(|i| i + offset) else {
+            break;
+        };
+        let Some(end) = xml[start..].find("</c:ser>").map(|i| i + start + 8) else {
+            break;
+        };
+        let mut series = xml[start..end].to_string();
+        let value_ref = reference(sheet, &source.value_start, &source.value_end);
+        // Last numeric literal is the Y/value cache (scatter X is earlier).
+        if let Some(begin) = series.rfind("<c:numLit>")
+            && let Some(close) = series[begin..].find("</c:numLit>").map(|i| i + begin)
+        {
+            series.replace_range(close..close + 11, "</c:numCache></c:numRef>");
+            series.replace_range(
+                begin..begin + 10,
+                &format!("<c:numRef><c:f>{value_ref}</c:f><c:numCache>"),
+            );
+        }
+        if let (Some(a), Some(b)) = (&source.label_start, &source.label_end) {
+            let range = reference(sheet, a, b);
+            if series.contains("<c:strLit>") {
+                series = series
+                    .replacen(
+                        "<c:strLit>",
+                        &format!("<c:strRef><c:f>{range}</c:f><c:strCache>"),
+                        1,
+                    )
+                    .replacen("</c:strLit>", "</c:strCache></c:strRef>", 1);
+            }
+        }
+        let length = series.len();
+        xml.replace_range(start..end, &series);
+        offset = start + length;
+    }
     xml
 }
 
@@ -716,11 +926,13 @@ fn escape_xml(s: &str) -> String {
 
 /// Parse a `.xlsx` byte vector into a [`Workbook`].
 pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
+    crate::ooxml::validate(bytes)?;
     if let Some(model) = crate::native_package::read(bytes, "customXml/contrix-workbook.json")
         && let Ok(workbook) = serde_json::from_value::<NativeWorkbook>(model)
     {
         return Ok(workbook.into());
     }
+    external_import::preflight_shared_strings(bytes)?;
     let cursor = Cursor::new(bytes.to_vec());
     let mut xlsx: Xlsx<_> = Xlsx::new(cursor).map_err(|e| e.to_string())?;
     let sheet_names = xlsx.sheet_names().to_vec();
@@ -748,6 +960,7 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
 
     for name in &sheet_names {
         let range = xlsx.worksheet_range(name).map_err(|e| e.to_string())?;
+        let formulas = xlsx.worksheet_formula(name).map_err(|e| e.to_string())?;
         let mut sheet = Sheet::new(name.clone());
         let start = range.start().unwrap_or((0, 0));
         for (row, col, value) in range.cells() {
@@ -755,6 +968,16 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
             let abs_col = start.1 + col as u32;
             if let Some(cv) = data_to_cell_value(value) {
                 sheet.set_cell(abs_row, abs_col, cv);
+            }
+        }
+        let start = formulas.start().unwrap_or((0, 0));
+        for (row, col, formula) in formulas.cells() {
+            if !formula.is_empty() {
+                sheet.set_formula(
+                    start.0 + row as u32,
+                    start.1 + col as u32,
+                    format!("={}", formula.trim_start_matches('=')),
+                );
             }
         }
         if let Some(regions) = merged_by_sheet.get(name) {
@@ -773,6 +996,8 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
         wb.sheets.push(Sheet::new("Sheet1".to_string()));
     }
 
+    external_import::enrich(bytes, &mut wb)?;
+    crate::ooxml_import::model_budget(&NativeWorkbook::from(&wb))?;
     Ok(wb)
 }
 
@@ -1025,6 +1250,8 @@ mod tests {
             data_end: CellRef::new(9, 0),
             anchor_start: CellRef::new(1, 3),
             anchor_end: CellRef::new(12, 10),
+            cached_data: None,
+            series_sources: Vec::new(),
         });
         wb.named_ranges.push(NamedRange {
             name: "Values".into(),

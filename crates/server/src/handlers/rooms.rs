@@ -29,6 +29,21 @@ async fn is_room_participant(
     room_id: &str,
     user_id: &str,
 ) -> bool {
+    let owner = match r::rooms
+        .find(room_id)
+        .select(r::owner_id)
+        .first::<String>(conn)
+        .await
+    {
+        Ok(owner) => owner,
+        Err(_) => return false,
+    };
+    if crate::services::tenancy::ensure_same_tenant_async(conn, user_id, &owner)
+        .await
+        .is_err()
+    {
+        return false;
+    }
     let is_member = rm::room_members
         .filter(rm::room_id.eq(room_id))
         .filter(rm::user_id.eq(user_id))
@@ -243,6 +258,16 @@ pub async fn list_rooms(depot: &mut Depot, res: &mut Response) {
         Ok(rows) => {
             let mut room_list = Vec::with_capacity(rows.len());
             for room in rows {
+                if crate::services::tenancy::ensure_same_tenant_async(
+                    &mut conn,
+                    &uid,
+                    &room.owner_id,
+                )
+                .await
+                .is_err()
+                {
+                    continue;
+                }
                 let count: i64 = rm::room_members
                     .filter(rm::room_id.eq(&room.id))
                     .count()
@@ -480,19 +505,32 @@ pub async fn delete_room(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
-    // Delete room members first.
-    let _ = diesel::delete(rm::room_members.filter(rm::room_id.eq(&room_id_param)))
-        .execute(&mut conn)
-        .await;
-
-    match diesel::delete(
-        r::rooms
-            .filter(r::id.eq(&room_id_param))
-            .filter(r::owner_id.eq(&uid)),
-    )
-    .execute(&mut conn)
-    .await
-    {
+    // Authorization belongs to every mutation, including dependent rows. Keep
+    // the owner check and both deletes in one transaction so a failed parent
+    // delete cannot leave the room without members.
+    let deletion: Result<usize, AppError> = horme::transaction(&mut conn, async |conn| {
+        diesel::delete(
+            rm::room_members.filter(
+                rm::room_id.eq_any(
+                    r::rooms
+                        .filter(r::id.eq(&room_id_param))
+                        .filter(r::owner_id.eq(&uid))
+                        .select(r::id),
+                ),
+            ),
+        )
+        .execute(conn)
+        .await?;
+        Ok(diesel::delete(
+            r::rooms
+                .filter(r::id.eq(&room_id_param))
+                .filter(r::owner_id.eq(&uid)),
+        )
+        .execute(conn)
+        .await?)
+    })
+    .await;
+    match deletion {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
@@ -668,9 +706,29 @@ pub async fn add_member(req: &mut Request, depot: &mut Depot, res: &mut Response
         return;
     }
 
+    if let Err(error) = crate::services::tenancy::ensure_same_tenant_async(
+        &mut conn,
+        &uid,
+        &body.user_id.to_string(),
+    )
+    .await
+    {
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
+        return;
+    }
     let member_id_val = Uuid::new_v4();
     let now = Utc::now();
     let role_val = body.role.unwrap_or_else(|| "member".to_string());
+    if !matches!(role_val.as_str(), "member" | "viewer" | "editor" | "admin") {
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("Invalid room member role".into()).to_response(),
+        )));
+        return;
+    }
 
     let new_member = NewRoomMember {
         id: member_id_val.to_string(),
@@ -865,20 +923,24 @@ pub async fn list_members(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .await
     {
         Ok(rows) => {
-            let members: Vec<RoomMemberResponse> = rows
-                .into_iter()
-                .map(
-                    |(mid, rid, muid, uname, dname, role, joined)| RoomMemberResponse {
-                        id: mid.parse().unwrap_or_default(),
-                        room_id: rid.parse().unwrap_or_default(),
-                        user_id: muid.parse().unwrap_or_default(),
-                        username: uname,
-                        display_name: dname,
-                        role,
-                        joined_at: joined.parse().unwrap_or_else(|_| Utc::now()),
-                    },
-                )
-                .collect();
+            let mut members = Vec::with_capacity(rows.len());
+            for (mid, rid, muid, uname, dname, role, joined) in rows {
+                if crate::services::tenancy::ensure_same_tenant_async(&mut conn, &uid, &muid)
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                members.push(RoomMemberResponse {
+                    id: mid.parse().unwrap_or_default(),
+                    room_id: rid.parse().unwrap_or_default(),
+                    user_id: muid.parse().unwrap_or_default(),
+                    username: uname,
+                    display_name: dname,
+                    role,
+                    joined_at: joined.parse().unwrap_or_else(|_| Utc::now()),
+                });
+            }
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(members)));
         }
@@ -922,24 +984,7 @@ pub async fn list_room_files(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let is_member = rm::room_members
-        .filter(rm::room_id.eq(&room_id_param))
-        .filter(rm::user_id.eq(&uid))
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0)
-        > 0;
-    let is_owner = r::rooms
-        .filter(r::id.eq(&room_id_param))
-        .filter(r::owner_id.eq(&uid))
-        .count()
-        .get_result::<i64>(&mut conn)
-        .await
-        .unwrap_or(0)
-        > 0;
-
-    if !is_member && !is_owner {
+    if !is_room_participant(&mut conn, &room_id_param, &uid).await {
         res.status_code(StatusCode::FORBIDDEN);
         res.render(Json(ApiResponse::<()>::err(
             AppError::Forbidden("Not a member of this room".into()).to_response(),
@@ -955,8 +1000,15 @@ pub async fn list_room_files(req: &mut Request, depot: &mut Depot, res: &mut Res
         .await
     {
         Ok(rows) => {
-            let mut file_list: Vec<FileResponse> =
-                rows.into_iter().map(file_model_to_response).collect();
+            let mut file_list = Vec::with_capacity(rows.len());
+            for row in rows {
+                if crate::handlers::access::authorize_file_access(&mut conn, &row, &uid, "viewer")
+                    .await
+                    .is_ok()
+                {
+                    file_list.push(file_model_to_response(row));
+                }
+            }
             for r in &mut file_list {
                 r.shared_with_count =
                     crate::handlers::access::count_shares_for_file(&mut conn, &r.id.to_string())

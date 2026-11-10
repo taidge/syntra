@@ -2,12 +2,93 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, Utc};
+use contrix_core::error::AppError;
+use contrix_core::schema::{sessions::dsl as s, users::dsl as u};
+use diesel::prelude::*;
+use horme::{OptionalExtension, RunQueryDsl};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::middleware::auth::JwtClaims;
+use crate::state::AppState;
+
+/// The current database session and account state, rather than the JWT's stale
+/// role copy. Shared by HTTP/WOPI/long-lived transports when revalidating access.
+pub struct ActiveJwtSession {
+    pub user_id: String,
+    pub role: String,
+    pub session_id: String,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+pub async fn validate_active_jwt_session(
+    state: &AppState,
+    token: &str,
+) -> Result<ActiveJwtSession, AppError> {
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.leeway = 0;
+    let claims = jsonwebtoken::decode::<JwtClaims>(
+        token,
+        &jsonwebtoken::DecodingKey::from_secret(state.config.auth.jwt_secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|_| AppError::Auth("Invalid or expired access token".into()))?
+    .claims;
+    let mut session = validate_session_hash(state, &claims.sub, &hash_token(token)).await?;
+    let jwt_expiry = DateTime::from_timestamp(
+        i64::try_from(claims.exp)
+            .map_err(|_| AppError::Auth("Invalid access token expiry".into()))?,
+        0,
+    )
+    .ok_or_else(|| AppError::Auth("Invalid access token expiry".into()))?;
+    session.expires_at = session.expires_at.min(jwt_expiry);
+    if session.expires_at <= Utc::now() {
+        return Err(AppError::Auth("Invalid or expired access token".into()));
+    }
+    Ok(session)
+}
+
+/// Revalidate a previously authenticated source session without retaining its
+/// bearer credential in memory. Account disable and session revocation take
+/// effect on the next request made with a derived WOPI token.
+pub async fn validate_session_hash(
+    state: &AppState,
+    user_id: &str,
+    token_hash: &str,
+) -> Result<ActiveJwtSession, AppError> {
+    crate::services::tenancy::ensure_active(state, user_id).await?;
+    let mut conn = state.db.clone();
+    let row = s::sessions
+        .inner_join(u::users.on(s::user_id.eq(u::id)))
+        .filter(s::token_hash.eq(token_hash))
+        .filter(s::user_id.eq(user_id))
+        .filter(s::is_active.eq(true))
+        .select((s::id, u::role, s::expires_at))
+        .first::<(String, String, String)>(&mut conn)
+        .await
+        .optional()?
+        .ok_or_else(|| AppError::Auth("Session has been revoked or expired".into()))?;
+    let (session_id, role, expiry) = row;
+    let expires_at = DateTime::parse_from_rfc3339(&expiry)
+        .map_err(|_| AppError::Auth("Invalid session expiry".into()))?
+        .with_timezone(&Utc);
+    if role == "disabled" || expires_at <= Utc::now() {
+        return Err(AppError::Auth("Session has been revoked or expired".into()));
+    }
+    Ok(ActiveJwtSession {
+        user_id: user_id.to_owned(),
+        role,
+        session_id,
+        token_hash: token_hash.to_owned(),
+        expires_at,
+    })
+}
+
 #[derive(Clone)]
-struct WopiSession {
-    user_id: String,
+pub struct WopiSession {
+    pub user_id: String,
+    pub source_token_hash: String,
     file_id: String,
     expires_at: DateTime<Utc>,
 }
@@ -30,12 +111,13 @@ impl WopiSessionStore {
         }
     }
 
-    pub fn create(&self, user_id: &str, file_id: &str, ttl: Duration) -> String {
+    pub fn create(&self, source: &ActiveJwtSession, file_id: &str, ttl: Duration) -> String {
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let session = WopiSession {
-            user_id: user_id.to_string(),
+            user_id: source.user_id.clone(),
+            source_token_hash: source.token_hash.clone(),
             file_id: file_id.to_string(),
-            expires_at: Utc::now() + ttl,
+            expires_at: (Utc::now() + ttl).min(source.expires_at),
         };
         let mut sessions = self
             .sessions
@@ -46,7 +128,7 @@ impl WopiSessionStore {
         token
     }
 
-    pub fn validate(&self, token: &str, file_id: &str) -> Option<String> {
+    pub fn validate(&self, token: &str, file_id: &str) -> Option<WopiSession> {
         let mut sessions = self
             .sessions
             .lock()
@@ -54,7 +136,7 @@ impl WopiSessionStore {
         retain_active(&mut sessions);
         sessions.get(&hash_token(token)).and_then(|session| {
             if session.file_id == file_id {
-                Some(session.user_id.clone())
+                Some(session.clone())
             } else {
                 None
             }
@@ -83,17 +165,39 @@ mod tests {
     #[test]
     fn validates_token_for_bound_file() {
         let store = WopiSessionStore::new();
-        let token = store.create("user-1", "file-1", Duration::minutes(5));
+        let source = source_session();
+        let token = store.create(&source, "file-1", Duration::minutes(5));
 
-        assert_eq!(store.validate(&token, "file-1").as_deref(), Some("user-1"));
-        assert_eq!(store.validate(&token, "file-2"), None);
+        let validated = store.validate(&token, "file-1").unwrap();
+        assert_eq!(validated.user_id, "user-1");
+        assert_eq!(validated.source_token_hash, "hashed-source-session");
+        assert!(store.validate(&token, "file-2").is_none());
     }
 
     #[test]
     fn rejects_expired_token() {
         let store = WopiSessionStore::new();
-        let token = store.create("user-1", "file-1", Duration::seconds(-1));
+        let token = store.create(&source_session(), "file-1", Duration::seconds(-1));
 
-        assert_eq!(store.validate(&token, "file-1"), None);
+        assert!(store.validate(&token, "file-1").is_none());
+    }
+
+    fn source_session() -> ActiveJwtSession {
+        ActiveJwtSession {
+            user_id: "user-1".into(),
+            role: "editor".into(),
+            session_id: "session-1".into(),
+            token_hash: "hashed-source-session".into(),
+            expires_at: Utc::now() + Duration::minutes(1),
+        }
+    }
+
+    #[test]
+    fn derived_token_cannot_outlive_its_source() {
+        let store = WopiSessionStore::new();
+        let mut source = source_session();
+        source.expires_at = Utc::now() - Duration::seconds(1);
+        let token = store.create(&source, "file-1", Duration::minutes(15));
+        assert!(store.validate(&token, "file-1").is_none());
     }
 }

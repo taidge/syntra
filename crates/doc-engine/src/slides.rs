@@ -27,6 +27,9 @@ pub struct PresentationMetadata {
     pub slide_width: f32,
     /// Slide height in pixels (default 1080).
     pub slide_height: f32,
+    /// Fidelity limitations of a non-native import; the uploaded original remains available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub import_warnings: Vec<String>,
 }
 
 impl Default for PresentationMetadata {
@@ -38,6 +41,7 @@ impl Default for PresentationMetadata {
             modified_at: now,
             slide_width: 1920.0,
             slide_height: 1080.0,
+            import_warnings: Vec::new(),
         }
     }
 }

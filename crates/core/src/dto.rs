@@ -125,6 +125,9 @@ pub struct CreateDocumentRequest {
 /// Payload for saving document content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateDocumentRequest {
+    /// Version observed when editing; stale saves fail with HTTP 409.
+    #[serde(default)]
+    pub expected_version: Option<i32>,
     pub content: serde_json::Value,
 }
 
@@ -648,9 +651,25 @@ pub struct UploadSessionResponse {
     pub total_size: i64,
     pub uploaded_size: i64,
     pub chunk_count: i32,
+    /// Maximum data bytes accepted per chunk, excluding multipart headers.
+    #[serde(default = "default_max_chunk_size")]
+    pub max_chunk_size: i64,
+    #[serde(default = "default_max_chunk_count")]
+    pub max_chunk_count: i32,
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+pub const MAX_UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_UPLOAD_CHUNKS: i32 = 4096;
+
+fn default_max_chunk_size() -> i64 {
+    MAX_UPLOAD_CHUNK_BYTES as i64
+}
+
+fn default_max_chunk_count() -> i32 {
+    MAX_UPLOAD_CHUNKS
 }
 
 // ---------------------------------------------------------------------------

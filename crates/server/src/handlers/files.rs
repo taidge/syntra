@@ -10,7 +10,6 @@ use contrix_core::error::AppError;
 use contrix_core::models::{File, NewFile};
 use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::users::dsl as u;
 
 use crate::handlers::access::{
     check_room_access, load_accessible_file, load_accessible_folder, load_accessible_target_folder,
@@ -21,6 +20,23 @@ use crate::services::{StorageBackend, StorageService};
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn render_error(res: &mut Response, error: AppError) {
+    res.status_code(
+        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
+    res.render(Json(ApiResponse::<()>::err(error.to_response())));
+}
+
+// Destination-access failures retain the endpoint's established 403 contract;
+// database failures use the shared 500/503 classification instead.
+fn render_access_error(res: &mut Response, error: AppError) {
+    let error = match error {
+        AppError::Database(_) | AppError::Internal(_) | AppError::Forbidden(_) => error,
+        other => AppError::Forbidden(other.to_string()),
+    };
+    render_error(res, error);
+}
 
 async fn document_id_for_file(
     conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
@@ -119,17 +135,14 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
 
     let parent_id_param: Option<String> = req.query("parent_id");
     let page: u32 = req.query("page").unwrap_or(1);
-    let per_page: u32 = req.query("per_page").unwrap_or(50);
-    let offset_val = ((page.saturating_sub(1)) * per_page) as i64;
+    let per_page: u32 = req.query::<u32>("per_page").unwrap_or(50).clamp(1, 100);
+    let offset_val = i64::from(page.saturating_sub(1)) * i64::from(per_page);
     let limit_val = per_page as i64;
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
@@ -145,8 +158,7 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
                 return;
             }
             Err(e) => {
-                res.status_code(StatusCode::FORBIDDEN);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                render_access_error(res, e);
                 return;
             }
         };
@@ -155,6 +167,13 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
             .into_boxed()
             .filter(f::parent_id.eq(&pid))
             .filter(f::is_trashed.eq(false))
+            .filter(diesel::dsl::sql::<diesel::sql_types::Bool>("((files.room_id IS NULL AND files.owner_id = ")
+                .bind::<diesel::sql_types::Text,_>(&uid)
+                .sql(") OR EXISTS (SELECT 1 FROM room_members JOIN rooms ON rooms.id=room_members.room_id JOIN users room_owner ON room_owner.id=rooms.owner_id WHERE room_members.room_id=files.room_id AND room_owner.tenant_id IS (SELECT tenant_id FROM users WHERE id=room_members.user_id) AND room_members.user_id = ")
+                .bind::<diesel::sql_types::Text,_>(&uid)
+                .sql(")) AND EXISTS (SELECT 1 FROM users owner_user JOIN users actor_user ON actor_user.id = ")
+                .bind::<diesel::sql_types::Text,_>(&uid)
+                .sql(" WHERE owner_user.id=files.owner_id AND owner_user.tenant_id IS actor_user.tenant_id)"))
             .order((f::sort_order.asc(), f::is_folder.desc(), f::name.asc()))
             .limit(limit_val)
             .offset(offset_val);
@@ -172,6 +191,13 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
             .filter(f::owner_id.eq(&uid))
             .filter(f::parent_id.is_null())
             .filter(f::is_trashed.eq(false))
+            .filter(diesel::dsl::sql::<diesel::sql_types::Bool>("((files.room_id IS NULL AND files.owner_id = ")
+                .bind::<diesel::sql_types::Text,_>(&uid)
+                .sql(") OR EXISTS (SELECT 1 FROM room_members JOIN rooms ON rooms.id=room_members.room_id JOIN users room_owner ON room_owner.id=rooms.owner_id WHERE room_members.room_id=files.room_id AND room_owner.tenant_id IS (SELECT tenant_id FROM users WHERE id=room_members.user_id) AND room_members.user_id = ")
+                .bind::<diesel::sql_types::Text,_>(&uid)
+                .sql(")) AND EXISTS (SELECT 1 FROM users owner_user JOIN users actor_user ON actor_user.id = ")
+                .bind::<diesel::sql_types::Text,_>(&uid)
+                .sql(" WHERE owner_user.id=files.owner_id AND owner_user.tenant_id IS actor_user.tenant_id)"))
             .order((f::sort_order.asc(), f::is_folder.desc(), f::name.asc()))
             .limit(limit_val)
             .offset(offset_val)
@@ -190,8 +216,7 @@ pub async fn list_files(req: &mut Request, depot: &mut Depot, res: &mut Response
             res.render(Json(ApiResponse::ok(file_list)));
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_error(res, e);
         }
     }
 }
@@ -214,12 +239,38 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         }
     };
 
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Auth("Not authenticated".into()).to_response(),
+        )));
+        return;
+    };
+    static UPLOAD_CAPACITY: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)));
+    let upload_capacity = match UPLOAD_CAPACITY.clone().try_acquire_owned() {
+        Ok(permit) => std::sync::Arc::new(permit),
+        Err(_) => {
+            res.status_code(StatusCode::TOO_MANY_REQUESTS);
+            res.render(Json(ApiResponse::<()>::err(
+                AppError::RateLimit("Upload capacity is busy; retry later".into()).to_response(),
+            )));
+            return;
+        }
+    };
+
     // Salvo's default form limit is 64 KiB. Apply the configured file budget
     // before the first form read, with a bounded allowance for multipart headers.
     let multipart_limit =
         usize::try_from(max_upload_bytes(state.config.storage.max_upload_size_mb))
             .unwrap_or(usize::MAX)
             .saturating_add(64 * 1024);
+    let retained_body = super::request_body::RetainedBody::install_with_timeouts(
+        req,
+        std::time::Duration::from_secs(state.config.storage.upload_idle_timeout_seconds),
+        std::time::Duration::from_secs(state.config.storage.upload_total_timeout_seconds),
+    );
+    let rejection_budget = multipart_limit.saturating_add(1024 * 1024);
     if req
         .headers()
         .get("content-length")
@@ -227,6 +278,12 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         .and_then(|length| length.parse::<u64>().ok())
         .is_some_and(|length| length > multipart_limit as u64)
     {
+        // A small fixed allowance covers common over-limit clients without
+        // turning a rejected multi-gigabyte or stalled body into unbounded work.
+        let drained = retained_body
+            .drain(rejection_budget, std::time::Duration::from_secs(2))
+            .await;
+        super::request_body::close_if_incomplete(req, res, drained);
         res.status_code(StatusCode::PAYLOAD_TOO_LARGE);
         res.render(Json(ApiResponse::<()>::err(
             AppError::QuotaExceeded(format!(
@@ -239,17 +296,15 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     }
     req.set_secure_max_size(multipart_limit);
     if let Err(error) = req.form_data().await {
-        let mut too_large = matches!(error, salvo::http::ParseError::PayloadTooLarge);
-        // FilePart may wrap the stream limit inside a multipart error.
-        let mut cause = std::error::Error::source(&error);
-        while let Some(error) = cause {
-            if error.is::<http_body_util::LengthLimitError>() {
-                too_large = true;
-                break;
-            }
-            cause = error.source();
-        }
-        let error = if too_large {
+        let drained = retained_body
+            .drain(rejection_budget, std::time::Duration::from_secs(2))
+            .await;
+        super::request_body::close_if_incomplete(req, res, drained);
+        let too_large = super::request_body::exceeds_limit(&error);
+        let timed_out = retained_body.timed_out();
+        let error = if timed_out {
+            AppError::Timeout("Reading the upload body exceeded its configured deadline".into())
+        } else if too_large {
             AppError::QuotaExceeded(format!(
                 "Upload exceeds configured limit of {} MB",
                 state.config.storage.max_upload_size_mb
@@ -257,7 +312,9 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         } else {
             AppError::Validation(format!("Invalid multipart upload: {error}"))
         };
-        res.status_code(if too_large {
+        res.status_code(if timed_out {
+            StatusCode::REQUEST_TIMEOUT
+        } else if too_large {
             StatusCode::PAYLOAD_TOO_LARGE
         } else {
             StatusCode::BAD_REQUEST
@@ -265,6 +322,21 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         res.render(Json(ApiResponse::<()>::err(error.to_response())));
         return;
     }
+    // Multipart stops at its closing boundary, before a chunked transport's
+    // terminal frame. Keep the incoming body alive until HTTP framing ends.
+    let complete = retained_body
+        .drain(multipart_limit, std::time::Duration::from_secs(2))
+        .await;
+    if !complete {
+        super::request_body::close_if_incomplete(req, res, false);
+        res.status_code(StatusCode::BAD_REQUEST);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Validation("Multipart transport did not finish within its budget".into())
+                .to_response(),
+        )));
+        return;
+    }
+    drop(retained_body);
 
     let parent_id_param: Option<String> = req.form("parent_id").await;
     let room_id_param: Option<String> = req.form("room_id").await;
@@ -286,12 +358,20 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         .unwrap_or_else(|| "upload".to_string());
     let content_type = file_part.content_type().map(|m| m.to_string());
 
-    let data = match tokio::fs::read(file_part.path()).await {
-        Ok(d) => d,
-        Err(e) => {
+    let temporary_path = file_part.path().to_owned();
+    let read_capacity = upload_capacity.clone();
+    let read = tokio::spawn(async move {
+        let _capacity = read_capacity;
+        tokio::fs::read(temporary_path).await
+    })
+    .await;
+    let data = match read {
+        Ok(Ok(data)) => std::sync::Arc::new(data),
+        error => {
+            tracing::warn!(?error, "Upload staging read failed");
             res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
             res.render(Json(ApiResponse::<()>::err(
-                AppError::Storage(e.to_string()).to_response(),
+                AppError::Storage("Could not read upload".into()).to_response(),
             )));
             return;
         }
@@ -325,10 +405,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
@@ -356,8 +433,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 return;
             }
             Err(e) => {
-                res.status_code(StatusCode::FORBIDDEN);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                render_access_error(res, e);
                 return;
             }
         }
@@ -365,8 +441,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         match check_room_access(&mut conn, &uid, room_id, "editor").await {
             Ok(()) => Some(room_id.to_string()),
             Err(e) => {
-                res.status_code(StatusCode::FORBIDDEN);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
+                render_access_error(res, e);
                 return;
             }
         }
@@ -374,18 +449,55 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         None
     };
 
-    let storage_path = match state
-        .storage
-        .save_file(&owner_uuid, &file_name, &data)
+    let quota_owner = uid.clone();
+    if let Err(error) = state
+        .db
+        .run(move |conn| {
+            crate::services::persistence::check_staging_quota(conn, &quota_owner, size_val)
+        })
         .await
     {
-        Ok(p) => p,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
+        return;
+    }
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &salvo::http::Method::POST,
+        "/api/v1/files/upload",
+    )
+    .await
+    {
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
+        return;
+    }
+    let staged = match crate::services::persistence::stage_blob(
+        &state.db,
+        state.storage.clone(),
+        owner_uuid,
+        file_name.clone(),
+        data.clone(),
+        upload_capacity.clone(),
+    )
+    .await
+    {
+        Ok(staged) => staged,
+        Err(error) => {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
             return;
         }
     };
+    let storage_path = staged.path.clone();
 
     let file_id_val = Uuid::new_v4();
     let now = Utc::now();
@@ -408,24 +520,83 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         sort_order: 0,
     };
 
-    if let Err(e) = diesel::insert_into(f::files)
-        .values(&new_file)
-        .execute(&mut conn)
-        .await
-    {
-        let _ = state.storage.delete_file(&storage_path).await;
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::Database(e.to_string()).to_response(),
-        )));
+    let imported_format = std::path::Path::new(&file_name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "docx" | "xlsx" | "pptx"));
+    let commit_owner = uid.clone();
+    let commit_parent = parent_id_param.clone();
+    let source_version = contrix_core::models::NewFileVersion {
+        id: Uuid::new_v4().to_string(),
+        file_id: file_id_val.to_string(),
+        version_number: 0,
+        path: storage_path.clone(),
+        size: size_val,
+        created_by: uid.clone(),
+        created_at: now.to_rfc3339(),
+    };
+    let commit_credential = credential.clone();
+    let commit_capacity = upload_capacity.clone();
+    let result = staged
+        .commit(move |connection| {
+            let _capacity = commit_capacity;
+            connection.immediate_transaction::<_, AppError, _>(|connection| {
+                crate::middleware::auth::validate_credential_in_transaction(
+                    connection,
+                    &commit_credential,
+                    &salvo::http::Method::POST,
+                    "/api/v1/files/upload",
+                )?;
+                if let Some(parent) = commit_parent {
+                    let folder =
+                        diesel::RunQueryDsl::first::<File>(f::files.find(parent), connection)?;
+                    crate::services::persistence::authorize(
+                        connection,
+                        &folder,
+                        &commit_owner,
+                        "editor",
+                    )?;
+                    if !folder.is_folder {
+                        return Err(AppError::Validation("Parent is not a folder".into()));
+                    }
+                    if folder.room_id != new_file.room_id {
+                        return Err(AppError::Conflict(
+                            "Parent folder moved during upload; retry in its current room".into(),
+                        ));
+                    }
+                }
+                crate::services::tenancy::user_tenant(connection, &commit_owner)?;
+                if let Some(room) = &new_file.room_id {
+                    crate::services::persistence::authorize_room(
+                        connection,
+                        room,
+                        &commit_owner,
+                        "editor",
+                    )?;
+                }
+                diesel::RunQueryDsl::execute(
+                    diesel::insert_into(f::files).values(&new_file),
+                    connection,
+                )?;
+                crate::services::persistence::adjust_quota(connection, &commit_owner, size_val)?;
+                if imported_format {
+                    diesel::RunQueryDsl::execute(
+                        diesel::insert_into(contrix_core::schema::file_versions::table)
+                            .values(&source_version),
+                        connection,
+                    )?;
+                }
+                Ok(())
+            })
+        })
+        .await;
+    if let Err(error) = result {
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
         return;
     }
-
-    // Update user storage_used.
-    let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
-        .set(u::storage_used.eq(u::storage_used + size_val))
-        .execute(&mut conn)
-        .await;
 
     // Generate thumbnail for image uploads.
     let mut thumbnail_path_val: Option<String> = None;
@@ -469,46 +640,115 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     .await;
 
     let mut imported_doc_id: Option<Uuid> = None;
+    let mut import_warnings: Vec<String> = Vec::new();
     let ext = std::path::Path::new(&file_name)
         .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase());
-
-    if let Some(ext) = ext.as_deref() {
-        let parse_result: Result<(String, contrix_core::models::DocumentType), String> = match ext {
-            "docx" => contrix_export::docx::docx_to_writer(&data)
-                .and_then(|d| serde_json::to_string(&d).map_err(|e| e.to_string()))
-                .map(|json| (json, contrix_core::models::DocumentType::Writer)),
-            "xlsx" => contrix_export::xlsx::xlsx_to_workbook(&data)
-                .and_then(|w| serde_json::to_string(&w).map_err(|e| e.to_string()))
-                .map(|json| (json, contrix_core::models::DocumentType::Calc)),
-            "pptx" => contrix_export::pptx::pptx_to_presentation(&data)
-                .and_then(|p| serde_json::to_string(&p).map_err(|e| e.to_string()))
-                .map(|json| (json, contrix_core::models::DocumentType::Slides)),
-            _ => Err("not an office format".into()),
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase);
+    if let Some(ext) = ext.filter(|ext| matches!(ext.as_str(), "docx" | "xlsx" | "pptx")) {
+        static IMPORT_WORKERS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)));
+        let permit = IMPORT_WORKERS.clone().acquire_owned().await;
+        let parse_capacity = upload_capacity.clone();
+        let parse_result = match permit {
+            Ok(permit) => tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let _capacity = parse_capacity;
+                match ext.as_str() {
+                    "docx" => contrix_export::docx::docx_to_writer(&data)
+                        .and_then(|document| {
+                            serde_json::to_value(document).map_err(|e| e.to_string())
+                        })
+                        .map(|value| (value, contrix_core::models::DocumentType::Writer)),
+                    "xlsx" => contrix_export::xlsx::xlsx_to_workbook(&data)
+                        .and_then(|document| {
+                            serde_json::to_value(document).map_err(|e| e.to_string())
+                        })
+                        .map(|value| (value, contrix_core::models::DocumentType::Calc)),
+                    _ => contrix_export::pptx::pptx_to_presentation(&data)
+                        .and_then(|document| {
+                            serde_json::to_value(document).map_err(|e| e.to_string())
+                        })
+                        .map(|value| (value, contrix_core::models::DocumentType::Slides)),
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|result| result),
+            Err(error) => Err(error.to_string()),
         };
-
-        if let Ok((content_str, doc_type)) = parse_result {
-            let new_doc_id = Uuid::new_v4();
-            let now_str = now.to_rfc3339();
-            let new_doc = contrix_core::models::NewDocument {
-                id: new_doc_id.to_string(),
-                file_id: file_id_val.to_string(),
-                doc_type: doc_type.as_str().to_string(),
-                content: Some(content_str),
-                version: 1,
-                created_at: now_str.clone(),
-                updated_at: now_str,
-            };
-            if let Err(e) = diesel::insert_into(contrix_core::schema::documents::dsl::documents)
-                .values(&new_doc)
-                .execute(&mut conn)
-                .await
-            {
-                tracing::warn!("auto-import: failed to insert document for {file_id_val}: {e}");
-            } else {
-                imported_doc_id = Some(new_doc_id);
+        match parse_result {
+            Ok((content, doc_type)) => {
+                import_warnings = content
+                    .pointer("/metadata/import_warnings")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let new_doc_id = Uuid::new_v4();
+                let document = contrix_core::models::NewDocument {
+                    id: new_doc_id.to_string(),
+                    file_id: file_id_val.to_string(),
+                    doc_type: doc_type.as_str().to_owned(),
+                    content: Some(content.to_string()),
+                    version: 1,
+                    created_at: now.to_rfc3339(),
+                    updated_at: now.to_rfc3339(),
+                };
+                let import_source_path = storage_path.clone();
+                let import_user = uid.clone();
+                let import_credential = credential.clone();
+                let import_capacity = upload_capacity.clone();
+                let persist = state
+                    .db
+                    .run(move |connection| {
+                        let _capacity = import_capacity;
+                        connection.immediate_transaction::<_, AppError, _>(|connection| {
+                            crate::middleware::auth::validate_credential_in_transaction(
+                                connection,
+                                &import_credential,
+                                &salvo::http::Method::POST,
+                                "/api/v1/files/upload",
+                            )?;
+                            let file = diesel::RunQueryDsl::first::<File>(
+                                f::files.find(&document.file_id),
+                                connection,
+                            )?;
+                            crate::services::persistence::authorize(
+                                connection,
+                                &file,
+                                &import_user,
+                                "editor",
+                            )?;
+                            if file.path != import_source_path {
+                                return Err(AppError::Conflict(
+                                    "Upload changed during import".into(),
+                                ));
+                            }
+                            diesel::RunQueryDsl::execute(
+                                diesel::insert_into(contrix_core::schema::documents::table)
+                                    .values(&document),
+                                connection,
+                            )?;
+                            Ok(())
+                        })
+                    })
+                    .await;
+                match persist {
+                    Ok(()) => imported_doc_id = Some(new_doc_id),
+                    Err(error) => {
+                        tracing::warn!(%file_id_val,%error,"Document import skipped after source changed or became unavailable");
+                        import_warnings.push("Import could not be committed because the source changed or became unavailable. Refresh the file state before editing.".into());
+                    }
+                }
             }
+            Err(error) => import_warnings.push(format!(
+                "Import failed: {error}. The original upload is retained for download."
+            )),
         }
     }
 
@@ -531,7 +771,15 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     };
 
     res.status_code(StatusCode::CREATED);
-    res.render(Json(ApiResponse::ok(file_resp)));
+    let mut response = serde_json::to_value(file_resp).expect("FileResponse serializes");
+    response["import_warnings"] = serde_json::json!(import_warnings);
+    if imported_format {
+        response["original_file_id"] = serde_json::json!(file_id_val);
+        response["original_download_url"] = serde_json::json!(format!(
+            "/api/v1/files/{file_id_val}/download?original=true"
+        ));
+    }
+    res.render(Json(ApiResponse::ok(response)));
 }
 
 // ---------------------------------------------------------------------------
@@ -557,10 +805,7 @@ pub async fn get_file(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
@@ -579,13 +824,7 @@ pub async fn get_file(req: &mut Request, depot: &mut Depot, res: &mut Response) 
             )));
         }
         Err(e) => {
-            let status = match e {
-                AppError::Forbidden(_) => StatusCode::FORBIDDEN,
-                AppError::NotFound(_) => StatusCode::NOT_FOUND,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            res.status_code(status);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_error(res, e);
         }
     }
 }
@@ -629,16 +868,7 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
     let new_name = StorageService::sanitize_file_name(&body.name);
     let now = Utc::now();
 
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
+    let mut conn = state.db.clone();
 
     let target = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor").await {
         Ok(Some(row)) => row,
@@ -650,15 +880,42 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::FORBIDDEN);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_access_error(res, e);
             return;
         }
     };
 
-    match diesel::update(f::files.filter(f::id.eq(&target.id)))
-        .set((f::name.eq(&new_name), f::updated_at.eq(now.to_rfc3339())))
-        .execute(&mut conn)
+    let rename_id = target.id.clone();
+    let rename_user = uid.clone();
+    let rename_name = new_name.clone();
+    match state
+        .db
+        .run(move |connection| {
+            connection.immediate_transaction::<_, AppError, _>(|connection| {
+                let file =
+                    diesel::RunQueryDsl::first::<File>(f::files.find(&rename_id), connection)?;
+                crate::services::persistence::authorize(connection, &file, &rename_user, "editor")?;
+                crate::services::persistence::check_file_lock(
+                    connection,
+                    &file.id,
+                    &rename_user,
+                    None,
+                )?;
+                crate::handlers::folders::ensure_available_name(
+                    connection,
+                    &file.owner_id,
+                    file.parent_id.as_deref(),
+                    file.room_id.as_deref(),
+                    &rename_name,
+                    Some(&file.id),
+                )?;
+                Ok(diesel::RunQueryDsl::execute(
+                    diesel::update(f::files.find(&rename_id))
+                        .set((f::name.eq(&rename_name), f::updated_at.eq(now.to_rfc3339()))),
+                    connection,
+                )?)
+            })
+        })
         .await
     {
         Ok(0) => {
@@ -685,10 +942,10 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
             )));
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            res.status_code(
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(e.to_response())));
         }
     }
 }
@@ -700,84 +957,30 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
 #[handler]
 pub async fn delete_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
-    let uid = match get_user_id(depot) {
-        Some(val) => val,
-        None => {
-            res.status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Auth("Not authenticated".into()).to_response(),
-            )));
-            return;
-        }
+    let Some(uid) = get_user_id(depot) else {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        return;
     };
-
-    let file_id_param: String = req.param("id").unwrap_or_default();
-    let now = Utc::now();
-
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    let target = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor").await {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("File not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::FORBIDDEN);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
-            return;
-        }
-    };
-
-    match diesel::update(f::files.filter(f::id.eq(&target.id)))
-        .set((
-            f::is_trashed.eq(true),
-            f::trashed_at.eq(Some(now.to_rfc3339())),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await
-    {
-        Ok(0) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("File not found".into()).to_response(),
-            )));
-        }
+    let id: String = req.param("id").unwrap_or_default();
+    match crate::handlers::folders::trash_file_tree(&state.db, &id, &uid).await {
         Ok(_) => {
             crate::services::WebhookService::fire_event(
                 &state.db,
                 "file.deleted",
-                &serde_json::json!({
-                    "id": &target.id,
-                    "name": &target.name,
-                    "owner_id": &uid,
-                    "deleted_at": now.to_rfc3339(),
-                }),
+                &serde_json::json!({"id":id,"deleted_by":uid,"deleted_at":Utc::now().to_rfc3339()}),
             )
             .await;
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
-                serde_json::json!({ "message": "File trashed" }),
+                serde_json::json!({"message":"File trashed"}),
             )));
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+        Err(error) => {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
         }
     }
 }
@@ -789,108 +992,47 @@ pub async fn delete_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
 #[handler]
 pub async fn move_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
-    let uid = match get_user_id(depot) {
-        Some(val) => val,
-        None => {
-            res.status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Auth("Not authenticated".into()).to_response(),
-            )));
-            return;
-        }
+    let Some(uid) = get_user_id(depot) else {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        return;
     };
-
-    let file_id_param: String = req.param("id").unwrap_or_default();
-
+    let id: String = req.param("id").unwrap_or_default();
     let body: MoveFileRequest = match req.parse_json().await {
-        Ok(b) => b,
-        Err(e) => {
+        Ok(body) => body,
+        Err(error) => {
             res.status_code(StatusCode::BAD_REQUEST);
             res.render(Json(ApiResponse::<()>::err(
-                AppError::Validation(e.to_string()).to_response(),
+                AppError::Validation(error.to_string()).to_response(),
             )));
             return;
         }
     };
-
-    let now = Utc::now();
-
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    let source = match load_accessible_file(&mut conn, &file_id_param, &uid, "editor").await {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("File not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::FORBIDDEN);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
-            return;
-        }
-    };
-
-    let target_folder = match load_accessible_target_folder(
-        &mut conn,
+    match crate::handlers::folders::move_file_tree(
+        &state.db,
+        &id,
         &body.target_folder_id.to_string(),
         &uid,
-        "editor",
     )
     .await
     {
-        Ok(Some(folder)) => folder,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Target folder not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::FORBIDDEN);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
-            return;
-        }
-    };
-
-    match diesel::update(f::files.filter(f::id.eq(&source.id)))
-        .set((
-            f::parent_id.eq(body.target_folder_id.to_string()),
-            f::room_id.eq(target_folder.room_id.clone()),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await
-    {
-        Ok(0) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("File not found".into()).to_response(),
-            )));
-        }
         Ok(_) => {
+            crate::services::WebhookService::fire_event(
+                &state.db,
+                "file.moved",
+                &serde_json::json!({"id":id,"parent_id":body.target_folder_id,"moved_by":uid}),
+            )
+            .await;
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(
-                serde_json::json!({ "message": "File moved" }),
+                serde_json::json!({"message":"File moved"}),
             )));
         }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+        Err(error) => {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
         }
     }
 }
@@ -918,10 +1060,7 @@ pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
@@ -943,39 +1082,114 @@ pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
         Err(e) => {
-            let status = match e {
-                AppError::Forbidden(_) => StatusCode::FORBIDDEN,
-                AppError::NotFound(_) => StatusCode::NOT_FOUND,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            res.status_code(status);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_access_error(res, e);
             return;
         }
     };
 
     let resolved_file_id = file_row.id.clone();
     let file_name = file_row.name.clone();
-    let file_path = file_row.path.clone();
+    let file_path = if req.query::<bool>("original").unwrap_or(false) {
+        use contrix_core::schema::file_versions::dsl as fv;
+        match fv::file_versions
+            .filter(fv::file_id.eq(&resolved_file_id))
+            .filter(fv::version_number.eq(0))
+            .select(fv::path)
+            .first::<String>(&mut conn)
+            .await
+            .optional()
+        {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                res.status_code(StatusCode::NOT_FOUND);
+                res.render(Json(ApiResponse::<()>::err(
+                    AppError::NotFound("Original upload not retained".into()).to_response(),
+                )));
+                return;
+            }
+            Err(error) => {
+                render_error(res, AppError::from(error));
+                return;
+            }
+        }
+    } else {
+        file_row.path.clone()
+    };
     let mime_type_val = file_row.mime_type.clone();
 
-    let data = match read_file_with_document_fallback(
-        &mut conn,
-        &state.storage,
-        &resolved_file_id,
-        &file_path,
-    )
-    .await
-    {
+    let read_result = if req.query::<bool>("original").unwrap_or(false) {
+        state.storage.read_file(&file_path).await
+    } else {
+        read_file_with_document_fallback(&mut conn, &state.storage, &resolved_file_id, &file_path)
+            .await
+    };
+    let mut data = match read_result {
         Ok(d) => d,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_access_error(res, e);
             return;
         }
     };
 
-    let ct = mime_type_val.unwrap_or_else(|| "application/octet-stream".to_string());
+    let mut ct = mime_type_val
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    // Edited imports are stored as native JSON. Download their current Office
+    // representation rather than returning JSON with an Office MIME/filename.
+    if !req.query::<bool>("original").unwrap_or(false) && file_path.ends_with(".contrix.json") {
+        use contrix_export::ExportFormat;
+        let extension = std::path::Path::new(&file_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let choices = [
+            mime_type_val.as_deref().and_then(ExportFormat::from_mime),
+            ExportFormat::from_extension(extension),
+        ];
+        let document = d::documents
+            .filter(d::file_id.eq(&resolved_file_id))
+            .select((d::doc_type, d::content))
+            .first::<(String, Option<String>)>(&mut conn)
+            .await
+            .optional();
+        match document {
+            Ok(Some((kind, Some(content)))) => {
+                let format = choices.into_iter().flatten().find(|format| {
+                    matches!(
+                        (kind.as_str(), format),
+                        ("writer", ExportFormat::Docx)
+                            | ("calc", ExportFormat::Xlsx)
+                            | ("slides", ExportFormat::Pptx)
+                    )
+                });
+                if let Some(format) = format {
+                    ct = format.mime_type().to_owned();
+                    match crate::handlers::convert::export_content(
+                        content,
+                        kind,
+                        format,
+                        format.extension().to_owned(),
+                    )
+                    .await
+                    {
+                        Ok(bytes) => data = bytes,
+                        Err(error) => {
+                            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
+                            res.render(Json(ApiResponse::<()>::err(
+                                AppError::Internal(error).to_response(),
+                            )));
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                render_error(res, AppError::from(error));
+                return;
+            }
+            _ => {}
+        }
+    }
     res.status_code(StatusCode::OK);
     res.headers_mut().insert(
         "content-type",
@@ -1035,10 +1249,7 @@ pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Resp
     let mut conn = match state.db.get() {
         Ok(c) => c,
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
             return;
         }
     };
@@ -1053,8 +1264,7 @@ pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Resp
             return;
         }
         Err(e) => {
-            res.status_code(StatusCode::FORBIDDEN);
-            res.render(Json(ApiResponse::<()>::err(e.to_response())));
+            render_access_error(res, e);
             return;
         }
     };
@@ -1080,10 +1290,7 @@ pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Resp
             )));
         }
         Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+            render_error(res, AppError::Database(e.to_string()));
         }
     }
 }

@@ -37,6 +37,15 @@ pub async fn check_room_access(
     room_id: &str,
     required_role: &str,
 ) -> Result<(), AppError> {
+    use contrix_core::schema::rooms::dsl as rooms;
+    let owner = rooms::rooms
+        .find(room_id)
+        .select(rooms::owner_id)
+        .first::<String>(conn)
+        .await
+        .optional()?
+        .ok_or_else(|| AppError::NotFound("Room not found".into()))?;
+    crate::services::tenancy::ensure_same_tenant_async(conn, user_id, &owner).await?;
     let member = rm::room_members
         .filter(rm::room_id.eq(room_id))
         .filter(rm::user_id.eq(user_id))
@@ -72,6 +81,7 @@ pub async fn authorize_file_access(
     user_id: &str,
     required_role: &str,
 ) -> Result<(), AppError> {
+    crate::services::tenancy::ensure_same_tenant_async(conn, user_id, &row.owner_id).await?;
     if let Some(room_id) = row.room_id.as_deref() {
         check_room_access(conn, user_id, room_id, required_role).await
     } else if row.owner_id == user_id {

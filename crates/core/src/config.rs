@@ -23,6 +23,45 @@ pub struct AppConfig {
     /// Trash retention settings
     #[serde(default)]
     pub trash: TrashConfig,
+    /// Bounded history retention and orphaned object recovery.
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MaintenanceConfig {
+    pub history_enabled: bool,
+    /// Ordinary snapshots converge to this count per document/file. One current
+    /// snapshot and at most 2048 contiguous OT bases may additionally survive.
+    pub history_max_versions: u32,
+    /// Additional expiry bound; zero disables age-based removal.
+    pub history_max_age_days: u32,
+    pub history_batch_size: u32,
+    pub reconcile_enabled: bool,
+    /// Opt in only when this database exclusively owns the entire S3 bucket or
+    /// local base_path. Unknown legacy objects otherwise never become owned.
+    pub reconcile_legacy_dedicated_namespace: bool,
+    pub interval_seconds: u64,
+    /// Both object modification and first discovery must predate this grace.
+    pub orphan_grace_seconds: u64,
+    pub scan_page_size: u32,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            history_enabled: true,
+            history_max_versions: 100,
+            history_max_age_days: 30,
+            history_batch_size: 100,
+            reconcile_enabled: true,
+            reconcile_legacy_dedicated_namespace: false,
+            interval_seconds: 300,
+            orphan_grace_seconds: 86_400,
+            scan_page_size: 100,
+        }
+    }
 }
 
 /// HTTP server bind address and CORS configuration.
@@ -78,6 +117,10 @@ pub struct AuthConfig {
 /// Local (or remote) file storage configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StorageConfig {
+    #[serde(default = "upload_idle_timeout_seconds")]
+    pub upload_idle_timeout_seconds: u64,
+    #[serde(default = "upload_total_timeout_seconds")]
+    pub upload_total_timeout_seconds: u64,
     /// Root directory for stored files
     pub base_path: String,
     /// Maximum single-upload size in megabytes
@@ -102,6 +145,13 @@ pub struct StorageConfig {
     /// S3-compatible endpoint URL (only used when backend = "s3")
     #[serde(default)]
     pub s3_endpoint: Option<String>,
+}
+
+fn upload_idle_timeout_seconds() -> u64 {
+    30
+}
+fn upload_total_timeout_seconds() -> u64 {
+    900
 }
 
 /// Rate limiting configuration.

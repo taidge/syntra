@@ -83,23 +83,14 @@ async function enterCell(page: Page, name: string, value: string, display = valu
 }
 
 /** Exercise physical pointer events rather than the selection or Fill buttons. */
-async function dragBetween(page: Page, source: Locator, destination: Locator) {
-    await source.scrollIntoViewIfNeeded();
-    const start = await source.boundingBox();
-    await destination.scrollIntoViewIfNeeded();
-    const end = await destination.boundingBox();
-    expect(start).not.toBeNull();
-    expect(end).not.toBeNull();
-    await page.mouse.move(start!.x + start!.width / 2, start!.y + start!.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(end!.x + end!.width / 2, end!.y + end!.height / 2, { steps: 12 });
-    await page.mouse.up();
+async function dragBetween(source: Locator, destination: Locator) {
+    await source.dragTo(destination, { steps: 12 });
 }
 
 async function dragFillHandle(page: Page, destination: string) {
     const handle = page.locator('.calc-fill-handle:visible');
     await expect(handle).toHaveCount(1);
-    await dragBetween(page, handle, namedCell(page, destination));
+    await dragBetween(handle, namedCell(page, destination));
 }
 
 /** Toolbar commands remain real buttons when moved into the overflow popover. */
@@ -179,7 +170,7 @@ test.describe('Calc page UI @ui', () => {
     test('mouse dragging selects a rectangle without changing its cell values', async ({ page }) => {
         await enterCell(page, 'A1', 'First');
         await enterCell(page, 'C3', 'Last');
-        await dragBetween(page, namedCell(page, 'A1'), namedCell(page, 'C3'));
+        await dragBetween(namedCell(page, 'A1'), namedCell(page, 'C3'));
 
         await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(9);
         await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('A1:C3');
@@ -245,14 +236,14 @@ test.describe('Calc page UI @ui', () => {
     test('dragging a two-cell numeric series extends it down and up', async ({ page }) => {
         await enterCell(page, 'A1', '1');
         await enterCell(page, 'A2', '2');
-        await dragBetween(page, namedCell(page, 'A1'), namedCell(page, 'A2'));
+        await dragBetween(namedCell(page, 'A1'), namedCell(page, 'A2'));
         await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(2);
         await dragFillHandle(page, 'A5');
         for (let row = 1; row <= 5; row++) await expect(namedCell(page, `A${row}`)).toHaveText(String(row));
 
         await enterCell(page, 'C3', '3');
         await enterCell(page, 'C4', '4');
-        await dragBetween(page, namedCell(page, 'C3'), namedCell(page, 'C4'));
+        await dragBetween(namedCell(page, 'C3'), namedCell(page, 'C4'));
         await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(2);
         await dragFillHandle(page, 'C1');
         for (let row = 1; row <= 4; row++) await expect(namedCell(page, `C${row}`)).toHaveText(String(row));
@@ -353,7 +344,7 @@ test.describe('Calc page UI @ui', () => {
                 await expect(namedCell(page, name)).toHaveText(value);
             }
 
-            await dragBetween(page, namedCell(page, 'A1'), namedCell(page, 'B2'));
+            await dragBetween(namedCell(page, 'A1'), namedCell(page, 'B2'));
             await page.keyboard.press('Control+c');
             await expect.poll(async () => (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n'))
                 .toBe('alpha\t1\nbeta\t2');
@@ -685,6 +676,110 @@ test.describe('Calc page UI @ui', () => {
         for (const [row, col] of [[0, 0], [0, 1], [1, 0], [1, 1]]) {
             await expect(cellAt(page, row, col)).toHaveText('');
         }
+
+        for (const clearKey of ['Delete', 'Backspace']) {
+            for (const [name, value] of [['A1', 'A'], ['B1', 'B'], ['A2', 'C'], ['B2', 'D']]) {
+                await enterCell(page, name, value);
+            }
+            await namedCell(page, 'A1').click();
+            await expect(namedCell(page, 'A1')).toBeFocused();
+            // One browser task keeps DOM focus on A1 while the logical active
+            // cell moves to B2, then clears before deferred focus can catch up.
+            await namedCell(page, 'A1').evaluate((element, clearKey) => {
+                for (const key of ['ArrowRight', 'ArrowDown', clearKey]) {
+                    element.dispatchEvent(new KeyboardEvent('keydown', {
+                        key, shiftKey: key.startsWith('Arrow'), bubbles: true, cancelable: true,
+                    }));
+                }
+            }, clearKey);
+            await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(4);
+            await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('A1:B2');
+            for (const name of ['A1', 'B1', 'A2', 'B2']) {
+                await expect(namedCell(page, name)).toHaveText('');
+            }
+
+            await enterCell(page, 'A1', 'Extra');
+            await enterCell(page, 'C3', 'Separate');
+            await namedCell(page, 'A1').click();
+            await namedCell(page, 'C3').click({ modifiers: ['Control'] });
+            await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(2);
+            // A1 is only in the additive selection; C3 is the active range.
+            await namedCell(page, 'A1').focus();
+            await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('C3');
+            await page.keyboard.press(clearKey);
+            await expect(namedCell(page, 'A1')).toHaveText('');
+            await expect(namedCell(page, 'C3')).toHaveText('');
+            await expect.poll(() => page.locator('.cell.active, .cell.selected').count()).toBe(2);
+
+            // A genuinely different focused cell still becomes the clear
+            // target rather than deleting the previous selection.
+            await enterCell(page, 'D4', 'Outside');
+            await enterCell(page, 'A1', 'Retained');
+            await namedCell(page, 'D4').focus();
+            await page.keyboard.press(clearKey);
+            await expect(namedCell(page, 'D4')).toHaveText('');
+            await expect(namedCell(page, 'A1')).toHaveText('Retained');
+            await expect(page.getByRole('textbox', { name: 'Cell address or named range', exact: true })).toHaveValue('D4');
+        }
+
+        for (const moveSelection of [false, true]) {
+            await enterCell(page, 'D4', 'Timer source');
+            await namedCell(page, 'D4').click();
+            // Hold just the next Calc-owned 20ms focus callback. The user can
+            // then move focus before that exact old callback is released.
+            await page.evaluate(() => {
+                const original = window.setTimeout;
+                const native = original.bind(window);
+                let held: (() => void) | undefined;
+                const state = {
+                    armed: true,
+                    get held() { return held !== undefined; },
+                    fire() {
+                        const callback = held;
+                        held = undefined;
+                        callback?.();
+                    },
+                    restore() {
+                        window.setTimeout = original;
+                        this.fire();
+                        Reflect.deleteProperty(window, '__calcHeldFocusTimer');
+                    },
+                };
+                window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+                    if (state.armed && delay === 20 && typeof handler === 'function') {
+                        state.armed = false;
+                        held = () => handler(...args);
+                        return native(() => {}, 0);
+                    }
+                    return native(handler, delay, ...args);
+                }) as typeof window.setTimeout;
+                Reflect.set(window, '__calcHeldFocusTimer', state);
+            });
+            try {
+                await page.keyboard.press('Delete');
+                await page.waitForFunction(() => Reflect.get(window, '__calcHeldFocusTimer').held);
+                if (moveSelection) await namedCell(page, 'A1').click();
+                const formula = page.getByRole('textbox', { name: 'Formula', exact: true });
+                await formula.click();
+                await formula.pressSequentially('typed');
+                const draft = moveSelection ? 'Retainedtyped' : 'typed';
+                await expect(formula).toHaveValue(draft);
+                await page.evaluate(async () => {
+                    Reflect.get(window, '__calcHeldFocusTimer').fire();
+                    // Drain the released future and its host commit, rather
+                    // than waiting an arbitrary time for the race to pass.
+                    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+                });
+                await expect(formula).toBeFocused();
+                await expect(formula).toHaveValue(draft);
+                await formula.press('Escape');
+                await expect(formula).toHaveValue(moveSelection ? 'Retained' : '');
+                await expect(namedCell(page, 'D4')).toHaveText('');
+                await expect(namedCell(page, 'A1')).toHaveText('Retained');
+            } finally {
+                await page.evaluate(() => Reflect.get(window, '__calcHeldFocusTimer')?.restore());
+            }
+        }
     });
 
     test('ArrowRight skips the full width of a merged cell', async ({ page }) => {
@@ -741,7 +836,7 @@ test.describe('Calc page UI @ui', () => {
         expect(new Set(finalIds).size).toBe(3);
     });
 
-    test('Escape clears editing state', async ({ page }) => {
+    test('Escape clears editing state', async ({ page, request }) => {
         await cellAt(page, 0, 0).click();
         await page.getByRole('textbox', { name: 'Formula', exact: true }).focus();
         await page.keyboard.type('xyz');
@@ -751,6 +846,29 @@ test.describe('Calc page UI @ui', () => {
         await expect(page.locator('#calc-formula-input')).toHaveValue('');
         // And the cell should still display nothing.
         await expect(cellAt(page, 0, 0)).toHaveText('');
+
+        // Keep input and Escape in one browser task so no render can commit
+        // the draft before cancellation restores the last rendered value.
+        const formula = page.getByRole('textbox', { name: 'Formula', exact: true });
+        await formula.focus();
+        await expect(formula).toBeFocused();
+        await formula.evaluate(element => {
+            const input = element as HTMLInputElement;
+            input.value = 'xyz';
+            input.dispatchEvent(new InputEvent('input', {
+                data: 'xyz', inputType: 'insertText', bubbles: true, cancelable: true,
+            }));
+            input.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+            }));
+        });
+        await expect(formula).toHaveValue('');
+        await expect(cellAt(page, 0, 0)).toHaveText('');
+        const response = await request.get(`${API_BASE}/documents/${docId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+        });
+        expect(response.ok()).toBeTruthy();
+        expect((await response.json()).data.content.sheets[0].cells).toEqual([]);
     });
 
     test('clicking f(x) prepends = and focuses the formula bar', async ({ page }) => {

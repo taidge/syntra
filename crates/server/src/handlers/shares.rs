@@ -11,6 +11,7 @@ use contrix_core::models::{File, NewShare, SharePermission};
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::shares::dsl as s;
 
+use crate::handlers::access::{authorize_file_access, load_accessible_file};
 use crate::middleware::auth::get_user_id;
 use crate::services::StorageService;
 
@@ -20,6 +21,38 @@ async fn hash_share_password(password: &str) -> Result<String, AppError> {
         "Failed to hash share password",
     )
     .await
+}
+
+fn render_error(res: &mut Response, error: AppError) {
+    res.status_code(
+        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
+    res.render(Json(ApiResponse::<()>::err(error.to_response())));
+}
+
+async fn authorize_share_management(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+    share_id: &str,
+    user_id: &str,
+    new_permission: Option<&str>,
+) -> Result<(), AppError> {
+    let (file_id, permission) = s::shares
+        .filter(s::id.eq(share_id))
+        .filter(s::shared_by.eq(user_id))
+        .select((s::file_id, s::permission))
+        .first::<(String, String)>(conn)
+        .await
+        .optional()?
+        .ok_or_else(|| AppError::NotFound("Share not found".into()))?;
+    let role = if new_permission.unwrap_or(&permission) == "admin" {
+        "admin"
+    } else {
+        "editor"
+    };
+    match load_accessible_file(conn, &file_id, user_id, role).await? {
+        Some(file) if !file.is_trashed => Ok(()),
+        _ => Err(AppError::NotFound("File not found".into())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -62,36 +95,70 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
-    // Verify file ownership.
-    let file_count: i64 = match f::files
-        .filter(f::id.eq(body.file_id.to_string()))
-        .filter(f::owner_id.eq(&uid))
-        .count()
-        .get_result(&mut conn)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+    // Sharing is a delegated capability. A removed room member must not be
+    // able to mint new links merely because they originally created the file.
+    let required_role = if matches!(body.permission, SharePermission::Admin) {
+        "admin"
+    } else {
+        "editor"
+    };
+    match load_accessible_file(&mut conn, &body.file_id.to_string(), &uid, required_role).await {
+        Ok(Some(file)) if !file.is_trashed => {}
+        Ok(_) => {
+            render_error(res, AppError::NotFound("File not found".into()));
             return;
         }
-    };
-
-    if file_count == 0 {
-        res.status_code(StatusCode::NOT_FOUND);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::NotFound("File not found or not owned by you".into()).to_response(),
-        )));
+        Err(error) => {
+            render_error(res, error);
+            return;
+        }
+    }
+    if body.shared_with_user_id.is_some() && body.shared_with_group_id.is_some() {
+        render_error(
+            res,
+            AppError::Validation("Choose a user or a group share target".into()),
+        );
         return;
+    }
+    if let Some(target) = body.shared_with_user_id
+        && let Err(error) =
+            crate::services::tenancy::ensure_same_tenant_async(&mut conn, &uid, &target.to_string())
+                .await
+    {
+        render_error(res, error);
+        return;
+    }
+    if let Some(group) = body.shared_with_group_id {
+        use contrix_core::schema::groups::dsl as g;
+        let owner = match g::groups
+            .find(group.to_string())
+            .select(g::created_by)
+            .first::<String>(&mut conn)
+            .await
+            .optional()
+        {
+            Ok(Some(owner)) => owner,
+            Ok(None) => {
+                render_error(res, AppError::NotFound("Group not found".into()));
+                return;
+            }
+            Err(error) => {
+                render_error(res, error.into());
+                return;
+            }
+        };
+        if let Err(error) =
+            crate::services::tenancy::ensure_same_tenant_async(&mut conn, &uid, &owner).await
+        {
+            render_error(res, error);
+            return;
+        }
     }
 
     let share_id_val = Uuid::new_v4();
     let now = Utc::now();
     let shared_with_str = body.shared_with_user_id.map(|sw| sw.to_string());
-    let pub_token = if body.shared_with_user_id.is_none() {
+    let pub_token = if body.shared_with_user_id.is_none() && body.shared_with_group_id.is_none() {
         Some(Uuid::new_v4().to_string().replace('-', ""))
     } else {
         None
@@ -224,6 +291,10 @@ pub async fn get_share(req: &mut Request, depot: &mut Depot, res: &mut Response)
         }
     };
 
+    if let Err(error) = authorize_share_management(&mut conn, &share_id_param, &uid, None).await {
+        render_error(res, error);
+        return;
+    }
     match s::shares
         .filter(s::id.eq(&share_id_param))
         .filter(s::shared_by.eq(&uid))
@@ -332,6 +403,22 @@ pub async fn update_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
         )));
         return;
     }
+    if body
+        .permission
+        .as_deref()
+        .is_some_and(|permission| !matches!(permission, "read" | "write" | "admin"))
+    {
+        render_error(res, AppError::Validation("Invalid share permission".into()));
+        return;
+    }
+    if body
+        .expires_at
+        .as_deref()
+        .is_some_and(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).is_err())
+    {
+        render_error(res, AppError::Validation("Invalid share expiry".into()));
+        return;
+    }
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -344,6 +431,13 @@ pub async fn update_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
+    if let Err(error) =
+        authorize_share_management(&mut conn, &share_id_param, &uid, body.permission.as_deref())
+            .await
+    {
+        render_error(res, error);
+        return;
+    }
     // Handle the dynamic update by branching on which fields are present.
     let result = if body.permission.is_some() && body.expires_at.is_some() {
         diesel::update(
@@ -490,6 +584,17 @@ pub async fn list_file_shares(req: &mut Request, depot: &mut Depot, res: &mut Re
         }
     };
 
+    match load_accessible_file(&mut conn, &file_id_param, &uid, "editor").await {
+        Ok(Some(file)) if !file.is_trashed => {}
+        Ok(_) => {
+            render_error(res, AppError::NotFound("File not found".into()));
+            return;
+        }
+        Err(error) => {
+            render_error(res, error);
+            return;
+        }
+    }
     match s::shares
         .filter(s::file_id.eq(&file_id_param))
         .filter(s::shared_by.eq(&uid))
@@ -588,12 +693,20 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
     // Look up the share by its public token.
     let share = s::shares
         .filter(s::public_token.eq(&token))
-        .select((s::file_id, s::expires_at, s::password_hash))
-        .first::<(String, Option<String>, Option<String>)>(&mut conn)
+        .filter(s::shared_with.is_null())
+        .filter(s::shared_with_group.is_null())
+        .select((
+            s::file_id,
+            s::expires_at,
+            s::password_hash,
+            s::shared_by,
+            s::permission,
+        ))
+        .first::<(String, Option<String>, Option<String>, String, String)>(&mut conn)
         .await
         .optional();
 
-    let (file_id, expires_at, password_hash) = match share {
+    let (file_id, expires_at, password_hash, shared_by, permission) = match share {
         Ok(Some(row)) => row,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -612,10 +725,10 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
     };
 
     // Reject expired shares.
-    if let Some(exp) = expires_at
-        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&exp)
-        && dt.with_timezone(&Utc) < Utc::now()
-    {
+    if expires_at.as_deref().is_some_and(|expiry| {
+        chrono::DateTime::parse_from_rfc3339(expiry)
+            .map_or(true, |expires| expires.with_timezone(&Utc) <= Utc::now())
+    }) {
         res.status_code(StatusCode::GONE);
         res.render(Json(ApiResponse::<()>::err(
             AppError::NotFound("This share has expired".into()).to_response(),
@@ -667,6 +780,21 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
         }
     };
 
+    // A public link must not outlive its creator's authority over room content.
+    let role = if permission == "admin" {
+        "admin"
+    } else {
+        "editor"
+    };
+    if let Err(error) = authorize_file_access(&mut conn, &file_row, &shared_by, role).await {
+        let error = if matches!(error, AppError::Forbidden(_) | AppError::NotFound(_)) {
+            AppError::NotFound("Share is no longer available".into())
+        } else {
+            error
+        };
+        render_error(res, error);
+        return;
+    }
     let data = match state.storage.read_file(&file_row.path).await {
         Ok(d) => d,
         Err(_) => {

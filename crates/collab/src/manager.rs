@@ -1,138 +1,223 @@
-//! Session manager — the top-level API consumed by the server crate.
-//!
-//! [`CollabManager`] owns all active collaboration sessions and serialises
-//! access to them via a `RwLock`.
-
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::sync::{RwLock, broadcast};
-use uuid::Uuid;
-
+//! Per-document collaboration channels and gates. The registry lock is never
+//! held while applying an operation or waiting for a document's mutex.
 use super::operation::Operation;
 use super::session::{CollabMessage, CollabSession, UserCursor};
+use std::collections::HashMap;
+use std::sync::{Arc, Weak};
+use tokio::sync::{Mutex, RwLock, broadcast};
+use uuid::Uuid;
 
-/// Manages all active collaboration sessions.
-///
-/// This type is cheaply cloneable (the inner state is behind an `Arc`) and
-/// is designed to be shared across Tokio tasks.
-#[derive(Clone)]
+type Session = Arc<Mutex<CollabSession>>;
+type DocumentGates = Arc<Mutex<HashMap<Uuid, Weak<Mutex<()>>>>>;
+
+#[derive(Clone, Default)]
 pub struct CollabManager {
-    sessions: Arc<RwLock<HashMap<Uuid, CollabSession>>>,
+    sessions: Arc<RwLock<HashMap<Uuid, Session>>>,
+    gates: DocumentGates,
 }
-
 impl CollabManager {
-    /// Create a new, empty manager.
     pub fn new() -> Self {
-        Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::default()
     }
 
-    /// Return a broadcast receiver for the given document, creating a new
-    /// session if one does not already exist.
+    async fn session(&self, document_id: Uuid) -> Session {
+        if let Some(session) = self.sessions.read().await.get(&document_id).cloned() {
+            return session;
+        }
+        self.sessions
+            .write()
+            .await
+            .entry(document_id)
+            .or_insert_with(|| Arc::new(Mutex::new(CollabSession::new(document_id))))
+            .clone()
+    }
+
+    /// Serialize read/apply/commit for one document without blocking other documents.
+    /// Weak entries do not retain gates after callers finish.
+    pub async fn document_gate(&self, document_id: Uuid) -> Arc<Mutex<()>> {
+        let mut gates = self.gates.lock().await;
+        if let Some(gate) = gates.get(&document_id).and_then(Weak::upgrade) {
+            return gate;
+        }
+        if gates.len() >= 1024 {
+            gates.retain(|_, gate| gate.strong_count() != 0);
+        }
+        let gate = Arc::new(Mutex::new(()));
+        gates.insert(document_id, Arc::downgrade(&gate));
+        gate
+    }
+
     pub async fn get_or_create_session(
         &self,
         document_id: Uuid,
     ) -> broadcast::Receiver<CollabMessage> {
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .entry(document_id)
-            .or_insert_with(|| CollabSession::new(document_id));
-        session.broadcast.subscribe()
+        self.session(document_id)
+            .await
+            .lock()
+            .await
+            .broadcast
+            .subscribe()
     }
-
-    /// Join an existing (or newly created) session for `document_id`.
-    ///
-    /// Returns a broadcast receiver the caller can use to listen for future
-    /// collaboration messages.
     pub async fn join_session(
         &self,
         document_id: Uuid,
         user_id: Uuid,
         username: String,
     ) -> Result<broadcast::Receiver<CollabMessage>, String> {
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .entry(document_id)
-            .or_insert_with(|| CollabSession::new(document_id));
-        Ok(session.join(user_id, username))
+        Ok(self
+            .session(document_id)
+            .await
+            .lock()
+            .await
+            .join(user_id, username))
     }
-
-    /// Remove a user from the session.  If the session becomes empty it is
-    /// **not** automatically removed — call [`cleanup_empty_sessions`] for
-    /// that.
     pub async fn leave_session(&self, document_id: Uuid, user_id: Uuid) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&document_id) {
-            session.leave(user_id);
+        let session = self.sessions.read().await.get(&document_id).cloned();
+        if let Some(session) = session {
+            session.lock().await.leave(user_id);
         }
+        self.cleanup_empty_sessions().await;
     }
-
-    /// Apply an operation to the document's session, returning the new
-    /// version and the transformed operation on success.
     pub async fn apply_operation(
         &self,
         document_id: Uuid,
         op: Operation,
     ) -> Result<(u64, Operation), String> {
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(&document_id)
-            .ok_or_else(|| format!("no active session for document {document_id}"))?;
-        session.apply_operation(op)
-    }
-
-    /// Undo the last operation by the given user in the specified session.
-    pub async fn undo(&self, document_id: Uuid, user_id: Uuid) -> Result<u64, String> {
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(&document_id)
-            .ok_or_else(|| format!("no active session for document {document_id}"))?;
-        session.undo(user_id)
-    }
-
-    /// Redo the last undone operation by the given user in the specified session.
-    pub async fn redo(&self, document_id: Uuid, user_id: Uuid) -> Result<u64, String> {
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(&document_id)
-            .ok_or_else(|| format!("no active session for document {document_id}"))?;
-        session.redo(user_id)
-    }
-
-    /// Broadcast a cursor update for a participant.
-    pub async fn update_cursor(&self, document_id: Uuid, cursor: UserCursor) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&document_id) {
-            session.update_cursor(cursor);
-        }
-    }
-
-    /// Remove all sessions that have no remaining participants.
-    pub async fn cleanup_empty_sessions(&self) {
-        let mut sessions = self.sessions.write().await;
-        sessions.retain(|_id, session| !session.is_empty());
-    }
-
-    /// Return the number of currently active sessions.
-    pub async fn active_session_count(&self) -> usize {
-        self.sessions.read().await.len()
-    }
-
-    /// Return the current version of a session, or `None` if the session
-    /// does not exist.
-    pub async fn session_version(&self, document_id: Uuid) -> Option<u64> {
-        self.sessions
+        let session = self
+            .sessions
             .read()
             .await
             .get(&document_id)
-            .map(|s| s.version)
+            .cloned()
+            .ok_or_else(|| format!("no active session for document {document_id}"))?;
+        session.lock().await.apply_operation(op)
+    }
+    pub async fn undo(&self, document_id: Uuid, user_id: Uuid) -> Result<u64, String> {
+        let session = self
+            .sessions
+            .read()
+            .await
+            .get(&document_id)
+            .cloned()
+            .ok_or_else(|| format!("no active session for document {document_id}"))?;
+        session.lock().await.undo(user_id)
+    }
+    pub async fn redo(&self, document_id: Uuid, user_id: Uuid) -> Result<u64, String> {
+        let session = self
+            .sessions
+            .read()
+            .await
+            .get(&document_id)
+            .cloned()
+            .ok_or_else(|| format!("no active session for document {document_id}"))?;
+        session.lock().await.redo(user_id)
+    }
+    pub async fn update_cursor(&self, document_id: Uuid, cursor: UserCursor) {
+        let session = self.sessions.read().await.get(&document_id).cloned();
+        if let Some(session) = session {
+            session.lock().await.update_cursor(cursor);
+        }
+    }
+    /// Publish only committed content and its database version. An older commit's
+    /// delayed cleanup/publish cannot roll another client's version backwards.
+    pub async fn publish_snapshot(
+        &self,
+        document_id: Uuid,
+        content: serde_json::Value,
+        version: u64,
+    ) {
+        let session = self.sessions.read().await.get(&document_id).cloned();
+        if let Some(session) = session {
+            let mut session = session.lock().await;
+            if version < session.version {
+                return;
+            }
+            session.reset_history(version);
+            let _ = session
+                .broadcast
+                .send(CollabMessage::DocumentState { content, version });
+        }
+    }
+    pub async fn cleanup_empty_sessions(&self) {
+        let candidates: Vec<_> = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .map(|(id, s)| (*id, s.clone()))
+            .collect();
+        for (id, candidate) in candidates {
+            if !candidate.lock().await.is_empty() {
+                continue;
+            }
+            let mut sessions = self.sessions.write().await;
+            // Any concurrent caller holding this session prevents removal.
+            if Arc::strong_count(&candidate) == 2
+                && sessions
+                    .get(&id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &candidate))
+            {
+                sessions.remove(&id);
+            }
+        }
+    }
+    pub async fn active_session_count(&self) -> usize {
+        self.sessions.read().await.len()
+    }
+    pub async fn session_version(&self, document_id: Uuid) -> Option<u64> {
+        let session = self.sessions.read().await.get(&document_id).cloned()?;
+        Some(session.lock().await.version)
     }
 }
 
-impl Default for CollabManager {
-    fn default() -> Self {
-        Self::new()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::OpType;
+    #[tokio::test]
+    async fn one_document_gate_does_not_block_another_and_empty_sessions_retire() {
+        let manager = CollabManager::new();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let gate = manager.document_gate(a).await;
+        let _held = gate.lock().await;
+        let user = Uuid::new_v4();
+        let _rx = manager.join_session(b, user, "B".into()).await.unwrap();
+        let op = Operation::new(
+            user,
+            Uuid::new_v4(),
+            1,
+            OpType::Insert {
+                path: vec!["body".into()],
+                index: 0,
+                content: "x".into(),
+            },
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            manager.apply_operation(b, op),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        manager.leave_session(b, user).await;
+        assert_eq!(manager.active_session_count().await, 0);
+    }
+    #[tokio::test]
+    async fn delayed_old_commit_cannot_publish_over_newer_state() {
+        let manager = CollabManager::new();
+        let doc = Uuid::new_v4();
+        let mut rx = manager.get_or_create_session(doc).await;
+        manager
+            .publish_snapshot(doc, serde_json::json!({"new":true}), 3)
+            .await;
+        manager
+            .publish_snapshot(doc, serde_json::json!({"old":true}), 2)
+            .await;
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            CollabMessage::DocumentState { version: 3, .. }
+        ));
+        assert!(rx.try_recv().is_err());
     }
 }

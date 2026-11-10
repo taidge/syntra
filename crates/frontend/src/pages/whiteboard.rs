@@ -1138,6 +1138,7 @@ pub fn Whiteboard(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widg
                     auth,
                     id.clone(),
                     versions,
+                    session.version,
                 ),
                 crate::components::ai_assist::AiAssist(scope.clone(), auth, id.clone()),
             ))

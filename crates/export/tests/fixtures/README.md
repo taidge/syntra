@@ -1,0 +1,1 @@
+These minimal OOXML fixtures are authored independently of the Contrix exporters and contain no customXml native model. external-formulas.xlsx contains A1=1 and B1=A1+1 with a cached result. external-slide-order.pptx lists slide2 before slide1 and includes an unreferenced slide3, plus an unsupported picture. They exercise the actual compatibility import paths.

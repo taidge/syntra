@@ -81,7 +81,7 @@ test.describe('Documents API @api', () => {
     const newContent = { blocks: [{ type: 'Paragraph', text: 'Hello World' }] };
     const response = await request.put(`/api/v1/documents/${docId}`, {
       headers: authHeaders(token),
-      data: { content: newContent },
+      data: { content: newContent, expected_version: 1 },
     });
     expect(response.status()).toBe(200);
     const body = await response.json();
@@ -102,7 +102,7 @@ test.describe('Documents API @api', () => {
     // Update document to trigger version snapshot
     await request.put(`/api/v1/documents/${docId}`, {
       headers: authHeaders(token),
-      data: { content: { text: 'Version 2' } },
+      data: { content: { text: 'Version 2' }, expected_version: 1 },
     });
 
     // List versions

@@ -1,6 +1,7 @@
 #[cfg(test)]
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use contrix_core::config::StorageConfig;
 use contrix_core::error::AppError;
@@ -8,13 +9,228 @@ use uuid::Uuid;
 
 use crate::services::s3_storage::S3Storage;
 
+/// Scanner state retains at most 64 open directory iterators, never an entire
+/// bucket or directory listing. Each call consumes at most page_size entries.
+pub enum ScanCursor {
+    Local {
+        stack: Vec<(String, tokio::fs::ReadDir)>,
+    },
+    S3 {
+        continuation: Option<String>,
+        finished: bool,
+    },
+}
+impl ScanCursor {
+    pub fn finished(&self) -> bool {
+        match self {
+            Self::Local { stack } => stack.is_empty(),
+            Self::S3 { finished, .. } => *finished,
+        }
+    }
+}
+#[derive(Debug)]
+pub struct ObjectEntry {
+    pub path: String,
+    pub modified_at: i64,
+}
+
+/// Only application-owned namespaces are eligible for automatic discovery.
+/// A shared bucket's unrelated files are never candidates for reconciliation.
+pub fn managed_blob(path: &str) -> bool {
+    if path.contains('\\')
+        || path.contains(':')
+        || path.contains('\0')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || StorageService::checked_relative_path(path).is_err()
+    {
+        return false;
+    }
+    let mut parts = path.split('/');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if Uuid::parse_str(first).is_ok() {
+        return parts.next().is_some();
+    }
+    match first {
+        "uploads" | "chunks" => {
+            parts.next().is_some_and(|id| Uuid::parse_str(id).is_ok()) && parts.next().is_some()
+        }
+        "conversions" | "thumbnails" => parts.next().is_some_and(|name| {
+            if name
+                .rsplit_once('.')
+                .is_some_and(|(stem, _)| Uuid::parse_str(stem).is_ok())
+            {
+                return parts.next().is_none();
+            }
+            Uuid::parse_str(name).is_ok()
+                && parts.next().is_some_and(|file| {
+                    file.rsplit_once('.')
+                        .is_some_and(|(stem, _)| Uuid::parse_str(stem).is_ok())
+                })
+                && parts.next().is_none()
+        }),
+        _ => false,
+    }
+}
+fn symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Configured storage backend for durable file blobs.
+#[derive(Clone)]
 pub enum StorageBackend {
     Local(StorageService),
     S3(S3Storage),
 }
 
 impl StorageBackend {
+    pub async fn begin_scan(&self) -> Result<ScanCursor, AppError> {
+        match self {
+            Self::Local(storage) => {
+                storage.verified_path("").await?;
+                let directory = tokio::fs::read_dir(&storage.base_path)
+                    .await
+                    .map_err(|e| AppError::Storage(e.to_string()))?;
+                Ok(ScanCursor::Local {
+                    stack: vec![(String::new(), directory)],
+                })
+            }
+            Self::S3(_) => Ok(ScanCursor::S3 {
+                continuation: None,
+                finished: false,
+            }),
+        }
+    }
+    pub async fn scan_page(
+        &self,
+        cursor: &mut ScanCursor,
+        limit: usize,
+    ) -> Result<Vec<ObjectEntry>, AppError> {
+        let limit = limit.clamp(1, 1000);
+        match (self, cursor) {
+            (Self::Local(storage), ScanCursor::Local { stack }) => {
+                let mut entries = Vec::new();
+                for _ in 0..limit {
+                    let Some((parent, directory)) = stack.last_mut() else {
+                        break;
+                    };
+                    let Some(entry) = directory
+                        .next_entry()
+                        .await
+                        .map_err(|e| AppError::Storage(e.to_string()))?
+                    else {
+                        stack.pop();
+                        continue;
+                    };
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else {
+                        continue;
+                    };
+                    let path = if parent.is_empty() {
+                        name.to_owned()
+                    } else {
+                        format!("{parent}/{name}")
+                    };
+                    let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+                        Ok(metadata) => metadata,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => return Err(AppError::Storage(e.to_string())),
+                    };
+                    if symlink_or_reparse(&metadata) {
+                        continue;
+                    }
+                    if metadata.is_dir() {
+                        if stack.len() >= 64 {
+                            continue;
+                        }
+                        // Ignore foreign top-level namespaces without traversing.
+                        if !path.contains('/')
+                            && Uuid::parse_str(&path).is_err()
+                            && !matches!(
+                                path.as_str(),
+                                "uploads" | "chunks" | "conversions" | "thumbnails"
+                            )
+                        {
+                            continue;
+                        }
+                        let verified = storage.verified_path(&path).await?;
+                        match tokio::fs::read_dir(verified).await {
+                            Ok(directory) => stack.push((path, directory)),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => return Err(AppError::Storage(e.to_string())),
+                        }
+                    } else if metadata.is_file() && managed_blob(&path) {
+                        let modified = metadata
+                            .modified()
+                            .map_err(|e| AppError::Storage(e.to_string()))?;
+                        entries.push(ObjectEntry {
+                            path,
+                            modified_at: chrono::DateTime::<chrono::Utc>::from(modified)
+                                .timestamp(),
+                        });
+                    }
+                }
+                Ok(entries)
+            }
+            (
+                Self::S3(storage),
+                ScanCursor::S3 {
+                    continuation,
+                    finished,
+                },
+            ) => {
+                if *finished {
+                    return Ok(Vec::new());
+                }
+                let (entries, next) = storage
+                    .list_objects_page(continuation.as_deref(), limit)
+                    .await?;
+                if next.is_some() && next == *continuation {
+                    return Err(AppError::Storage(
+                        "S3 listing repeated its continuation token".into(),
+                    ));
+                }
+                *finished = next.is_none();
+                *continuation = next;
+                Ok(entries)
+            }
+            _ => Err(AppError::Internal(
+                "Storage scan cursor/backend mismatch".into(),
+            )),
+        }
+    }
+
+    /// Attach once before production writes, so every object has a durable lease.
+    pub fn attach_database(&self, db: crate::state::DbPool) -> Result<(), AppError> {
+        let registry = match self {
+            Self::Local(storage) => &storage.registry,
+            Self::S3(storage) => &storage.registry,
+        };
+        if registry.get().is_none() {
+            let _ = registry.set(db);
+        }
+        Ok(())
+    }
+
+    fn registry(&self) -> Option<&crate::state::DbPool> {
+        match self {
+            Self::Local(storage) => storage.registry.get(),
+            Self::S3(storage) => storage.registry.get(),
+        }
+    }
     pub fn from_config(config: &StorageConfig) -> Result<Self, AppError> {
         match config
             .backend
@@ -33,6 +249,30 @@ impl StorageBackend {
         }
     }
 
+    /// Readiness checks perform no writes and preserve backend failures.
+    pub async fn check_ready(&self) -> Result<(), AppError> {
+        match self {
+            Self::Local(storage) => {
+                let metadata = tokio::fs::metadata(&storage.base_path)
+                    .await
+                    .map_err(|error| {
+                        AppError::Storage(format!("Storage directory unavailable: {error}"))
+                    })?;
+                if !metadata.is_dir() {
+                    return Err(AppError::Storage("Storage root is not a directory".into()));
+                }
+                let _directory =
+                    tokio::fs::read_dir(&storage.base_path)
+                        .await
+                        .map_err(|error| {
+                            AppError::Storage(format!("Storage directory inaccessible: {error}"))
+                        })?;
+                Ok(())
+            }
+            Self::S3(storage) => storage.head_bucket().await,
+        }
+    }
+
     pub fn sanitize_file_name(file_name: &str) -> String {
         StorageService::sanitize_file_name(file_name)
     }
@@ -43,25 +283,13 @@ impl StorageBackend {
         file_name: &str,
         data: &[u8],
     ) -> Result<String, AppError> {
-        match self {
-            Self::Local(_) => {
-                let file_name = StorageService::sanitize_file_name(file_name);
-                let rel_path =
-                    unique_relative_path(self, &format!("{owner_id}/{file_name}")).await?;
-                self.write_file(&rel_path, data, "application/octet-stream")
-                    .await?;
-                Ok(rel_path)
-            }
-            Self::S3(storage) => {
-                let file_name = StorageService::sanitize_file_name(file_name);
-                let rel_path =
-                    unique_relative_path(self, &format!("{owner_id}/{file_name}")).await?;
-                storage
-                    .put_object(&rel_path, data, "application/octet-stream")
-                    .await?;
-                Ok(rel_path)
-            }
-        }
+        // Blob keys never depend on an existence check: separate uploads and
+        // document revisions must never share a mutable object.
+        let file_name = StorageService::sanitize_file_name(file_name);
+        let rel_path = format!("{owner_id}/{}/{file_name}", Uuid::new_v4());
+        self.write_file(&rel_path, data, "application/octet-stream")
+            .await?;
+        Ok(rel_path)
     }
 
     pub async fn write_file(
@@ -73,9 +301,13 @@ impl StorageBackend {
         let path = StorageService::checked_relative_path(path)?
             .to_string_lossy()
             .replace('\\', "/");
-        match self {
+        let lease = match self.registry() {
+            Some(db) => Some(super::maintenance::begin_write(db, &path).await?),
+            None => None,
+        };
+        let result = match self {
             Self::Local(storage) => {
-                let full_path = storage.resolve_path(&path)?;
+                let full_path = storage.verified_path(&path).await?;
                 if let Some(parent) = full_path.parent() {
                     tokio::fs::create_dir_all(parent)
                         .await
@@ -86,12 +318,17 @@ impl StorageBackend {
                     .map_err(|error| AppError::Storage(error.to_string()))
             }
             Self::S3(storage) => storage.put_object(&path, data, content_type).await,
+        };
+        result?;
+        if let Some(lease) = lease {
+            lease.finish().await?;
         }
+        Ok(())
     }
 
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>, AppError> {
         match self {
-            Self::Local(storage) => tokio::fs::read(storage.resolve_path(path)?)
+            Self::Local(storage) => tokio::fs::read(storage.verified_path(path).await?)
                 .await
                 .map_err(|error| AppError::Storage(error.to_string())),
             Self::S3(storage) => {
@@ -105,12 +342,13 @@ impl StorageBackend {
 
     pub async fn delete_file(&self, path: &str) -> Result<(), AppError> {
         match self {
-            Self::Local(storage) => match tokio::fs::remove_file(storage.resolve_path(path)?).await
-            {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(AppError::Storage(error.to_string())),
-            },
+            Self::Local(storage) => {
+                match tokio::fs::remove_file(storage.verified_path(path).await?).await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(AppError::Storage(error.to_string())),
+                }
+            }
             Self::S3(storage) => {
                 let path = StorageService::checked_relative_path(path)?
                     .to_string_lossy()
@@ -120,6 +358,7 @@ impl StorageBackend {
         }
     }
 
+    #[cfg(test)]
     async fn exists(&self, path: &str) -> Result<bool, AppError> {
         match self {
             Self::Local(storage) => tokio::fs::try_exists(storage.resolve_path(path)?)
@@ -136,8 +375,10 @@ impl StorageBackend {
 }
 
 /// Service for reading, writing, and deleting files on the local filesystem.
+#[derive(Clone)]
 pub struct StorageService {
     base_path: PathBuf,
+    registry: OnceLock<crate::state::DbPool>,
 }
 
 impl StorageService {
@@ -145,6 +386,7 @@ impl StorageService {
     pub fn new(base_path: &str) -> Self {
         Self {
             base_path: PathBuf::from(base_path),
+            registry: OnceLock::new(),
         }
     }
 
@@ -213,6 +455,34 @@ impl StorageService {
         }
     }
 
+    /// Reject symlinks and Windows junction/reparse components before I/O.
+    /// Upload APIs never create directories as links; reconciliation also never
+    /// descends links encountered in the configured, dedicated storage root.
+    async fn verified_path(&self, path: &str) -> Result<PathBuf, AppError> {
+        let mut current = self.base_path.clone();
+        let mut paths = vec![current.clone()];
+        if !path.is_empty() {
+            for component in Self::checked_relative_path(path)?.components() {
+                current.push(component);
+                paths.push(current.clone());
+            }
+        }
+        for component in paths {
+            match tokio::fs::symlink_metadata(component).await {
+                Ok(metadata) if symlink_or_reparse(&metadata) => {
+                    return Err(AppError::Storage(
+                        "Storage symlinks and reparse points are not permitted".into(),
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(AppError::Storage(e.to_string())),
+            }
+        }
+        Ok(current)
+    }
+
+    #[cfg(test)]
     fn resolve_path(&self, path: &str) -> Result<PathBuf, AppError> {
         Ok(self.base_path.join(Self::checked_relative_path(path)?))
     }
@@ -288,48 +558,6 @@ impl StorageService {
     }
 }
 
-async fn unique_relative_path(
-    storage: &StorageBackend,
-    preferred_path: &str,
-) -> Result<String, AppError> {
-    let preferred_path = StorageService::checked_relative_path(preferred_path)?
-        .to_string_lossy()
-        .replace('\\', "/");
-    if !storage.exists(&preferred_path).await? {
-        return Ok(preferred_path);
-    }
-
-    let path = Path::new(&preferred_path);
-    let parent = path
-        .parent()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    let name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| AppError::Storage("Invalid storage path".into()))?;
-    let stem = Path::new(name)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or(name);
-    let ext = Path::new(name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    let suffix = &Uuid::new_v4().to_string()[..8];
-    let new_name = if ext.is_empty() {
-        format!("{stem}_{suffix}")
-    } else {
-        format!("{stem}_{suffix}.{ext}")
-    };
-
-    if parent.is_empty() {
-        Ok(new_name)
-    } else {
-        Ok(format!("{parent}/{new_name}"))
-    }
-}
-
 fn is_reserved_windows_name(file_name: &str) -> bool {
     let stem = file_name
         .split('.')
@@ -380,7 +608,8 @@ mod tests {
             .save_file(&owner, "../secret\r\n.txt", b"second")
             .await
             .unwrap();
-        assert_eq!(first, format!("{owner}/secret__.txt"));
+        assert!(first.starts_with(&format!("{owner}/")));
+        assert!(first.ends_with("/secret__.txt"));
         assert_ne!(first, second);
         assert_eq!(storage.read_file(&first).await.unwrap(), b"first");
         assert_eq!(storage.read_file(&second).await.unwrap(), b"second");
@@ -442,6 +671,8 @@ mod tests {
     fn backend_from_config_initializes_local_storage() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = StorageConfig {
+            upload_idle_timeout_seconds: 30,
+            upload_total_timeout_seconds: 900,
             base_path: temp_dir.path().to_string_lossy().into_owned(),
             max_upload_size_mb: 100,
             default_quota_mb: 1024,
@@ -462,6 +693,8 @@ mod tests {
     #[test]
     fn backend_from_config_rejects_incomplete_s3_config() {
         let config = StorageConfig {
+            upload_idle_timeout_seconds: 30,
+            upload_total_timeout_seconds: 900,
             base_path: "data/files".to_string(),
             max_upload_size_mb: 100,
             default_quota_mb: 1024,
@@ -474,5 +707,22 @@ mod tests {
         };
 
         assert!(StorageBackend::from_config(&config).is_err());
+    }
+    #[test]
+    fn reconciliation_never_normalizes_a_foreign_key_into_a_managed_object() {
+        let owner = Uuid::new_v4();
+        let object = Uuid::new_v4();
+        assert!(managed_blob(&format!("{owner}/{object}/Hello 世界.txt")));
+        assert!(managed_blob(&format!("conversions/{object}/{owner}.html")));
+        for path in [
+            format!("{owner}/./victim"),
+            format!("{owner}//victim"),
+            format!("{owner}/../victim"),
+            format!("{owner}/victim:stream"),
+            format!("{owner}\\victim"),
+            "foreign/keep".into(),
+        ] {
+            assert!(!managed_blob(&path), "unsafe managed key: {path}");
+        }
     }
 }

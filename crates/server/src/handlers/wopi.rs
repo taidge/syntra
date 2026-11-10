@@ -9,15 +9,15 @@ use salvo::prelude::*;
 use uuid::Uuid;
 
 use contrix_core::error::AppError;
-use contrix_core::models::{File, FileLock, NewFile, NewFileLock, NewVersion};
+use contrix_core::models::{File, FileLock, NewFile, NewFileLock};
 use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::file_locks::dsl as fl;
 use contrix_core::schema::files::dsl as f;
 use contrix_core::schema::users::dsl as u;
-use contrix_core::schema::versions::dsl as v;
 
-use crate::middleware::auth::JwtClaims;
+use crate::handlers::access::{authorize_file_access, load_accessible_file};
 use crate::services::StorageBackend;
+use crate::services::wopi_sessions::{validate_active_jwt_session, validate_session_hash};
 use crate::state::AppState;
 
 const WOPI_LOCK_TTL_MINUTES: i64 = 30;
@@ -39,20 +39,6 @@ async fn extract_wopi_token(req: &mut Request) -> Result<String, AppError> {
     Err(AppError::Auth("Missing access_token parameter".into()))
 }
 
-fn validate_jwt_access_token(token: &str, state: &AppState) -> Result<String, AppError> {
-    let secret = &state.config.auth.jwt_secret;
-    let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
-
-    let data = jsonwebtoken::decode::<JwtClaims>(
-        token,
-        &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|_| AppError::Auth("Invalid or expired access token".into()))?;
-
-    Ok(data.claims.sub)
-}
-
 /// Validate a short-lived WOPI session token bound to the requested file.
 async fn validate_wopi_token(
     req: &mut Request,
@@ -60,10 +46,12 @@ async fn validate_wopi_token(
     file_id: &str,
 ) -> Result<String, AppError> {
     let token = extract_wopi_token(req).await?;
-    state
+    let session = state
         .wopi_sessions
         .validate(&token, file_id)
-        .ok_or_else(|| AppError::Auth("Invalid or expired WOPI session token".into()))
+        .ok_or_else(|| AppError::Auth("Invalid or expired WOPI session token".into()))?;
+    let active = validate_session_hash(state, &session.user_id, &session.source_token_hash).await?;
+    Ok(active.user_id)
 }
 
 fn file_id_from_wopi_src(wopi_src: &str) -> Option<String> {
@@ -88,11 +76,15 @@ async fn exchange_wopi_session_token(
     access_token: &str,
     wopi_src: &str,
 ) -> Result<String, AppError> {
-    let user_id = validate_jwt_access_token(access_token, state)?;
+    let source = validate_active_jwt_session(state, access_token).await?;
     let file_id = file_id_from_wopi_src(wopi_src)
         .ok_or_else(|| AppError::Validation("Unable to resolve file id from WOPISrc".into()))?;
+    let mut conn = state.db.clone();
+    load_authorized_file(&mut conn, &file_id, &source.user_id, "viewer")
+        .await?
+        .ok_or_else(|| AppError::NotFound("File not found".into()))?;
     Ok(state.wopi_sessions.create(
-        &user_id,
+        &source,
         &file_id,
         Duration::minutes(WOPI_SESSION_TTL_MINUTES),
     ))
@@ -183,28 +175,36 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
-async fn delete_previous_blob_if_safe(storage: &StorageBackend, old_path: &str) {
-    if old_path.is_empty() || Path::new(old_path).is_absolute() {
-        return;
-    }
-
-    let _ = storage.delete_file(old_path).await;
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
-async fn load_owned_file(
+fn script_json_string(value: &str) -> String {
+    // JSON quoting alone does not protect an HTML script element: the HTML
+    // parser recognizes </script> even inside a JavaScript string literal.
+    serde_json::to_string(value)
+        .expect("serializing a string cannot fail")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+async fn load_authorized_file(
     conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     file_id: &str,
-    owner_id: &str,
+    user_id: &str,
+    required_role: &str,
 ) -> Result<Option<File>, AppError> {
-    f::files
-        .filter(f::id.eq(file_id))
-        .filter(f::owner_id.eq(owner_id))
-        .filter(f::is_folder.eq(false))
-        .filter(f::is_trashed.eq(false))
-        .first::<File>(conn)
-        .await
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))
+    Ok(load_accessible_file(conn, file_id, user_id, required_role)
+        .await?
+        .filter(|file| !file.is_folder && !file.is_trashed))
 }
 
 async fn load_active_lock(
@@ -223,9 +223,8 @@ async fn load_active_lock(
             .map(|dt| dt.with_timezone(&Utc) <= Utc::now())
             .unwrap_or(false);
         if is_expired {
-            let _ = diesel::delete(fl::file_locks.filter(fl::id.eq(&lock.id)))
-                .execute(conn)
-                .await;
+            // Readers must not delete a lock another request just refreshed.
+            // Expired rows are replaced under the write transaction below.
             Ok(None)
         } else {
             Ok(Some(lock))
@@ -233,6 +232,105 @@ async fn load_active_lock(
     } else {
         Ok(None)
     }
+}
+
+enum LockChange {
+    Applied,
+    Conflict(String),
+}
+
+async fn change_wopi_lock(
+    state: &AppState,
+    file_id: &str,
+    user_id: &str,
+    operation: &str,
+    requested: &str,
+    old: &str,
+) -> Result<LockChange, AppError> {
+    if requested.is_empty() || requested.len() > 1024 || old.len() > 1024 {
+        return Err(AppError::Validation(
+            "A WOPI lock token of 1–1024 bytes is required".into(),
+        ));
+    }
+    let (file_id, user_id, operation, requested, old) = (
+        file_id.to_owned(),
+        user_id.to_owned(),
+        operation.to_owned(),
+        requested.to_owned(),
+        old.to_owned(),
+    );
+    state
+        .db
+        .run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                let file = diesel::RunQueryDsl::first::<File>(f::files.find(&file_id), conn)?;
+                crate::services::persistence::authorize(conn, &file, &user_id, "editor")?;
+                let mut existing =
+                    diesel::OptionalExtension::optional(diesel::RunQueryDsl::first::<FileLock>(
+                        fl::file_locks.filter(fl::file_id.eq(&file_id)),
+                        conn,
+                    ))?;
+                if existing.as_ref().is_some_and(|lock| {
+                    DateTime::parse_from_rfc3339(&lock.expires_at)
+                        .is_ok_and(|expires| expires.with_timezone(&Utc) <= Utc::now())
+                }) {
+                    diesel::RunQueryDsl::execute(
+                        diesel::delete(fl::file_locks.filter(fl::file_id.eq(&file_id))),
+                        conn,
+                    )?;
+                    existing = None;
+                }
+                match (operation.as_str(), existing) {
+                    ("LOCK", Some(lock)) => {
+                        let expected = if old.is_empty() { &requested } else { &old };
+                        if lock.locked_by != user_id || lock.lock_token != *expected {
+                            return Ok(LockChange::Conflict(lock.lock_token));
+                        }
+                        diesel::RunQueryDsl::execute(
+                            diesel::update(fl::file_locks.find(lock.id)).set((
+                                fl::lock_token.eq(&requested),
+                                fl::expires_at.eq(wopi_lock_expiry()),
+                            )),
+                            conn,
+                        )?;
+                    }
+                    ("LOCK", None) if old.is_empty() => {
+                        diesel::RunQueryDsl::execute(
+                            diesel::insert_into(fl::file_locks).values(NewFileLock {
+                                id: Uuid::new_v4().to_string(),
+                                file_id,
+                                locked_by: user_id,
+                                lock_token: requested,
+                                lock_type: "wopi".into(),
+                                expires_at: wopi_lock_expiry(),
+                                created_at: Utc::now().to_rfc3339(),
+                            }),
+                            conn,
+                        )?;
+                    }
+                    ("UNLOCK" | "REFRESH_LOCK", Some(lock)) => {
+                        if lock.locked_by != user_id || lock.lock_token != requested {
+                            return Ok(LockChange::Conflict(lock.lock_token));
+                        }
+                        if operation == "UNLOCK" {
+                            diesel::RunQueryDsl::execute(
+                                diesel::delete(fl::file_locks.find(lock.id)),
+                                conn,
+                            )?;
+                        } else {
+                            diesel::RunQueryDsl::execute(
+                                diesel::update(fl::file_locks.find(lock.id))
+                                    .set(fl::expires_at.eq(wopi_lock_expiry())),
+                                conn,
+                            )?;
+                        }
+                    }
+                    _ => return Ok(LockChange::Conflict(String::new())),
+                }
+                Ok(LockChange::Applied)
+            })
+        })
+        .await
 }
 
 async fn read_file_bytes(
@@ -267,28 +365,36 @@ async fn save_file_bytes(
     file_row: &File,
     data: &[u8],
     actor_id: &str,
+    lock_token: &str,
 ) -> Result<String, AppError> {
     let linked_document = d::documents
         .filter(d::file_id.eq(&file_row.id))
-        .select((d::id, d::version, d::content))
-        .first::<(String, i32, Option<String>)>(conn)
+        .select((d::id, d::version))
+        .first::<(String, i32)>(conn)
         .await
-        .optional()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-    let document_content = if linked_document.is_some() {
+        .optional()?;
+    if let Some((document_id, current_version)) = linked_document {
         let content = std::str::from_utf8(data)
             .map_err(|_| AppError::Validation("Linked document content must be UTF-8".into()))?
-            .to_string();
+            .to_owned();
         let _: serde_json::Value = serde_json::from_str(&content).map_err(|_| {
             AppError::Validation("Linked document content must be valid JSON".into())
         })?;
-        Some(content)
-    } else {
-        None
-    };
+        return crate::services::persistence::commit_document_with_lock(
+            &state.db,
+            &state.storage,
+            &document_id,
+            actor_id,
+            current_version,
+            content,
+            Some("WOPI save".into()),
+            Some(lock_token.to_owned()),
+        )
+        .await
+        .map(|version| version.to_string());
+    }
 
-    let owner_uuid: Uuid = file_row
+    let owner_uuid = file_row
         .owner_id
         .parse()
         .map_err(|_| AppError::Validation("Invalid owner id".into()))?;
@@ -296,58 +402,45 @@ async fn save_file_bytes(
         .storage
         .save_file(&owner_uuid, &file_row.name, data)
         .await?;
-
-    let now = Utc::now();
-    let now_string = now.to_rfc3339();
-    let new_size = data.len() as i64;
-    let size_diff = new_size - file_row.size;
-
-    diesel::update(f::files.filter(f::id.eq(&file_row.id)))
-        .set((
-            f::path.eq(&new_path),
-            f::size.eq(new_size),
-            f::updated_at.eq(&now_string),
-        ))
-        .execute(conn)
-        .await
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-    let _ = diesel::update(u::users.filter(u::id.eq(&file_row.owner_id)))
-        .set(u::storage_used.eq(u::storage_used + size_diff))
-        .execute(conn)
-        .await;
-
-    delete_previous_blob_if_safe(&state.storage, &file_row.path).await;
-
-    if let Some((document_id, current_version, old_content)) = linked_document {
-        let snapshot = NewVersion {
-            id: Uuid::new_v4().to_string(),
-            document_id,
-            version_number: current_version,
-            content: old_content,
-            created_by: actor_id.to_string(),
-            label: Some("WOPI save".to_string()),
-            created_at: now_string.clone(),
-        };
-        let _ = diesel::insert_into(v::versions)
-            .values(&snapshot)
-            .execute(conn)
-            .await;
-
-        diesel::update(d::documents.filter(d::file_id.eq(&file_row.id)))
-            .set((
-                d::content.eq(document_content),
-                d::version.eq(current_version + 1),
-                d::updated_at.eq(&now_string),
-            ))
-            .execute(conn)
-            .await
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        Ok((current_version + 1).to_string())
-    } else {
-        Ok(now.timestamp_millis().to_string())
-    }
+    let committed_path = new_path.clone();
+    let original = file_row.clone();
+    let actor = actor_id.to_owned();
+    let token = lock_token.to_owned();
+    let new_size =
+        i64::try_from(data.len()).map_err(|_| AppError::Validation("File too large".into()))?;
+    let result = crate::services::persistence::commit_blob(&state.db, new_path, move |conn| {
+        conn.immediate_transaction::<_, AppError, _>(|conn| {
+            let current = diesel::RunQueryDsl::first::<File>(f::files.find(&original.id), conn)?;
+            crate::services::persistence::authorize(conn, &current, &actor, "editor")?;
+            crate::services::persistence::check_file_lock(conn, &current.id, &actor, Some(&token))?;
+            if current.path != original.path || current.updated_at != original.updated_at {
+                return Err(AppError::Conflict(
+                    "File changed; reload before saving".into(),
+                ));
+            }
+            let now = Utc::now().to_rfc3339();
+            diesel::RunQueryDsl::execute(
+                diesel::update(f::files.find(&current.id)).set((
+                    f::path.eq(&committed_path),
+                    f::size.eq(new_size),
+                    f::updated_at.eq(&now),
+                )),
+                conn,
+            )?;
+            crate::services::persistence::replace_file_quota(
+                conn,
+                &current.owner_id,
+                &current.path,
+                current.size,
+                new_size,
+            )?;
+            crate::services::persistence::enqueue_gc(conn, &current.path)?;
+            Ok(now)
+        })
+    })
+    .await;
+    crate::services::persistence::request_gc(&state.db, &state.storage);
+    result
 }
 
 async fn sibling_exists(
@@ -360,9 +453,13 @@ async fn sibling_exists(
     let mut query = f::files
         .into_boxed()
         .filter(f::owner_id.eq(owner_id))
-        .filter(f::parent_id.eq(parent_id.clone()))
         .filter(f::name.eq(name))
         .filter(f::is_trashed.eq(false));
+    query = if let Some(parent_id) = parent_id {
+        query.filter(f::parent_id.eq(parent_id))
+    } else {
+        query.filter(f::parent_id.is_null())
+    };
 
     if let Some(file_id) = exclude_id {
         query = query.filter(f::id.ne(file_id));
@@ -374,6 +471,33 @@ async fn sibling_exists(
         .await
         .map(|count| count > 0)
         .map_err(|e| AppError::Database(e.to_string()))
+}
+
+fn sibling_exists_sync(
+    conn: &mut SqliteConnection,
+    scope: &File,
+    name: &str,
+    exclude: Option<&str>,
+) -> Result<bool, AppError> {
+    let mut query = f::files
+        .into_boxed()
+        .filter(f::owner_id.eq(&scope.owner_id))
+        .filter(f::name.eq(name))
+        .filter(f::is_trashed.eq(false));
+    query = if let Some(parent) = &scope.parent_id {
+        query.filter(f::parent_id.eq(parent))
+    } else {
+        query.filter(f::parent_id.is_null())
+    };
+    query = if let Some(room) = &scope.room_id {
+        query.filter(f::room_id.eq(room))
+    } else {
+        query.filter(f::room_id.is_null())
+    };
+    if let Some(exclude) = exclude {
+        query = query.filter(f::id.ne(exclude));
+    }
+    Ok(diesel::RunQueryDsl::get_result::<i64>(query.count(), conn)? != 0)
 }
 
 async fn next_available_name(
@@ -589,8 +713,8 @@ pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Resp
         match exchange_wopi_session_token(&state, &incoming_access_token, &wopi_src).await {
             Ok(token) => token,
             Err(e) => {
-                tracing::warn!("Failed to exchange WOPI session token: {e}");
-                String::new()
+                render_wopi_error(res, e);
+                return;
             }
         };
     let status_message = if mode == "edit" {
@@ -598,6 +722,9 @@ pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Resp
     } else {
         "Opening document"
     };
+    let display_wopi_src = escape_html(&wopi_src);
+    let script_wopi_src = script_json_string(&wopi_src);
+    let script_nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
 
     let html = format!(
         r#"<!doctype html>
@@ -678,12 +805,12 @@ pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Resp
       <h1>{title}</h1>
       <p>{status_message}...</p>
       <a id="fallback" class="fallback" href="/files">Open Contrix</a>
-      <div class="meta" id="meta">WOPISrc: {wopi_src}</div>
+      <div class="meta" id="meta">WOPISrc: {display_wopi_src}</div>
     </main>
-    <script>
+    <script nonce="{script_nonce}">
       const routePrefix = "{route_prefix}";
       const wopiSessionToken = {wopi_session_token:?};
-      const initialWopiSrc = {wopi_src:?};
+      const initialWopiSrc = {script_wopi_src};
 
       function scrubSensitiveQuery() {{
         try {{
@@ -739,6 +866,12 @@ pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Resp
     );
 
     res.status_code(StatusCode::OK);
+    res.headers_mut().insert(
+        "content-security-policy",
+        crate::middleware::security_headers::content_security_policy(Some(&script_nonce))
+            .parse()
+            .unwrap(),
+    );
     res.headers_mut()
         .insert("content-type", "text/html; charset=utf-8".parse().unwrap());
     res.headers_mut()
@@ -773,7 +906,7 @@ pub async fn check_file_info(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let file_row = match load_owned_file(&mut conn, &file_id_param, &uid).await {
+    let file_row = match load_authorized_file(&mut conn, &file_id_param, &uid, "viewer").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             render_wopi_error(res, AppError::NotFound("File not found".into()));
@@ -808,6 +941,9 @@ pub async fn check_file_info(req: &mut Request, depot: &mut Depot, res: &mut Res
     let base_file_name = file_row.name.clone();
     let owner_id = file_row.owner_id.clone();
     let version = file_row.updated_at.clone();
+    let can_write = authorize_file_access(&mut conn, &file_row, &uid, "editor")
+        .await
+        .is_ok();
 
     let info = serde_json::json!({
         "BaseFileName": base_file_name.clone(),
@@ -818,10 +954,10 @@ pub async fn check_file_info(req: &mut Request, depot: &mut Depot, res: &mut Res
         "UserFriendlyName": display_name.unwrap_or(username),
         "Version": version.clone(),
         "LastModifiedTime": version,
-        "ReadOnly": false,
-        "UserCanWrite": true,
-        "UserCanRename": true,
-        "UserCanNotWriteRelative": false,
+        "ReadOnly": !can_write,
+        "UserCanWrite": can_write,
+        "UserCanRename": can_write,
+        "UserCanNotWriteRelative": !can_write,
         "SupportsLocks": true,
         "SupportsGetLock": true,
         "SupportsUpdate": true,
@@ -865,7 +1001,7 @@ pub async fn get_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    let file_row = match load_owned_file(&mut conn, &file_id_param, &uid).await {
+    let file_row = match load_authorized_file(&mut conn, &file_id_param, &uid, "viewer").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             render_wopi_error(res, AppError::NotFound("File not found".into()));
@@ -930,7 +1066,7 @@ pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    let file_row = match load_owned_file(&mut conn, &file_id_param, &uid).await {
+    let file_row = match load_authorized_file(&mut conn, &file_id_param, &uid, "editor").await {
         Ok(Some(row)) => row,
         Ok(None) => {
             render_wopi_error(res, AppError::NotFound("File not found".into()));
@@ -962,13 +1098,14 @@ pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    let item_version = match save_file_bytes(&mut conn, &state, &file_row, &data, &uid).await {
-        Ok(version) => version,
-        Err(e) => {
-            render_wopi_error(res, e);
-            return;
-        }
-    };
+    let item_version =
+        match save_file_bytes(&mut conn, &state, &file_row, &data, &uid, &request_lock).await {
+            Ok(version) => version,
+            Err(e) => {
+                render_wopi_error(res, e);
+                return;
+            }
+        };
 
     res.status_code(StatusCode::OK);
     res.headers_mut().insert(
@@ -1019,7 +1156,13 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
         }
     };
 
-    let file_row = match load_owned_file(&mut conn, &file_id_param, &uid).await {
+    let required_role = if override_header == "GET_LOCK" {
+        "viewer"
+    } else {
+        "editor"
+    };
+    let file_row = match load_authorized_file(&mut conn, &file_id_param, &uid, required_role).await
+    {
         Ok(Some(row)) => row,
         Ok(None) => {
             render_wopi_error(res, AppError::NotFound("File not found".into()));
@@ -1032,132 +1175,26 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
     };
 
     match override_header.as_str() {
-        "LOCK" => {
-            let existing = match load_active_lock(&mut conn, &file_id_param).await {
-                Ok(lock) => lock,
-                Err(e) => {
-                    render_wopi_error(res, e);
-                    return;
-                }
-            };
-
-            match existing {
-                Some(existing_lock) if !old_lock.is_empty() => {
-                    if existing_lock.lock_token != old_lock {
-                        render_lock_conflict(res, &existing_lock.lock_token, "Lock mismatch");
-                        return;
-                    }
-
-                    if let Err(e) =
-                        diesel::update(fl::file_locks.filter(fl::id.eq(&existing_lock.id)))
-                            .set((
-                                fl::lock_token.eq(&request_lock),
-                                fl::locked_by.eq(&uid),
-                                fl::expires_at.eq(wopi_lock_expiry()),
-                            ))
-                            .execute(&mut conn)
-                            .await
-                    {
-                        render_wopi_error(res, AppError::Database(e.to_string()));
-                        return;
-                    }
-
+        "LOCK" | "UNLOCK" | "REFRESH_LOCK" => {
+            match change_wopi_lock(
+                &state,
+                &file_id_param,
+                &uid,
+                &override_header,
+                &request_lock,
+                &old_lock,
+            )
+            .await
+            {
+                Ok(LockChange::Applied) => {
                     res.status_code(StatusCode::OK);
                 }
-                Some(existing_lock) if existing_lock.lock_token == request_lock => {
-                    if let Err(e) =
-                        diesel::update(fl::file_locks.filter(fl::id.eq(&existing_lock.id)))
-                            .set((
-                                fl::locked_by.eq(&uid),
-                                fl::expires_at.eq(wopi_lock_expiry()),
-                            ))
-                            .execute(&mut conn)
-                            .await
-                    {
-                        render_wopi_error(res, AppError::Database(e.to_string()));
-                        return;
-                    }
-
-                    res.status_code(StatusCode::OK);
+                Ok(LockChange::Conflict(current)) => {
+                    render_lock_conflict(res, &current, "Lock mismatch");
                 }
-                Some(existing_lock) => {
-                    render_lock_conflict(
-                        res,
-                        &existing_lock.lock_token,
-                        "File is locked with a different token",
-                    );
-                }
-                None => {
-                    let now = Utc::now().to_rfc3339();
-                    let new_lock = NewFileLock {
-                        id: Uuid::new_v4().to_string(),
-                        file_id: file_id_param.clone(),
-                        locked_by: uid.clone(),
-                        lock_token: request_lock.clone(),
-                        lock_type: "wopi".to_string(),
-                        expires_at: wopi_lock_expiry(),
-                        created_at: now,
-                    };
-
-                    if let Err(e) = diesel::insert_into(fl::file_locks)
-                        .values(&new_lock)
-                        .execute(&mut conn)
-                        .await
-                    {
-                        render_wopi_error(res, AppError::Database(e.to_string()));
-                        return;
-                    }
-
-                    res.status_code(StatusCode::OK);
-                }
+                Err(error) => render_wopi_error(res, error),
             }
         }
-        "UNLOCK" => match load_active_lock(&mut conn, &file_row.id).await {
-            Ok(Some(existing_lock)) if existing_lock.lock_token == request_lock => {
-                if let Err(e) = diesel::delete(fl::file_locks.filter(fl::id.eq(&existing_lock.id)))
-                    .execute(&mut conn)
-                    .await
-                {
-                    render_wopi_error(res, AppError::Database(e.to_string()));
-                    return;
-                }
-                res.status_code(StatusCode::OK);
-            }
-            Ok(Some(existing_lock)) => {
-                render_lock_conflict(res, &existing_lock.lock_token, "Lock mismatch");
-            }
-            Ok(None) => {
-                render_lock_conflict(res, "", "File is not locked");
-            }
-            Err(e) => {
-                render_wopi_error(res, e);
-            }
-        },
-        "REFRESH_LOCK" => match load_active_lock(&mut conn, &file_row.id).await {
-            Ok(Some(existing_lock)) if existing_lock.lock_token == request_lock => {
-                if let Err(e) = diesel::update(fl::file_locks.filter(fl::id.eq(&existing_lock.id)))
-                    .set((
-                        fl::locked_by.eq(&uid),
-                        fl::expires_at.eq(wopi_lock_expiry()),
-                    ))
-                    .execute(&mut conn)
-                    .await
-                {
-                    render_wopi_error(res, AppError::Database(e.to_string()));
-                    return;
-                }
-                res.status_code(StatusCode::OK);
-            }
-            Ok(Some(existing_lock)) => {
-                render_lock_conflict(res, &existing_lock.lock_token, "Lock mismatch");
-            }
-            Ok(None) => {
-                render_lock_conflict(res, "", "File is not locked");
-            }
-            Err(e) => {
-                render_wopi_error(res, e);
-            }
-        },
         "GET_LOCK" => match load_active_lock(&mut conn, &file_row.id).await {
             Ok(Some(existing_lock)) => {
                 res.status_code(StatusCode::OK);
@@ -1208,15 +1245,22 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            let existing_target = match f::files
+            let mut target_query = f::files
+                .into_boxed()
                 .filter(f::owner_id.eq(&file_row.owner_id))
-                .filter(f::parent_id.eq(file_row.parent_id.clone()))
                 .filter(f::name.eq(&desired_name))
-                .filter(f::is_trashed.eq(false))
-                .first::<File>(&mut conn)
-                .await
-                .optional()
-            {
+                .filter(f::is_trashed.eq(false));
+            target_query = if let Some(parent) = &file_row.parent_id {
+                target_query.filter(f::parent_id.eq(parent))
+            } else {
+                target_query.filter(f::parent_id.is_null())
+            };
+            target_query = if let Some(room) = &file_row.room_id {
+                target_query.filter(f::room_id.eq(room))
+            } else {
+                target_query.filter(f::room_id.is_null())
+            };
+            let existing_target = match target_query.first::<File>(&mut conn).await.optional() {
                 Ok(target) => target,
                 Err(e) => {
                     render_wopi_error(res, AppError::Database(e.to_string()));
@@ -1289,14 +1333,22 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                     }
                 }
 
-                let item_version =
-                    match save_file_bytes(&mut conn, &state, &existing_target, &data, &uid).await {
-                        Ok(version) => version,
-                        Err(e) => {
-                            render_wopi_error(res, e);
-                            return;
-                        }
-                    };
+                let item_version = match save_file_bytes(
+                    &mut conn,
+                    &state,
+                    &existing_target,
+                    &data,
+                    &uid,
+                    &request_lock,
+                )
+                .await
+                {
+                    Ok(version) => version,
+                    Err(e) => {
+                        render_wopi_error(res, e);
+                        return;
+                    }
+                };
                 res.status_code(StatusCode::OK);
                 res.headers_mut().insert(
                     "X-WOPI-ItemVersion",
@@ -1348,25 +1400,59 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 sort_order: 0,
             };
 
-            if let Err(e) = diesel::insert_into(f::files)
-                .values(&new_file)
-                .execute(&mut conn)
-                .await
-            {
-                render_wopi_error(res, AppError::Database(e.to_string()));
+            let result_id = new_file.id.clone();
+            let result_name = new_file.name.clone();
+            let orphan_path = new_file.path.clone();
+            let actor = uid.clone();
+            let token = request_lock.clone();
+            let original = file_row.clone();
+            let insertion =
+                crate::services::persistence::commit_blob(&state.db, orphan_path, move |conn| {
+                    conn.immediate_transaction::<_, AppError, _>(|conn| {
+                        let current =
+                            diesel::RunQueryDsl::first::<File>(f::files.find(&original.id), conn)?;
+                        crate::services::persistence::authorize(conn, &current, &actor, "editor")?;
+                        crate::services::persistence::check_file_lock(
+                            conn,
+                            &current.id,
+                            &actor,
+                            Some(&token),
+                        )?;
+                        if current.parent_id != original.parent_id
+                            || current.room_id != original.room_id
+                        {
+                            return Err(AppError::Conflict(
+                                "File moved; reload before saving".into(),
+                            ));
+                        }
+                        if sibling_exists_sync(conn, &current, &new_file.name, None)? {
+                            return Err(AppError::Conflict(
+                                "A sibling item with that name already exists".into(),
+                            ));
+                        }
+                        crate::services::persistence::adjust_quota(
+                            conn,
+                            &new_file.owner_id,
+                            new_file.size,
+                        )?;
+                        diesel::RunQueryDsl::execute(
+                            diesel::insert_into(f::files).values(&new_file),
+                            conn,
+                        )?;
+                        Ok(())
+                    })
+                })
+                .await;
+            if let Err(error) = insertion {
+                render_wopi_error(res, error);
                 return;
             }
-
-            let _ = diesel::update(u::users.filter(u::id.eq(&file_row.owner_id)))
-                .set(u::storage_used.eq(u::storage_used + data.len() as i64))
-                .execute(&mut conn)
-                .await;
 
             res.status_code(StatusCode::OK);
             res.render(Json(put_relative_response(
                 &base_url,
-                &new_file.id,
-                &new_file.name,
+                &result_id,
+                &result_name,
                 doc_kind,
             )));
         }
@@ -1429,15 +1515,44 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 }
             }
 
-            let now = Utc::now().to_rfc3339();
-            if let Err(e) = diesel::update(f::files.filter(f::id.eq(&file_row.id)))
-                .set((f::name.eq(&requested_name), f::updated_at.eq(&now)))
-                .execute(&mut conn)
-                .await
-            {
-                render_wopi_error(res, AppError::Database(e.to_string()));
-                return;
-            }
+            let actor = uid.clone();
+            let token = request_lock.clone();
+            let target_name = requested_name.clone();
+            let renaming = state
+                .db
+                .run(move |conn| {
+                    conn.immediate_transaction::<_, AppError, _>(|conn| {
+                        let current =
+                            diesel::RunQueryDsl::first::<File>(f::files.find(&file_row.id), conn)?;
+                        crate::services::persistence::authorize(conn, &current, &actor, "editor")?;
+                        crate::services::persistence::check_file_lock(
+                            conn,
+                            &current.id,
+                            &actor,
+                            Some(&token),
+                        )?;
+                        if sibling_exists_sync(conn, &current, &target_name, Some(&current.id))? {
+                            return Err(AppError::Conflict(
+                                "A sibling item with that name already exists".into(),
+                            ));
+                        }
+                        let now = Utc::now().to_rfc3339();
+                        diesel::RunQueryDsl::execute(
+                            diesel::update(f::files.find(&current.id))
+                                .set((f::name.eq(target_name), f::updated_at.eq(&now))),
+                            conn,
+                        )?;
+                        Ok(now)
+                    })
+                })
+                .await;
+            let now = match renaming {
+                Ok(now) => now,
+                Err(error) => {
+                    render_wopi_error(res, error);
+                    return;
+                }
+            };
 
             res.status_code(StatusCode::OK);
             res.headers_mut().insert(

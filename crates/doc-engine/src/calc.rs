@@ -24,6 +24,8 @@ pub struct Workbook {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkbookMetadata {
     pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub import_warnings: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub modified_at: chrono::DateTime<chrono::Utc>,
 }
@@ -33,6 +35,7 @@ impl Default for WorkbookMetadata {
         let now = chrono::Utc::now();
         Self {
             author: None,
+            import_warnings: Vec::new(),
             created_at: now,
             modified_at: now,
         }
@@ -72,7 +75,18 @@ impl Workbook {
             .iter()
             .find(|sheet| sheet.id == pivot.source_sheet_id)
             .ok_or_else(|| "Pivot source sheet not found".to_string())?;
-        let mut groups: std::collections::BTreeMap<String, (f64, u64)> =
+        if pivot.source_start.row > pivot.source_end.row
+            || pivot.source_end.row >= 1_048_576
+            || pivot.source_start.col > pivot.source_end.col
+            || pivot.source_end.col >= 16_384
+            || pivot.row_field_col < pivot.source_start.col
+            || pivot.row_field_col > pivot.source_end.col
+            || pivot.value_field_col < pivot.source_start.col
+            || pivot.value_field_col > pivot.source_end.col
+        {
+            return Err("Invalid pivot source bounds or fields".into());
+        }
+        let mut groups: std::collections::BTreeMap<String, (f64, u64, u64)> =
             std::collections::BTreeMap::new();
         for row in pivot.source_start.row..=pivot.source_end.row {
             let key = source
@@ -82,33 +96,51 @@ impl Workbook {
             if key.is_empty() {
                 continue;
             }
-            let value = source
+            let cell = source
                 .get_cell(row, pivot.value_field_col)
-                .and_then(|cell| match cell.value {
-                    CellValue::Number(value) => Some(value),
-                    _ => None,
-                })
-                .unwrap_or(0.0);
+                .map(|c| &c.value);
             let entry = groups.entry(key).or_default();
-            entry.0 += value;
-            entry.1 += 1;
+            if let Some(CellValue::Number(value)) = cell
+                && value.is_finite()
+            {
+                entry.0 += value;
+                entry.1 += 1;
+            }
+            if cell.is_some_and(|v| !matches!(v, CellValue::Empty)) {
+                entry.2 += 1;
+            }
+        }
+        let rows = groups.len() as u32;
+        if pivot
+            .target
+            .row
+            .checked_add(rows)
+            .is_none_or(|row| row > 1_048_576)
+            || pivot
+                .target
+                .col
+                .checked_add(1)
+                .is_none_or(|col| col >= 16_384)
+        {
+            return Err("Pivot output exceeds worksheet bounds".into());
         }
         let target = self
             .sheets
             .iter_mut()
             .find(|sheet| sheet.id == pivot.target_sheet_id)
             .ok_or_else(|| "Pivot target sheet not found".to_string())?;
-        for (offset, (key, (sum, count))) in groups.into_iter().enumerate() {
+        for (offset, (key, (sum, numeric_count, nonempty_count))) in groups.into_iter().enumerate()
+        {
             let row = pivot.target.row + offset as u32;
             target.set_cell(row, pivot.target.col, CellValue::Text(key));
             let value = match pivot.aggregation {
                 PivotAggregation::Sum => sum,
-                PivotAggregation::Count => count as f64,
+                PivotAggregation::Count => nonempty_count as f64,
                 PivotAggregation::Average => {
-                    if count == 0 {
+                    if numeric_count == 0 {
                         0.0
                     } else {
-                        sum / count as f64
+                        sum / numeric_count as f64
                     }
                 }
             };
@@ -388,6 +420,7 @@ pub struct CellFormat {
     pub font_size: Option<f32>,
     pub bold: bool,
     pub italic: bool,
+    pub underline: bool,
     pub text_color: Option<String>,
     pub bg_color: Option<String>,
     pub horizontal_align: HAlign,
@@ -404,6 +437,7 @@ impl Default for CellFormat {
             font_size: None,
             bold: false,
             italic: false,
+            underline: false,
             text_color: None,
             bg_color: None,
             horizontal_align: HAlign::Left,
@@ -516,7 +550,13 @@ impl ConditionalRule {
             Self::GreaterThan(limit) => number.is_some_and(|value| value > *limit),
             Self::LessThan(limit) => number.is_some_and(|value| value < *limit),
             Self::Between(low, high) => number.is_some_and(|value| value >= *low && value <= *high),
-            Self::EqualTo(expected) => text == expected,
+            Self::EqualTo(expected) => {
+                text == expected
+                    || expected
+                        .parse::<f64>()
+                        .ok()
+                        .is_some_and(|expected| number == Some(expected))
+            }
             Self::ContainsText(fragment) => text.contains(fragment),
             Self::IsEmpty => matches!(value, CellValue::Empty) || text.is_empty(),
             Self::IsNotEmpty => !matches!(value, CellValue::Empty) && !text.is_empty(),
@@ -595,6 +635,20 @@ pub struct SheetChart {
     pub data_end: CellRef,
     pub anchor_start: CellRef,
     pub anchor_end: CellRef,
+    /// Cached categories and series preserve imported literal/external chart data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_data: Option<crate::slides::ChartData>,
+    /// Same-sheet bindings refresh cached chart data when the source cells change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series_sources: Vec<SheetChartSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SheetChartSource {
+    pub value_start: CellRef,
+    pub value_end: CellRef,
+    pub label_start: Option<CellRef>,
+    pub label_end: Option<CellRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,6 +657,8 @@ pub enum SheetChartType {
     Line,
     Pie,
     Area,
+    Doughnut,
+    Scatter,
 }
 
 /// A compact pivot-table specification. `refresh_pivot` materialises its
@@ -1119,7 +1175,22 @@ impl Parser {
 
 /// Parse a formula string into an AST.
 fn parse_formula(input: &str) -> Result<Expr, String> {
+    if input.len() > 16_384 {
+        return Err("Formula exceeds calculation budget".into());
+    }
     let tokens = tokenize(input)?;
+    let mut nesting = 0usize;
+    for token in &tokens {
+        if matches!(token, Token::LParen) {
+            nesting += 1;
+        }
+        if nesting > 64 || tokens.len() > 512 {
+            return Err("Formula exceeds calculation budget".into());
+        }
+        if matches!(token, Token::RParen) {
+            nesting = nesting.saturating_sub(1);
+        }
+    }
     if tokens.is_empty() {
         return Err("Empty formula".into());
     }
@@ -1138,10 +1209,84 @@ fn parse_formula(input: &str) -> Result<Expr, String> {
 // Evaluator
 // ---------------------------------------------------------------------------
 
-// Thread-local set used for circular-reference detection during a single
-// evaluation pass.
+/// Limits apply to a complete evaluation pass, shared by browser and exports.
+pub const MAX_CALCULATION_STEPS: usize = 1_000_000;
+pub const MAX_RANGE_CELLS: u64 = 100_000;
+const MAX_EVALUATION_DEPTH: usize = 128;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CalculationStats {
+    pub evaluated_cells: usize,
+    pub expression_steps: usize,
+    pub parsed_formulas: usize,
+    pub budget_exceeded: bool,
+}
+
+#[derive(Default)]
+struct EvaluationPass {
+    visiting: HashSet<(u32, u32)>,
+    values: HashMap<(u32, u32), CellValue>,
+    parsed: HashMap<String, Result<std::rc::Rc<Expr>, String>>,
+    stats: CalculationStats,
+    depth: usize,
+    memo_bytes: usize,
+}
 thread_local! {
-    static EVAL_STACK: RefCell<HashSet<(u32, u32)>> = RefCell::new(HashSet::new());
+    static EVALUATION: RefCell<Option<EvaluationPass>> = const { RefCell::new(None) };
+}
+struct EvaluationScope(bool);
+impl EvaluationScope {
+    fn enter() -> Self {
+        Self(EVALUATION.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(EvaluationPass::default());
+                true
+            } else {
+                false
+            }
+        }))
+    }
+}
+impl Drop for EvaluationScope {
+    fn drop(&mut self) {
+        if self.0 {
+            EVALUATION.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+}
+fn charge_calculation(steps: usize) -> bool {
+    EVALUATION.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(pass) = slot.as_mut() else {
+            return true;
+        };
+        pass.stats.expression_steps = pass.stats.expression_steps.saturating_add(steps);
+        if pass.stats.expression_steps > MAX_CALCULATION_STEPS {
+            pass.stats.budget_exceeded = true;
+        }
+        !pass.stats.budget_exceeded
+    })
+}
+fn cached_formula(body: &str) -> Result<std::rc::Rc<Expr>, String> {
+    if let Some(expr) = EVALUATION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|p| p.parsed.get(body).cloned())
+    }) {
+        return expr;
+    }
+    let parsed = parse_formula(body).map(std::rc::Rc::new);
+    EVALUATION.with(|slot| {
+        if let Some(pass) = slot.borrow_mut().as_mut() {
+            pass.stats.parsed_formulas += 1;
+            pass.parsed.insert(body.into(), parsed.clone());
+        }
+    });
+    parsed
+}
+fn budget_error() -> CellValue {
+    CellValue::Error("Calculation budget exceeded".into())
 }
 
 impl CellValue {
@@ -1202,6 +1347,7 @@ impl Sheet {
     /// The formula may optionally start with `=`.  Circular references are
     /// detected and result in `CellValue::Error`.
     pub fn evaluate_formula(&self, formula: &str) -> CellValue {
+        let _scope = EvaluationScope::enter();
         let formula = formula.trim();
         let body = if let Some(stripped) = formula.strip_prefix('=') {
             stripped
@@ -1213,9 +1359,18 @@ impl Sheet {
             return CellValue::Empty;
         }
 
-        match parse_formula(body) {
+        let value = match cached_formula(body) {
             Ok(expr) => self.eval_expr(&expr),
             Err(e) => CellValue::Error(e),
+        };
+        if EVALUATION.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|p| p.stats.budget_exceeded)
+        }) {
+            budget_error()
+        } else {
+            value
         }
     }
 
@@ -1224,6 +1379,11 @@ impl Sheet {
     /// Performs a topological sort based on cell dependencies so that cells
     /// are evaluated in the correct order.
     pub fn recalculate(&mut self) {
+        self.recalculate_with_stats();
+    }
+
+    pub fn recalculate_with_stats(&mut self) -> CalculationStats {
+        let _scope = EvaluationScope::enter();
         // Collect all cells that have formulas.
         let formula_cells: Vec<(CellRef, String)> = self
             .cells
@@ -1239,7 +1399,7 @@ impl Sheet {
             let key = (cr.row, cr.col);
             all_formula_keys.insert(key);
             let body = formula.strip_prefix('=').unwrap_or(formula);
-            if let Ok(expr) = parse_formula(body) {
+            if let Ok(expr) = cached_formula(body) {
                 let mut references = Vec::new();
                 collect_cell_refs(&expr, &mut references);
                 deps.insert(key, references);
@@ -1255,9 +1415,9 @@ impl Sheet {
         for (row, col) in &order {
             let cr = CellRef::new(*row, *col);
             if let Some(cell) = self.cells.get(&cr)
-                && let Some(f) = cell.formula.clone()
+                && cell.formula.is_some()
             {
-                let val = self.evaluate_formula(&f);
+                let val = self.resolve_cell(&cr);
                 if let Some(cell_mut) = self.cells.get_mut(&cr) {
                     cell_mut.value = val;
                 }
@@ -1275,6 +1435,7 @@ impl Sheet {
                 cell_mut.value = CellValue::Error("Circular reference detected".into());
             }
         }
+        EVALUATION.with(|slot| slot.borrow().as_ref().map(|p| p.stats).unwrap_or_default())
     }
 
     // -----------------------------------------------------------------------
@@ -1287,7 +1448,20 @@ impl Sheet {
         let r_max = start.row.max(end.row);
         let c_min = start.col.min(end.col);
         let c_max = start.col.max(end.col);
-        let mut refs = Vec::with_capacity(((r_max - r_min + 1) * (c_max - c_min + 1)) as usize);
+        let count = (u64::from(r_max) - u64::from(r_min) + 1)
+            .checked_mul(u64::from(c_max) - u64::from(c_min) + 1);
+        let Some(count) = count.filter(|count| *count <= MAX_RANGE_CELLS) else {
+            EVALUATION.with(|slot| {
+                if let Some(pass) = slot.borrow_mut().as_mut() {
+                    pass.stats.budget_exceeded = true;
+                }
+            });
+            return Vec::new();
+        };
+        if !charge_calculation(count as usize) {
+            return Vec::new();
+        }
+        let mut refs = Vec::with_capacity(count as usize);
         for r in r_min..=r_max {
             for c in c_min..=c_max {
                 refs.push(CellRef::new(r, c));
@@ -1298,32 +1472,23 @@ impl Sheet {
 
     /// Collect all numeric values in a rectangular range.
     pub fn range_values(&self, start: &CellRef, end: &CellRef) -> Vec<f64> {
-        let refs = Self::expand_range(start, end);
-        let mut values = Vec::new();
-        for cr in &refs {
-            if let Some(cell) = self.cells.get(cr)
-                && let Some(n) = cell.value.as_number()
-            {
-                // Skip truly empty cells for aggregation purposes (but
-                // 0.0 from empty is acceptable for SUM, not AVERAGE).
-                if !matches!(cell.value, CellValue::Empty) {
-                    values.push(n);
+        Self::expand_range(start, end)
+            .iter()
+            .filter_map(|reference| {
+                let value = self.resolve_cell(reference);
+                if matches!(value, CellValue::Empty) {
+                    None
+                } else {
+                    value.as_number()
                 }
-            }
-        }
-        values
+            })
+            .collect()
     }
 
-    /// Collect all [`CellValue`]s in a rectangular range (including Empty).
     fn range_cell_values(&self, start: &CellRef, end: &CellRef) -> Vec<CellValue> {
-        let refs = Self::expand_range(start, end);
-        refs.iter()
-            .map(|cr| {
-                self.cells
-                    .get(cr)
-                    .map(|c| c.value.clone())
-                    .unwrap_or(CellValue::Empty)
-            })
+        Self::expand_range(start, end)
+            .iter()
+            .map(|reference| self.resolve_cell(reference))
             .collect()
     }
 
@@ -1670,6 +1835,47 @@ impl Sheet {
 
     /// Evaluate an AST [`Expr`] using this sheet's cell data.
     fn eval_expr(&self, expr: &Expr) -> CellValue {
+        if !charge_calculation(1) {
+            return budget_error();
+        }
+        let allowed = EVALUATION.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(pass) = slot.as_mut() else {
+                return true;
+            };
+            if pass.depth >= MAX_EVALUATION_DEPTH {
+                pass.stats.budget_exceeded = true;
+                false
+            } else {
+                pass.depth += 1;
+                true
+            }
+        });
+        if !allowed {
+            return budget_error();
+        }
+        let value = self.eval_expr_inner(expr);
+        let value = match value {
+            CellValue::Number(number) if !number.is_finite() => CellValue::Error("#NUM!".into()),
+            CellValue::Text(ref text) if text.len() > 1024 * 1024 => {
+                EVALUATION.with(|slot| {
+                    if let Some(pass) = slot.borrow_mut().as_mut() {
+                        pass.stats.budget_exceeded = true;
+                    }
+                });
+                budget_error()
+            }
+            value => value,
+        };
+        EVALUATION.with(|slot| {
+            if let Some(pass) = slot.borrow_mut().as_mut() {
+                pass.depth = pass.depth.saturating_sub(1);
+            }
+        });
+        value
+    }
+
+    fn eval_expr_inner(&self, expr: &Expr) -> CellValue {
         match expr {
             Expr::Number(n) => CellValue::Number(*n),
             Expr::StringLit(s) => CellValue::Text(s.clone()),
@@ -1692,30 +1898,52 @@ impl Sheet {
     /// Detects circular references.
     fn resolve_cell(&self, cr: &CellRef) -> CellValue {
         let key = (cr.row, cr.col);
-
-        // Circular reference check.
-        let is_circular = EVAL_STACK.with(|stack| {
-            let st = stack.borrow();
-            st.contains(&key)
+        if let Some(value) = EVALUATION.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .and_then(|p| p.values.get(&key).cloned())
+        }) {
+            return value;
+        }
+        let circular = EVALUATION.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|p| p.visiting.contains(&key))
         });
-        if is_circular {
+        if circular {
             return CellValue::Error("Circular reference".into());
         }
-
-        match self.cells.get(cr) {
-            None => CellValue::Empty,
-            Some(cell) => {
-                if let Some(ref formula) = cell.formula {
-                    // Push onto eval stack
-                    EVAL_STACK.with(|stack| stack.borrow_mut().insert(key));
-                    let result = self.evaluate_formula(formula);
-                    EVAL_STACK.with(|stack| stack.borrow_mut().remove(&key));
-                    result
-                } else {
-                    cell.value.clone()
-                }
+        EVALUATION.with(|slot| {
+            if let Some(pass) = slot.borrow_mut().as_mut() {
+                pass.visiting.insert(key);
+                pass.stats.evaluated_cells += 1;
             }
-        }
+        });
+        let mut result = match self.cells.get(cr) {
+            None => CellValue::Empty,
+            Some(cell) => match &cell.formula {
+                Some(formula) => self.evaluate_formula(formula),
+                None => cell.value.clone(),
+            },
+        };
+        EVALUATION.with(|slot| {
+            if let Some(pass) = slot.borrow_mut().as_mut() {
+                pass.visiting.remove(&key);
+                let bytes = match &result {
+                    CellValue::Text(text) | CellValue::Date(text) | CellValue::Error(text) => {
+                        text.len()
+                    }
+                    _ => 0,
+                };
+                pass.memo_bytes = pass.memo_bytes.saturating_add(bytes);
+                if pass.memo_bytes > 64 * 1024 * 1024 {
+                    pass.stats.budget_exceeded = true;
+                    result = budget_error();
+                }
+                pass.values.insert(key, result.clone());
+            }
+        });
+        result
     }
 
     /// Evaluate a binary operation.
@@ -1785,7 +2013,7 @@ impl Sheet {
     fn eval_function(&self, name: &str, args: &[Expr]) -> CellValue {
         match name {
             "SUM" => self.fn_sum(args),
-            "AVERAGE" => self.fn_average(args),
+            "AVG" | "AVERAGE" => self.fn_average(args),
             "COUNT" => self.fn_count(args),
             "COUNTA" => self.fn_counta(args),
             "MIN" => self.fn_min(args),
@@ -1945,6 +2173,10 @@ impl Sheet {
         let mut result = String::new();
         for arg in args {
             let v = self.eval_expr(arg);
+            if result.len() > 1024 * 1024 {
+                charge_calculation(MAX_CALCULATION_STEPS + 1);
+                return budget_error();
+            }
             result.push_str(&v.as_text());
         }
         CellValue::Text(result)
@@ -2084,7 +2316,20 @@ impl Sheet {
         let r_max = range_start.row.max(range_end.row);
         let c_min = range_start.col.min(range_end.col);
 
-        let target_col = c_min + col_idx;
+        let rows = u64::from(r_max) - u64::from(r_min) + 1;
+        if rows > MAX_RANGE_CELLS {
+            charge_calculation(MAX_CALCULATION_STEPS + 1);
+            return budget_error();
+        }
+        if !charge_calculation(rows as usize) {
+            return budget_error();
+        }
+        let Some(target_col) = c_min
+            .checked_add(col_idx)
+            .filter(|col| *col <= range_start.col.max(range_end.col))
+        else {
+            return CellValue::Error("#REF!".into());
+        };
 
         for r in r_min..=r_max {
             let first_val = self
@@ -3225,6 +3470,67 @@ mod tests {
         assert!(matches!(
             workbook.sheets[1].get_cell(0, 1).map(|cell| &cell.value),
             Some(CellValue::Number(value)) if (*value - 15.0).abs() < f64::EPSILON
+        ));
+    }
+}
+
+#[cfg(test)]
+mod calculation_budget_regressions {
+    use super::*;
+    #[test]
+    fn repeated_dependencies_are_evaluated_once_per_pass() {
+        let mut sheet = Sheet::new("Memo".into());
+        sheet.set_cell(0, 0, CellValue::Number(1.0));
+        for row in 1..40 {
+            sheet.set_formula(row, 0, format!("=A{row}+A{row}"));
+        }
+        let stats = sheet.recalculate_with_stats();
+        assert!(
+            matches!(sheet.get_cell(39,0).unwrap().value,CellValue::Number(value) if value == 2f64.powi(39))
+        );
+        assert_eq!(stats.evaluated_cells, 40);
+        assert_eq!(stats.parsed_formulas, 39);
+        assert!(stats.expression_steps < 200, "linear work: {stats:?}");
+        assert!(!stats.budget_exceeded);
+    }
+    #[test]
+    fn changing_a_dependency_invalidates_the_next_pass() {
+        let mut sheet = Sheet::new("Fresh".into());
+        sheet.set_cell(0, 0, CellValue::Number(1.0));
+        sheet.set_formula(0, 1, "=A1+1".into());
+        sheet.recalculate();
+        sheet.set_cell(0, 0, CellValue::Number(7.0));
+        sheet.recalculate();
+        assert!(matches!(
+            sheet.get_cell(0, 1).unwrap().value,
+            CellValue::Number(8.0)
+        ));
+    }
+    #[test]
+    fn oversized_ranges_and_nested_formulas_fail_with_an_error() {
+        let sheet = Sheet::new("Bounded".into());
+        assert!(matches!(
+            sheet.evaluate_formula("=SUM(A1:XFD1048576)"),
+            CellValue::Error(_)
+        ));
+        let formula = format!("={}1{}", "(".repeat(10000), ")".repeat(10000));
+        assert!(matches!(
+            sheet.evaluate_formula(&formula),
+            CellValue::Error(_)
+        ));
+        assert!(
+            matches!(sheet.evaluate_formula("=1+1"), CellValue::Number(2.0)),
+            "budget does not leak into another pass"
+        );
+    }
+    #[test]
+    fn range_formulas_resolve_dependencies_instead_of_stale_values() {
+        let mut sheet = Sheet::new("Ranges".into());
+        sheet.set_cell(0, 0, CellValue::Number(3.0));
+        sheet.set_formula(0, 1, "=A1*2".into());
+        assert!(matches!(
+            sheet.evaluate_formula("=SUM(B1:B1)"),
+            CellValue::Number(6.0)
         ));
     }
 }

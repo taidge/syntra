@@ -11,15 +11,34 @@ use contrix_core::error::AppError;
 use contrix_core::models::{ConversionJob, DocumentType, NewConversionJob};
 use contrix_core::schema::conversion_jobs::dsl as cj;
 use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
 use contrix_export::ExportFormat;
 
+use crate::handlers::access::load_accessible_file;
 use crate::middleware::auth::get_user_id;
 use crate::services::{StorageBackend, StorageService};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+async fn require_source_access(
+    conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
+    file_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
+    match load_accessible_file(conn, file_id, user_id, "viewer").await? {
+        Some(file) if !file.is_trashed && !file.is_folder => Ok(()),
+        _ => Err(AppError::NotFound("Source file not found".into())),
+    }
+}
+fn render_source_error(res: &mut Response, error: AppError) {
+    res.status_code(match &error {
+        AppError::Forbidden(_) => StatusCode::FORBIDDEN,
+        AppError::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    });
+    res.render(Json(ApiResponse::<()>::err(error.to_response())));
+}
 
 // ZIP generation and document parsing are CPU work, independent of a SQL lease.
 // Keep the permit in the worker so cancelling a caller cannot exceed the bound.
@@ -92,8 +111,14 @@ pub(super) async fn export_content(
             }
             (DocumentType::Calc, ExportFormat::Csv) => {
                 match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
-                    Ok(wb) => {
+                    Ok(mut wb) => {
+                        for sheet in &mut wb.sheets { sheet.recalculate(); }
                         if let Some(sheet) = wb.sheets.first() {
+                            let rows = sheet.cells.keys().map(|r| u64::from(r.row) + 1).max().unwrap_or(1);
+                            let cols = sheet.cells.keys().map(|r| u64::from(r.col) + 1).max().unwrap_or(1);
+                            if rows.checked_mul(cols).is_none_or(|cells| cells > 5_000_000) {
+                                return Err("CSV output exceeds dense cell budget; use XLSX for sparse workbooks".into());
+                            }
                             let csv = contrix_export::csv::sheet_to_csv(sheet);
                             Ok(csv.into_bytes())
                         } else {
@@ -111,7 +136,10 @@ pub(super) async fn export_content(
             }
             (DocumentType::Calc, ExportFormat::Xlsx) => {
                 match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
-                    Ok(wb) => contrix_export::xlsx::workbook_to_xlsx(&wb),
+                    Ok(mut wb) => {
+                        for sheet in &mut wb.sheets {sheet.recalculate();}
+                        contrix_export::xlsx::workbook_to_xlsx(&wb)
+                    },
                     Err(e) => Err(format!("Failed to parse workbook: {e}")),
                 }
             }
@@ -195,6 +223,26 @@ async fn perform_conversion(
     target_format: &str,
     storage: &StorageBackend,
 ) {
+    let author = cj::conversion_jobs
+        .filter(cj::id.eq(job_id))
+        .select(cj::user_id)
+        .first::<String>(conn)
+        .await;
+    let permitted = match author {
+        Ok(author) => require_source_access(conn, source_file_id, &author).await,
+        Err(error) => Err(AppError::Database(error.to_string())),
+    };
+    if let Err(error) = permitted {
+        let _ = diesel::update(cj::conversion_jobs.filter(cj::id.eq(job_id)))
+            .set((
+                cj::status.eq("failed"),
+                cj::error_message.eq(Some(error.to_string())),
+                cj::completed_at.eq(Some(Utc::now().to_rfc3339())),
+            ))
+            .execute(conn)
+            .await;
+        return;
+    }
     // Resolve the export format.
     let export_format = match ExportFormat::from_extension(target_format) {
         Some(fmt) => fmt,
@@ -264,7 +312,7 @@ async fn perform_conversion(
     match exported {
         Ok(data) => {
             let output_filename = format!("{}.{}", job_id, export_format.extension());
-            let output_relative = format!("conversions/{}", output_filename);
+            let output_relative = format!("conversions/{}/{output_filename}", Uuid::new_v4());
 
             if let Err(e) = storage
                 .write_file(&output_relative, &data, "application/octet-stream")
@@ -437,30 +485,9 @@ pub async fn create_conversion(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    // Verify the source file exists and belongs to the user.
-    match f::files
-        .filter(f::id.eq(&body.file_id))
-        .filter(f::owner_id.eq(&uid))
-        .select(f::id)
-        .first::<String>(&mut conn)
-        .await
-        .optional()
-    {
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Source file not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-        Ok(Some(_)) => {}
+    if let Err(error) = require_source_access(&mut conn, &body.file_id, &uid).await {
+        render_source_error(res, error);
+        return;
     }
 
     let now = Utc::now();
@@ -551,6 +578,10 @@ pub async fn retry_conversion(req: &mut Request, depot: &mut Depot, res: &mut Re
         )));
         return;
     };
+    if let Err(error) = require_source_access(&mut conn, &job.source_file_id, &uid).await {
+        render_source_error(res, error);
+        return;
+    }
     if !matches!(job.status.as_str(), "failed" | "cancelled") {
         res.status_code(StatusCode::CONFLICT);
         res.render(Json(ApiResponse::<()>::err(
@@ -642,6 +673,11 @@ pub async fn get_conversion(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .optional()
     {
         Ok(Some(job)) => {
+            if let Err(error) = require_source_access(&mut conn, &job.source_file_id, &uid).await {
+                render_source_error(res, error);
+                return;
+            }
+
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(serde_json::json!({
                 "id": job.id,
@@ -725,6 +761,11 @@ pub async fn download_conversion(req: &mut Request, depot: &mut Depot, res: &mut
         }
     };
 
+    if let Err(error) = require_source_access(&mut conn, &job.source_file_id, &uid).await {
+        render_source_error(res, error);
+        return;
+    }
+    drop(conn);
     if job.status != "completed" {
         res.status_code(StatusCode::BAD_REQUEST);
         res.render(Json(ApiResponse::<()>::err(
@@ -812,7 +853,18 @@ pub async fn list_conversions(req: &mut Request, depot: &mut Depot, res: &mut Re
         .await
     {
         Ok(rows) => {
-            let jobs: Vec<serde_json::Value> = rows
+            let mut accessible = Vec::new();
+            for job in rows {
+                match require_source_access(&mut conn, &job.source_file_id, &uid).await {
+                    Ok(()) => accessible.push(job),
+                    Err(AppError::Forbidden(_) | AppError::NotFound(_)) => {}
+                    Err(error) => {
+                        render_source_error(res, error);
+                        return;
+                    }
+                }
+            }
+            let jobs: Vec<serde_json::Value> = accessible
                 .into_iter()
                 .map(|job| {
                     serde_json::json!({
@@ -837,5 +889,137 @@ pub async fn list_conversions(req: &mut Request, depot: &mut Depot, res: &mut Re
                 AppError::Database(e.to_string()).to_response(),
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod review_conversion_regressions {
+    use super::*;
+    #[tokio::test]
+    async fn csv_exports_formula_results_after_recalculation() {
+        let mut book = contrix_doc_engine::Workbook::new("CSV".into());
+        book.sheets[0].set_cell(0, 0, contrix_doc_engine::calc::CellValue::Number(1.0));
+        book.sheets[0].set_formula(0, 1, "=A1+2".into());
+        let bytes = export_content(
+            serde_json::to_string(&book).unwrap(),
+            "calc".into(),
+            ExportFormat::Csv,
+            "csv".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(String::from_utf8(bytes).unwrap(), "1,3\r\n");
+    }
+    #[tokio::test]
+    async fn csv_refuses_unbounded_dense_output_but_xlsx_stays_sparse() {
+        let mut book = contrix_doc_engine::Workbook::new("Sparse".into());
+        book.sheets[0].set_cell(
+            1_048_575,
+            16_383,
+            contrix_doc_engine::calc::CellValue::Number(1.0),
+        );
+        let content = serde_json::to_string(&book).unwrap();
+        assert!(
+            export_content(
+                content.clone(),
+                "calc".into(),
+                ExportFormat::Csv,
+                "csv".into()
+            )
+            .await
+            .unwrap_err()
+            .contains("budget")
+        );
+        assert!(
+            export_content(content, "calc".into(), ExportFormat::Xlsx, "xlsx".into())
+                .await
+                .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod imported_download_export_regressions {
+    use super::*;
+    #[tokio::test]
+    async fn imported_models_export_latest_values_as_standard_office_packages() {
+        use contrix_doc_engine::calc::CellValue;
+        let mut workbook = contrix_export::xlsx::xlsx_to_workbook(include_bytes!(
+            "../../../export/tests/fixtures/external-formulas.xlsx"
+        ))
+        .unwrap();
+        workbook.sheets[0].set_cell(0, 0, CellValue::Number(20.0));
+        let bytes = export_content(
+            serde_json::to_string(&workbook).unwrap(),
+            "calc".into(),
+            ExportFormat::Xlsx,
+            "xlsx".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&bytes[..2], b"PK");
+        let parsed = contrix_export::xlsx::xlsx_to_workbook(&bytes).unwrap();
+        assert!(matches!(
+            parsed.sheets[0].get_cell(0, 1).unwrap().value,
+            CellValue::Number(21.0)
+        ));
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("xl/worksheets/sheet1.xml").unwrap(),
+            &mut xml,
+        )
+        .unwrap();
+        assert!(xml.contains("<f>A1+1</f>"));
+        assert!(xml.contains("<v>21</v>"));
+
+        let mut slides = contrix_export::pptx::pptx_to_presentation(include_bytes!(
+            "../../../export/tests/fixtures/external-slide-order.pptx"
+        ))
+        .unwrap();
+        if let contrix_doc_engine::slides::SlideElement::TextBox(text) =
+            &mut slides.slides[0].elements[0]
+        {
+            text.content[0].text = "Edited imported slide".into();
+        }
+        let bytes = export_content(
+            serde_json::to_string(&slides).unwrap(),
+            "slides".into(),
+            ExportFormat::Pptx,
+            "pptx".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&bytes[..2], b"PK");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("ppt/slides/slide1.xml").unwrap(),
+            &mut xml,
+        )
+        .unwrap();
+        assert!(xml.contains("Edited imported slide"));
+
+        let mut writer = contrix_doc_engine::WriterDocument::new("Imported Writer".into());
+        writer.add_paragraph("Original paragraph");
+        let original = contrix_export::docx::writer_to_docx(&writer).unwrap();
+        let mut imported = contrix_export::docx::docx_to_writer(&original).unwrap();
+        imported.add_paragraph("Edited imported paragraph");
+        let bytes = export_content(
+            serde_json::to_string(&imported).unwrap(),
+            "writer".into(),
+            ExportFormat::Docx,
+            "docx".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&bytes[..2], b"PK");
+        let parsed = contrix_export::docx::docx_to_writer(&bytes).unwrap();
+        assert!(
+            contrix_doc_engine::writer::writer_content_to_plain(
+                &serde_json::to_value(parsed).unwrap()
+            )
+            .contains("Edited imported paragraph")
+        );
     }
 }

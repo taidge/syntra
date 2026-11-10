@@ -53,7 +53,7 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     }
 
     let like_pattern = literal_like_pattern(q);
-    let offset_val = ((page.saturating_sub(1)) * per_page) as i64;
+    let offset_val = i64::from(page.saturating_sub(1)) * i64::from(per_page);
     let limit_val = per_page as i64;
 
     let mut conn = match state.db.get() {
@@ -75,7 +75,13 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .sql(" ESCAPE '\\')");
         let count_val: i64 = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
-            .filter(f::owner_id.eq(&uid))
+            .filter(diesel::dsl::sql::<Bool>("((files.room_id IS NULL AND files.owner_id = ")
+                .bind::<Text,_>(&uid)
+                .sql(") OR EXISTS (SELECT 1 FROM room_members JOIN rooms ON rooms.id=room_members.room_id JOIN users room_owner ON room_owner.id=rooms.owner_id WHERE room_members.room_id=files.room_id AND room_owner.tenant_id IS (SELECT tenant_id FROM users WHERE id=room_members.user_id) AND room_members.user_id = ")
+                .bind::<Text,_>(&uid)
+                .sql(")) AND EXISTS (SELECT 1 FROM users owner_user JOIN users actor_user ON actor_user.id = ")
+                .bind::<Text,_>(&uid)
+                .sql(" WHERE owner_user.id = files.owner_id AND owner_user.tenant_id IS actor_user.tenant_id)"))
             .filter(f::is_trashed.eq(false))
             .filter(d::doc_type.eq(dt))
             .filter(count_matches)
@@ -91,7 +97,13 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .sql(" ESCAPE '\\')");
         let results = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
-            .filter(f::owner_id.eq(&uid))
+            .filter(diesel::dsl::sql::<Bool>("((files.room_id IS NULL AND files.owner_id = ")
+                .bind::<Text,_>(&uid)
+                .sql(") OR EXISTS (SELECT 1 FROM room_members JOIN rooms ON rooms.id=room_members.room_id JOIN users room_owner ON room_owner.id=rooms.owner_id WHERE room_members.room_id=files.room_id AND room_owner.tenant_id IS (SELECT tenant_id FROM users WHERE id=room_members.user_id) AND room_members.user_id = ")
+                .bind::<Text,_>(&uid)
+                .sql(")) AND EXISTS (SELECT 1 FROM users owner_user JOIN users actor_user ON actor_user.id = ")
+                .bind::<Text,_>(&uid)
+                .sql(" WHERE owner_user.id = files.owner_id AND owner_user.tenant_id IS actor_user.tenant_id)"))
             .filter(f::is_trashed.eq(false))
             .filter(d::doc_type.eq(dt))
             .filter(row_matches)
@@ -111,7 +123,13 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .sql(" ESCAPE '\\')");
         let count_val: i64 = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
-            .filter(f::owner_id.eq(&uid))
+            .filter(diesel::dsl::sql::<Bool>("((files.room_id IS NULL AND files.owner_id = ")
+                .bind::<Text,_>(&uid)
+                .sql(") OR EXISTS (SELECT 1 FROM room_members JOIN rooms ON rooms.id=room_members.room_id JOIN users room_owner ON room_owner.id=rooms.owner_id WHERE room_members.room_id=files.room_id AND room_owner.tenant_id IS (SELECT tenant_id FROM users WHERE id=room_members.user_id) AND room_members.user_id = ")
+                .bind::<Text,_>(&uid)
+                .sql(")) AND EXISTS (SELECT 1 FROM users owner_user JOIN users actor_user ON actor_user.id = ")
+                .bind::<Text,_>(&uid)
+                .sql(" WHERE owner_user.id = files.owner_id AND owner_user.tenant_id IS actor_user.tenant_id)"))
             .filter(f::is_trashed.eq(false))
             .filter(count_matches)
             .count()
@@ -126,7 +144,13 @@ pub async fn search(req: &mut Request, depot: &mut Depot, res: &mut Response) {
             .sql(" ESCAPE '\\')");
         let results = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
-            .filter(f::owner_id.eq(&uid))
+            .filter(diesel::dsl::sql::<Bool>("((files.room_id IS NULL AND files.owner_id = ")
+                .bind::<Text,_>(&uid)
+                .sql(") OR EXISTS (SELECT 1 FROM room_members JOIN rooms ON rooms.id=room_members.room_id JOIN users room_owner ON room_owner.id=rooms.owner_id WHERE room_members.room_id=files.room_id AND room_owner.tenant_id IS (SELECT tenant_id FROM users WHERE id=room_members.user_id) AND room_members.user_id = ")
+                .bind::<Text,_>(&uid)
+                .sql(")) AND EXISTS (SELECT 1 FROM users owner_user JOIN users actor_user ON actor_user.id = ")
+                .bind::<Text,_>(&uid)
+                .sql(" WHERE owner_user.id = files.owner_id AND owner_user.tenant_id IS actor_user.tenant_id)"))
             .filter(f::is_trashed.eq(false))
             .filter(row_matches)
             .order(d::updated_at.desc())

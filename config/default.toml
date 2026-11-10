@@ -16,6 +16,8 @@ jwt_expiry_hours = 24
 refresh_expiry_days = 30
 
 [storage]
+upload_idle_timeout_seconds = 30
+upload_total_timeout_seconds = 900
 backend = "local"
 base_path = "data/files"
 max_upload_size_mb = 100
@@ -47,3 +49,19 @@ max_output_chars = 12000
 [trash]
 auto_delete_days = 30
 auto_delete_enabled = false
+
+# Ordinary history must be within both the newest N and maximum age (0 disables
+# age expiry). Original version0 and bounded current/contiguous OT bases survive.
+[maintenance]
+history_enabled = true
+history_max_versions = 100
+history_max_age_days = 30
+history_batch_size = 100
+reconcile_enabled = true
+# Unknown legacy keys are preserved by default. Enable ONLY if this database
+# exclusively owns the ENTIRE S3 bucket or local base_path (no shared deployment).
+reconcile_legacy_dedicated_namespace = false
+interval_seconds = 300
+# New and upgraded objects must pass a full first-discovery grace period.
+orphan_grace_seconds = 86400
+scan_page_size = 100

@@ -28,13 +28,15 @@ jobs:
       - uses: ./.github/actions/setup-glory
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }},wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target ${{ matrix.target }} -p contrix-server
+      - run: cargo install wasm-bindgen-cli --locked --version 0.2.130
+      - shell: pwsh
+        run: ./scripts/package.ps1 -Target '${{ matrix.target }}'
       - uses: actions/upload-artifact@v4
         with:
-          name: contrix-server-${{ matrix.target }}
-          path: ${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/${{ matrix.artifact }}
+          name: contrix-office-${{ matrix.target }}
+          path: ${{ env.OFFICE_TARGET_DIRECTORY }}/dist/contrix-office-${{ matrix.target }}.zip
 
   create-release:
     needs: build-release
@@ -46,7 +48,5 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            contrix-server-x86_64-unknown-linux-gnu/contrix-server
-            contrix-server-x86_64-pc-windows-msvc/contrix-server.exe
-            contrix-server-x86_64-apple-darwin/contrix-server
+            contrix-office-*/contrix-office-*.zip
           generate_release_notes: true

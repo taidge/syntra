@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "profile": "release",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "benchmark_log": "target/review-phase2-capacity-release.log",
+  "benchmark_log_sha256": "d8e2399f780a39fd8e251944ee6feb13adcc5a008b0a5dc83e81f361a53c8b2c",
+  "benchmark_executable": "target/release/deps/capacity_benchmarks-7aec2a91dbdb5568.exe",
+  "benchmark_executable_sha256": "0bc4c9b6a5007dfddfdfc56ccf84e5a07dcfe22cd2ad8dd37e4daf4a5dfdeda1",
+  "component_source_sha256": {
+    "crates/server/tests/capacity_benchmarks.rs": "f6e8492e55a1a1a71fdafc797fdbdf8e424aac0b3ddfc2d5ffbbe38b95682b76",
+    "crates/doc-engine/src/calc.rs": "acbb9358ac1bde0165e2846d999480182dc30828fb947a468f948e1293278d52",
+    "crates/export/src/xlsx.rs": "eab69debeab6890b51f6c4e0e1acfc1d34e97c23ebe0e4975af86a13b3670a07",
+    "crates/export/src/xlsx_styles.rs": "f9b7e69bfac8aee93ba8d531af50d572046ab74f3d5b7f0c0d55c04ca7adcc82",
+    "crates/export/src/native_package.rs": "75e617aa3ec867b3d91226c91c66562cbb1ebcafe7c200771457daba0abb199c"
+  },
+  "measurement_scope": "Warm native release calculation and XLSX export; 30 samples each, output values reimported. Not browser main-thread latency or a hardware-independent SLO.",
+  "http_status_fix_timing": "Measured before the subsequent HTTP database-error status classification fix; the measured engine/export component sources were unchanged by that fix.",
+  "scenarios": [
+    {
+      "calculation_stats": {
+        "budget_exceeded": false,
+        "evaluated_cells": 400,
+        "expression_steps": 900,
+        "parsed_formulas": 300
+      },
+      "diamonds": 100,
+      "formula_cells": 300,
+      "populated_cells": 400,
+      "profile": "release",
+      "scenario": "formula_diamonds",
+      "timing": {
+        "max_ms": 0.5616,
+        "p50_ms": 0.39130000000000004,
+        "p95_ms": 0.5557,
+        "p99_ms": 0.5616,
+        "samples": 30
+      }
+    },
+    {
+      "calculation_stats": {
+        "budget_exceeded": false,
+        "evaluated_cells": 4000,
+        "expression_steps": 9000,
+        "parsed_formulas": 3000
+      },
+      "diamonds": 1000,
+      "formula_cells": 3000,
+      "populated_cells": 4000,
+      "profile": "release",
+      "scenario": "formula_diamonds",
+      "timing": {
+        "max_ms": 4.9409,
+        "p50_ms": 4.3618,
+        "p95_ms": 4.8661,
+        "p99_ms": 4.9409,
+        "samples": 30
+      }
+    },
+    {
+      "calculation_stats": {
+        "budget_exceeded": false,
+        "evaluated_cells": 20000,
+        "expression_steps": 45000,
+        "parsed_formulas": 15000
+      },
+      "diamonds": 5000,
+      "formula_cells": 15000,
+      "populated_cells": 20000,
+      "profile": "release",
+      "scenario": "formula_diamonds",
+      "timing": {
+        "max_ms": 29.648899999999998,
+        "p50_ms": 26.9702,
+        "p95_ms": 29.0092,
+        "p99_ms": 29.648899999999998,
+        "samples": 30
+      }
+    },
+    {
+      "last_col": 9,
+      "last_row": 999,
+      "output_bytes": 19003,
+      "populated_cells": 1001,
+      "profile": "release",
+      "scenario": "sparse_xlsx",
+      "timing": {
+        "max_ms": 33.8194,
+        "p50_ms": 32.635200000000005,
+        "p95_ms": 33.7408,
+        "p99_ms": 33.8194,
+        "samples": 30
+      }
+    },
+    {
+      "last_col": 16383,
+      "last_row": 1048575,
+      "output_bytes": 19013,
+      "populated_cells": 1001,
+      "profile": "release",
+      "scenario": "sparse_xlsx",
+      "timing": {
+        "max_ms": 33.6797,
+        "p50_ms": 31.4771,
+        "p95_ms": 33.6604,
+        "p99_ms": 33.6797,
+        "samples": 30
+      }
+    }
+  ]
+}

@@ -15,6 +15,7 @@ default = []
 ssr = ["glory/ssr"]
 
 [dependencies]
+contrix-doc-engine = { path = "../doc-engine" }
 glory = { workspace = true }
 sapid = { workspace = true }
 serde = { workspace = true }
@@ -32,9 +33,6 @@ qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 glory = { workspace = true, features = ["web", "hydrate"] }
-
-[dev-dependencies]
-contrix-doc-engine = { path = "../doc-engine" }
 
 [dependencies.web-sys]
 version = "0.3"

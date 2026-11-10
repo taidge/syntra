@@ -3,9 +3,8 @@ use contrix_core::dto::{ApiResponse, FileResponse};
 use contrix_core::error::AppError;
 use contrix_core::models::File;
 use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::users::dsl as u;
+use contrix_core::schema::room_members::dsl as rm;
 use diesel::prelude::*;
-use horme::OptionalExtension;
 use horme::RunQueryDsl;
 use salvo::prelude::*;
 
@@ -68,6 +67,13 @@ pub async fn list_trashed(depot: &mut Depot, res: &mut Response) {
 
     match f::files
         .filter(f::owner_id.eq(&uid))
+        .filter(
+            f::room_id.is_null().or(f::room_id.eq_any(
+                rm::room_members
+                    .filter(rm::user_id.eq(&uid))
+                    .select(rm::room_id.nullable()),
+            )),
+        )
         .filter(f::is_trashed.eq(true))
         .order(f::trashed_at.desc())
         .load::<File>(&mut conn)
@@ -112,50 +118,42 @@ pub async fn restore_file(req: &mut Request, depot: &mut Depot, res: &mut Respon
     };
 
     let file_id_param: String = req.param("id").unwrap_or_default();
-    let now = Utc::now();
-
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    match diesel::update(
-        f::files
-            .filter(f::id.eq(&file_id_param))
-            .filter(f::owner_id.eq(&uid))
-            .filter(f::is_trashed.eq(true)),
-    )
-    .set((
-        f::is_trashed.eq(false),
-        f::trashed_at.eq(None::<String>),
-        f::updated_at.eq(now.to_rfc3339()),
-    ))
-    .execute(&mut conn)
-    .await
-    {
-        Ok(0) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Trashed file not found".into()).to_response(),
-            )));
-        }
-        Ok(_) => {
-            res.status_code(StatusCode::OK);
-            res.render(Json(ApiResponse::ok(
-                serde_json::json!({ "message": "File restored" }),
-            )));
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
+    let result = state
+        .db
+        .run(move |conn| {
+            use diesel::OptionalExtension;
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                let file = diesel::RunQueryDsl::first::<File>(f::files.find(&file_id_param), conn)
+                    .optional()?
+                    .ok_or_else(|| AppError::NotFound("Trashed file not found".into()))?;
+                crate::services::persistence::authorize_including_trashed(
+                    conn, &file, &uid, "admin",
+                )?;
+                if !file.is_trashed {
+                    return Err(AppError::NotFound("Trashed file not found".into()));
+                }
+                diesel::RunQueryDsl::execute(
+                    diesel::update(f::files.find(&file_id_param)).set((
+                        f::is_trashed.eq(false),
+                        f::trashed_at.eq(None::<String>),
+                        f::updated_at.eq(Utc::now().to_rfc3339()),
+                    )),
+                    conn,
+                )?;
+                Ok(())
+            })
+        })
+        .await;
+    match result {
+        Ok(()) => res.render(Json(ApiResponse::ok(
+            serde_json::json!({"message":"File restored"}),
+        ))),
+        Err(error) => {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
         }
     }
 }
@@ -180,74 +178,23 @@ pub async fn permanently_delete(req: &mut Request, depot: &mut Depot, res: &mut 
 
     let file_id_param: String = req.param("id").unwrap_or_default();
 
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    // Fetch the file to get its path and size for cleanup.
-    let file_row = match f::files
-        .filter(f::id.eq(&file_id_param))
-        .filter(f::owner_id.eq(&uid))
-        .filter(f::is_trashed.eq(true))
-        .first::<File>(&mut conn)
-        .await
-        .optional()
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            res.status_code(StatusCode::NOT_FOUND);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::NotFound("Trashed file not found".into()).to_response(),
-            )));
-            return;
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    let file_size = file_row.size;
-    let file_path = file_row.path.clone();
-    let is_folder = file_row.is_folder;
-
-    // Delete from DB.
-    if let Err(e) = diesel::delete(f::files.filter(f::id.eq(&file_id_param)))
-        .execute(&mut conn)
+    match crate::services::persistence::purge_trashed(&state.db, &file_id_param, Some(&uid), None)
         .await
     {
-        res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-        res.render(Json(ApiResponse::<()>::err(
-            AppError::Database(e.to_string()).to_response(),
-        )));
-        return;
+        Ok(count) => {
+            crate::services::persistence::request_gc(&state.db, &state.storage);
+            res.render(Json(ApiResponse::ok(
+                serde_json::json!({"message":"File permanently deleted","count":count}),
+            )));
+        }
+        Err(error) => {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
+        }
     }
-
-    // Delete from physical storage (only for non-folder files).
-    if !is_folder {
-        let _ = state.storage.delete_file(&file_path).await;
-
-        // Update user's storage_used.
-        let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
-            .set(u::storage_used.eq(u::storage_used - file_size))
-            .execute(&mut conn)
-            .await;
-    }
-
-    res.status_code(StatusCode::OK);
-    res.render(Json(ApiResponse::ok(
-        serde_json::json!({ "message": "File permanently deleted" }),
-    )));
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +229,13 @@ pub async fn empty_trash(depot: &mut Depot, res: &mut Response) {
     // Fetch all trashed files to get paths and sizes.
     let trashed_files: Vec<File> = match f::files
         .filter(f::owner_id.eq(&uid))
+        .filter(
+            f::room_id.is_null().or(f::room_id.eq_any(
+                rm::room_members
+                    .filter(rm::user_id.eq(&uid))
+                    .select(rm::room_id.nullable()),
+            )),
+        )
         .filter(f::is_trashed.eq(true))
         .load::<File>(&mut conn)
         .await
@@ -296,45 +250,27 @@ pub async fn empty_trash(depot: &mut Depot, res: &mut Response) {
         }
     };
 
-    let mut total_freed: i64 = 0;
-
-    for file_row in &trashed_files {
-        if !file_row.is_folder {
-            let _ = state.storage.delete_file(&file_row.path).await;
-            total_freed += file_row.size;
-        }
-    }
-
-    // Delete all trashed files from DB.
-    match diesel::delete(
-        f::files
-            .filter(f::owner_id.eq(&uid))
-            .filter(f::is_trashed.eq(true)),
-    )
-    .execute(&mut conn)
-    .await
-    {
-        Ok(count) => {
-            // Update user's storage_used.
-            if total_freed > 0 {
-                let _ = diesel::update(u::users.filter(u::id.eq(&uid)))
-                    .set(u::storage_used.eq(u::storage_used - total_freed))
-                    .execute(&mut conn)
-                    .await;
+    let mut count = 0;
+    for file in trashed_files {
+        match crate::services::persistence::purge_trashed(&state.db, &file.id, Some(&uid), None)
+            .await
+        {
+            Ok(deleted) => count += deleted,
+            Err(AppError::NotFound(_)) => {} // Already removed as part of a subtree.
+            Err(error) => {
+                res.status_code(
+                    StatusCode::from_u16(error.status_code())
+                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                );
+                res.render(Json(ApiResponse::<()>::err(error.to_response())));
+                return;
             }
-
-            res.status_code(StatusCode::OK);
-            res.render(Json(ApiResponse::ok(
-                serde_json::json!({ "message": "Trash emptied", "count": count }),
-            )));
-        }
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
         }
     }
+    crate::services::persistence::request_gc(&state.db, &state.storage);
+    res.render(Json(ApiResponse::ok(
+        serde_json::json!({"message":"Trash emptied","count":count}),
+    )));
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +304,13 @@ pub async fn trash_count(depot: &mut Depot, res: &mut Response) {
 
     match f::files
         .filter(f::owner_id.eq(&uid))
+        .filter(
+            f::room_id.is_null().or(f::room_id.eq_any(
+                rm::room_members
+                    .filter(rm::user_id.eq(&uid))
+                    .select(rm::room_id.nullable()),
+            )),
+        )
         .filter(f::is_trashed.eq(true))
         .count()
         .get_result::<i64>(&mut conn)

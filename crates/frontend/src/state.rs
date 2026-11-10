@@ -106,6 +106,15 @@ pub struct FileResponse {
     pub document_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UploadResponse {
+    #[serde(flatten)]
+    pub file: FileResponse,
+    #[serde(default)]
+    pub import_warnings: Vec<String>,
+    pub original_download_url: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // API client helpers
 // ---------------------------------------------------------------------------
@@ -298,10 +307,34 @@ pub fn download_text_file(file_name: &str, contents: &str) -> Result<(), String>
 /// Export a document via the authenticated POST endpoint and trigger a
 /// browser download of the returned bytes.
 pub async fn export_document(doc_id: &str, format: &str, token: &str) -> Result<(), String> {
-    let url = format!("{API_BASE}/documents/{doc_id}/export/{format}");
+    authenticated_download(
+        &format!("{API_BASE}/documents/{doc_id}/export/{format}"),
+        "POST",
+        &format!("export.{format}"),
+        token,
+    )
+    .await
+}
 
+pub async fn download_original(url: &str, filename: &str, token: &str) -> Result<(), String> {
+    let path = url.strip_suffix("?original=true").unwrap_or(url);
+    if !path.starts_with("/api/v1/files/")
+        || !path.ends_with("/download")
+        || path.contains(['?', '#', '\\'])
+    {
+        return Err("Invalid original file download URL".into());
+    }
+    authenticated_download(url, "GET", filename, token).await
+}
+
+async fn authenticated_download(
+    url: &str,
+    method: &str,
+    fallback_name: &str,
+    token: &str,
+) -> Result<(), String> {
     let opts = RequestInit::new();
-    opts.set_method("POST");
+    opts.set_method(method);
     opts.set_mode(RequestMode::SameOrigin);
 
     let headers = Headers::new().map_err(|e| format!("{:?}", e))?;
@@ -312,7 +345,7 @@ pub async fn export_document(doc_id: &str, format: &str, token: &str) -> Result<
     }
     opts.set_headers(&headers);
 
-    let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| format!("{:?}", e))?;
+    let request = Request::new_with_str_and_init(url, &opts).map_err(|e| format!("{:?}", e))?;
     let window = web_sys::window().ok_or_else(|| "no global window object".to_string())?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
@@ -345,7 +378,7 @@ pub async fn export_document(doc_id: &str, format: &str, token: &str) -> Result<
                 .map(|part| part.trim_matches(|c| c == '"' || c == ' ').to_string())
         })
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("export.{format}"));
+        .unwrap_or_else(|| fallback_name.to_owned());
 
     let blob_promise = resp.blob().map_err(|e| format!("{:?}", e))?;
     let blob_value = JsFuture::from(blob_promise)
@@ -378,7 +411,7 @@ pub async fn upload_file(
     file: File,
     parent_id: Option<Uuid>,
     token: &str,
-) -> Result<FileResponse, String> {
+) -> Result<UploadResponse, String> {
     let url = format!("{API_BASE}/files/upload");
     let form = FormData::new().map_err(|e| format!("{:?}", e))?;
     form.append_with_blob_and_filename("file", &file, &file.name())

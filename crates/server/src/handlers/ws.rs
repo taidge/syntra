@@ -1,335 +1,310 @@
-use std::sync::Arc;
-
+use crate::middleware::auth::{AuthenticatedCredential, get_credential, validate_credential};
+use crate::services::collaboration::{self, Snapshot};
+use crate::state::AppState;
+use contrix_collab::CollabMessage;
+use contrix_core::{dto::ApiResponse, error::AppError};
 use salvo::prelude::*;
 use salvo::websocket::{Message, WebSocket, WebSocketUpgrade};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use contrix_collab::CollabMessage;
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-
-use crate::middleware::auth::get_user_id;
-use crate::state::AppState;
-
-// ---------------------------------------------------------------------------
-// GET /ws/collab/:document_id  (WebSocket upgrade)
-// ---------------------------------------------------------------------------
-
-#[handler]
-pub async fn collab_ws(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    let state = crate::require_app_state!(depot, res);
-    let user_id_str = match get_user_id(depot) {
-        Some(id) => id,
-        None => {
-            res.status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Auth("Not authenticated".into()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    let document_id_str: String = req.param("document_id").unwrap_or_default();
-
-    let user_id: Uuid = match user_id_str.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            res.status_code(StatusCode::BAD_REQUEST);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Validation("Invalid user id".into()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    let document_id: Uuid = match document_id_str.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            res.status_code(StatusCode::BAD_REQUEST);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Validation("Invalid document id".into()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    // Authorize: the user must have editor access to the underlying file before
-    // they may join the realtime session (read others' edits / write their own).
-    {
-        let mut conn = match state.db.get() {
-            Ok(c) => c,
-            Err(e) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::<()>::err(
-                    AppError::Database(e.to_string()).to_response(),
-                )));
-                return;
-            }
-        };
-        match crate::handlers::access::load_accessible_document(
-            &mut conn,
-            &document_id_str,
-            &user_id_str,
-            "editor",
-        )
+fn render_error(res: &mut Response, error: AppError) {
+    res.status_code(
+        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
+    res.render(Json(ApiResponse::<()>::err(error.to_response())));
+}
+async fn authorized(
+    state: &AppState,
+    credential: &AuthenticatedCredential,
+    id: Uuid,
+) -> Result<(), AppError> {
+    database_backpressure(id, || authorized_once(state, credential, id))
         .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                res.status_code(StatusCode::NOT_FOUND);
-                res.render(Json(ApiResponse::<()>::err(
-                    AppError::NotFound("Document not found".into()).to_response(),
-                )));
-                return;
+        .inspect_err(|error| {
+            tracing::warn!(document=%id, user=%credential.user_id, %error, "Collaboration revalidation unavailable or denied");
+        })
+}
+
+/// Wait on bounded database contention, never on a cached authorization result.
+/// The caller retains at most one pending frame and sends no document content
+/// or ACK while the full credential/ACL check is unavailable.
+async fn database_backpressure<T, F, Work>(id: Uuid, mut work: F) -> Result<T, AppError>
+where
+    F: FnMut() -> Work,
+    Work: std::future::Future<Output = Result<T, AppError>>,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut delay = std::time::Duration::from_millis(10);
+    let mut deferred = false;
+    loop {
+        match tokio::time::timeout_at(deadline, work()).await {
+            Ok(Err(error)) if error.is_transient_database() => {
+                if !deferred {
+                    tracing::debug!(document=%id, "Database backpressure; pausing collaboration until revalidation succeeds");
+                    deferred = true;
+                }
+                tokio::time::sleep_until((tokio::time::Instant::now() + delay).min(deadline)).await;
+                delay = (delay * 2).min(std::time::Duration::from_millis(100));
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
             }
-            Err(e) => {
-                let code = match &e {
-                    AppError::Forbidden(_) => StatusCode::FORBIDDEN,
-                    AppError::NotFound(_) => StatusCode::NOT_FOUND,
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                };
-                res.status_code(code);
-                res.render(Json(ApiResponse::<()>::err(e.to_response())));
-                return;
+            Ok(result) => return result,
+            Err(_) => {
+                return Err(AppError::Database(
+                    "database operation timed out; cleanup remains admitted".into(),
+                ));
             }
         }
     }
+}
 
-    // Fetch username for the collab session.
+async fn authorized_once(
+    state: &AppState,
+    credential: &AuthenticatedCredential,
+    id: Uuid,
+) -> Result<(), AppError> {
+    validate_credential(state, credential, &format!("/api/v1/ws/collab/{id}")).await?;
+    let mut db = state.db.clone();
+    crate::handlers::access::load_accessible_document(
+        &mut db,
+        &id.to_string(),
+        &credential.user_id,
+        "editor",
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("Document not found".into()))?;
+    Ok(())
+}
+#[handler]
+pub async fn collab_ws(req: &mut Request, depot: &mut Depot, res: &mut Response) {
+    let state = crate::require_app_state!(depot, res);
+    let Some(credential) = get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let id = match req
+        .param::<String>("document_id")
+        .and_then(|id| id.parse::<Uuid>().ok())
+    {
+        Some(id) => id,
+        None => {
+            render_error(res, AppError::Validation("Invalid document id".into()));
+            return;
+        }
+    };
+    if let Err(error) = authorized(&state, &credential, id).await {
+        render_error(res, error);
+        return;
+    }
+    let user = match credential.user_id.parse::<Uuid>() {
+        Ok(user) => user,
+        Err(_) => {
+            render_error(res, AppError::Auth("Invalid user".into()));
+            return;
+        }
+    };
     let username = {
         use contrix_core::schema::users::dsl as u;
         use diesel::prelude::*;
         use horme::RunQueryDsl;
-        let mut conn = state.db.clone();
-        let uname = {
-            u::users
-                .filter(u::id.eq(&user_id_str))
-                .select(u::username)
-                .first::<String>(&mut conn)
-                .await
-                .ok()
-        };
-        uname.unwrap_or_else(|| "anonymous".to_string())
+        let mut db = state.db.clone();
+        match u::users
+            .find(&credential.user_id)
+            .select(u::username)
+            .first::<String>(&mut db)
+            .await
+        {
+            Ok(name) => name,
+            Err(error) => {
+                render_error(res, error.into());
+                return;
+            }
+        }
     };
-
-    let collab = state.collab.clone();
-    let state_clone = state.clone();
-
     let _ = WebSocketUpgrade::new()
-        .upgrade(req, res, move |ws| {
-            handle_ws(ws, collab, state_clone, document_id, user_id, username)
+        .max_message_size(collaboration::MAX_MESSAGE_BYTES)
+        .max_frame_size(collaboration::MAX_MESSAGE_BYTES)
+        .upgrade(req, res, move |socket| {
+            handle_ws(socket, state, credential, id, user, username)
         })
         .await;
 }
-
-async fn handle_ws(
-    mut ws: WebSocket,
-    collab: contrix_collab::CollabManager,
-    state: Arc<AppState>,
-    document_id: Uuid,
-    user_id: Uuid,
-    username: String,
-) {
-    let mut rx: broadcast::Receiver<CollabMessage> =
-        match collab.join_session(document_id, user_id, username).await {
-            Ok(r) => r,
-            Err(_) => return,
-        };
-
-    // Establish both the version baseline and durable document snapshot.
-    // Reconnecting editors must not keep a stale pre-disconnect HTTP snapshot.
-    let version = collab.session_version(document_id).await.unwrap_or(0);
-    if !send_snapshot(&mut ws, &state, document_id, version).await {
-        collab.leave_session(document_id, user_id).await;
-        return;
-    }
-
-    loop {
-        tokio::select! {
-                    // Broadcast channel -> WebSocket (send to client).
-                    msg = rx.recv() => {
-                        match msg {
-                            Ok(collab_msg) => {
-                                if let Ok(text) = serde_json::to_string(&collab_msg)
-                                    && ws.send(Message::text(text)).await.is_err() {
-                                        break;
-                                    }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {
-                                let version = collab.session_version(document_id).await.unwrap_or(0);
-                                if !send_snapshot(&mut ws, &state, document_id, version).await { break; }
-                                continue;
-                            }
-                            Err(broadcast::error::RecvError::Closed) => {
-                                break;
-                            }
-                        }
-                    }
-                    // WebSocket -> broadcast channel (receive from client).
-                    msg = ws.recv() => {
-                        match msg {
-                            Some(Ok(msg)) => {
-                                if let Ok(text) = msg.as_str()
-                                    && let Ok(collab_msg) = serde_json::from_str::<CollabMessage>(text) {
-                                        match collab_msg {
-                                            CollabMessage::Operation(mut op) => {
-                                                // Never trust the client-supplied author;
-                                                // bind the operation to the authenticated user.
-                                                op.user_id = user_id;
-                                                match collab.apply_operation(document_id, op).await {
-                                                    Ok((version, applied_op)) => {
-                                                        // Persist the transformed operation that the
-                                                        // server actually broadcast/applied, not the
-                                                        // client's pre-transform payload.
-                                                        if let Ok(mut conn) = state.db.get() {
-                                                            use contrix_core::models::NewOperationLogEntry;
-                                                            use contrix_core::schema::operation_log::dsl as ol;
-
-        use horme::RunQueryDsl;
-                                                            let entry = NewOperationLogEntry {
-                                                                id: Uuid::new_v4().to_string(),
-                                                                document_id: document_id.to_string(),
-                                                                user_id: applied_op.user_id.to_string(),
-                                                                op_type: serde_json::to_string(&applied_op.op_type).unwrap_or_default(),
-                                                                op_data: serde_json::to_string(&applied_op).unwrap_or_default(),
-                                                                version: version as i32,
-                                                                created_at: chrono::Utc::now().to_rfc3339(),
-                                                            };
-                                                            if let Err(error) = diesel::insert_into(ol::operation_log)
-                                                                .values(&entry)
-                                                                .execute(&mut conn).await
-                                                            {
-                                                                tracing::error!(
-                                                                    document_id = %document_id,
-                                                                    version,
-                                                                    "failed to persist collaboration operation: {error}"
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                    Err(error) => {
-                                                        let response = CollabMessage::Error {
-                                                            message: error,
-                                                        };
-                                                        if let Ok(text) = serde_json::to_string(&response)
-                                                            && ws.send(Message::text(text)).await.is_err()
-                                                        {
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            CollabMessage::CursorUpdate(mut cursor) => {
-                                                // Bind the cursor to the authenticated
-                                                // user so peers can't be impersonated.
-                                                cursor.user_id = user_id;
-                                                collab.update_cursor(document_id, cursor).await;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                            }
-                            Some(Err(_)) | None => {
-                                // Client disconnected.
-                                break;
-                            }
-                        }
-                    }
-                }
-    }
-
-    // Clean up: leave session.
-    collab.leave_session(document_id, user_id).await;
+async fn send(ws: &mut WebSocket, message: &CollabMessage) -> bool {
+    let Ok(text) = serde_json::to_string(message) else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ws.send(Message::text(text))
+        )
+        .await,
+        Ok(Ok(()))
+    )
 }
 
+async fn close_with_error(ws: &mut WebSocket, error: &AppError) {
+    let (code, reason) = match error {
+        error if error.is_transient_database() => {
+            (1013u16, "Database busy; reconnect to resynchronize")
+        }
+        AppError::Auth(_) | AppError::Forbidden(_) | AppError::NotFound(_) => {
+            (1008u16, "Document access is no longer available")
+        }
+        _ => (
+            1011u16,
+            "Collaboration unavailable; reconnect to resynchronize",
+        ),
+    };
+    send(
+        ws,
+        &CollabMessage::Error {
+            message: reason.into(),
+        },
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        ws.send(Message::close_with(code, reason)),
+    )
+    .await;
+}
 async fn send_snapshot(
     ws: &mut WebSocket,
     state: &AppState,
-    document_id: Uuid,
-    version: u64,
-) -> bool {
-    let (message, available) = match durable_snapshot(&state.db, document_id).await {
-        Ok(content) => (CollabMessage::DocumentState { content, version }, true),
-        Err(error) => {
-            tracing::warn!(%document_id, %error, "Collaboration snapshot unavailable");
-            (
-                CollabMessage::Error {
-                    message: "Document temporarily unavailable; reconnect to retry".into(),
-                },
-                false,
-            )
-        }
-    };
-    let Ok(text) = serde_json::to_string(&message) else {
-        return false;
-    };
-    let sent = ws.send(Message::text(text)).await.is_ok();
-    available && sent
-}
-
-async fn durable_snapshot(
-    database: &crate::state::DbPool,
-    document_id: Uuid,
-) -> Result<serde_json::Value, contrix_core::error::AppError> {
-    use contrix_core::schema::documents::dsl as documents;
-    use diesel::prelude::*;
-    use horme::RunQueryDsl;
-    let mut conn = database.clone();
-    let content = documents::documents
-        .filter(documents::id.eq(document_id.to_string()))
-        .select(documents::content)
-        .first::<Option<String>>(&mut conn)
-        .await?;
-    match content {
-        Some(content) => serde_json::from_str(&content).map_err(|error| {
-            contrix_core::error::AppError::Internal(format!("Invalid stored document: {error}"))
-        }),
-        None => Ok(serde_json::Value::Null),
-    }
-}
-
-#[cfg(test)]
-mod snapshot_tests {
-    use super::*;
-    use horme::{GetConnection, RunQueryDsl};
-
-    #[tokio::test]
-    async fn database_failure_never_becomes_an_empty_document_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let database = crate::state::DbPool::with_timeouts(
-            &directory.path().join("snapshot.sqlite").to_string_lossy(),
-            1,
-            std::time::Duration::from_millis(250),
-            std::time::Duration::from_secs(3),
-            std::time::Duration::from_millis(30),
-        )
-        .unwrap();
-        let mut provider = database.clone();
-        diesel::sql_query("CREATE TABLE documents(id TEXT PRIMARY KEY, content TEXT)")
-            .execute(&mut provider)
-            .await
-            .unwrap();
-        let id = Uuid::new_v4();
-        diesel::sql_query("INSERT INTO documents(id, content) VALUES (?, ?)")
-            .bind::<diesel::sql_types::Text, _>(id.to_string())
-            .bind::<diesel::sql_types::Text, _>(r#"{"cells":{"A1":"preserve"}}"#)
-            .execute(&mut provider)
-            .await
-            .unwrap();
-        let expected = serde_json::json!({"cells":{"A1":"preserve"}});
-        assert_eq!(durable_snapshot(&database, id).await.unwrap(), expected);
-        let lease = provider.get_mut_conn().await.unwrap();
-        assert!(durable_snapshot(&database, id).await.is_err());
-        drop(lease);
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while database.state().admitted_operations != 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    credential: &AuthenticatedCredential,
+    id: Uuid,
+) -> Option<u64> {
+    match database_backpressure(id, || collaboration::snapshot(&state.db, id)).await {
+        Ok(Snapshot {
+            content, version, ..
+        }) => {
+            if let Err(error) = authorized(state, credential, id).await {
+                close_with_error(ws, &error).await;
+                return None;
             }
-        })
-        .await
-        .expect("cancelled checkout and lease cleanup retire");
-        assert_eq!(durable_snapshot(&database, id).await.unwrap(), expected);
-        assert!(durable_snapshot(&database, Uuid::new_v4()).await.is_err());
+            let version = u64::try_from(version).ok()?;
+            send(ws, &CollabMessage::DocumentState { content, version })
+                .await
+                .then_some(version)
+        }
+        Err(error) => {
+            tracing::warn!(%id,%error,"Collaboration snapshot unavailable");
+            close_with_error(ws, &error).await;
+            None
+        }
     }
+}
+async fn handle_ws(
+    mut ws: WebSocket,
+    state: Arc<AppState>,
+    credential: AuthenticatedCredential,
+    id: Uuid,
+    user: Uuid,
+    username: String,
+) {
+    // Subscribe before loading the snapshot. Queued state messages are filtered
+    // by the snapshot's durable version, eliminating the subscribe/read race.
+    let Ok(mut receiver) = state.collab.join_session(id, user, username).await else {
+        return;
+    };
+    // The handshake and upgrade have async gaps. A credential revoked while
+    // upgrading must not receive even its first document body.
+    if let Err(error) = authorized(&state, &credential, id).await {
+        close_with_error(&mut ws, &error).await;
+        state.collab.leave_session(id, user).await;
+        return;
+    }
+    let Some(mut observed) = send_snapshot(&mut ws, &state, &credential, id).await else {
+        state.collab.leave_session(id, user).await;
+        return;
+    };
+    let mut revalidate = tokio::time::interval(std::time::Duration::from_secs(2));
+    let mut close_error = None;
+    loop {
+        tokio::select! {
+            _=revalidate.tick()=>{
+                if let Err(error)=authorized(&state,&credential,id).await {close_error=Some(error);break;}
+                // Also detect commits made by another server process. A durable
+                // snapshot removes dependence on in-memory broadcast delivery.
+                match database_backpressure(id,||collaboration::snapshot(&state.db,id)).await {
+                    Ok(current) if current.version as u64>observed=>{
+                        if let Err(error)=authorized(&state,&credential,id).await {close_error=Some(error);break;}
+                        observed=current.version as u64;
+                        if !send(&mut ws,&CollabMessage::DocumentState{content:current.content,version:observed}).await{break;}
+                    }
+                    Err(error)=>{close_error=Some(error);break;},
+                    _=>{}
+                }
+            }
+            received=receiver.recv()=>{
+                if let Err(error)=authorized(&state,&credential,id).await {close_error=Some(error);break;}
+                match received{
+                    Ok(CollabMessage::DocumentState{content,version})=>{
+                        if version<=observed{continue;}
+                        observed=version;
+                        if !send(&mut ws,&CollabMessage::DocumentState{content,version}).await{break;}
+                    }
+                    Ok(message)=>{
+                        if !send(&mut ws,&message).await{break;}
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_))=>{
+                        // Discard all buffered state covered by the new snapshot.
+                        receiver=receiver.resubscribe();
+                        let Some(version)=send_snapshot(&mut ws,&state,&credential,id).await else{break;};
+                        observed=version;
+                    }
+                    Err(broadcast::error::RecvError::Closed)=>break,
+                }
+            }
+            received=ws.recv()=>{
+                let Some(Ok(message))=received else{break;};
+                if message.is_close(){break;}
+                if let Err(error)=authorized(&state,&credential,id).await {close_error=Some(error);break;}
+                let Ok(text)=message.as_str() else{continue;};
+                let response=match serde_json::from_str::<CollabMessage>(text){
+                    Ok(CollabMessage::Operation(mut operation))=>{
+                        operation.user_id=user;
+                        let op_id=operation.id.clone();
+                        match collaboration::commit_operation_with_credential(&state,id,operation,&credential).await{
+                            Ok(current)=>{
+                                if let Err(error)=authorized(&state,&credential,id).await {close_error=Some(error);break;}
+                                let version=current.version as u64;
+                                // Only the committing sender receives an ACK.
+                                // Both document and operation record are durable.
+                                if version>observed{
+                                    observed=version;
+                                    if !send(&mut ws,&CollabMessage::DocumentState{content:current.content,version}).await{break;}
+                                }
+                                Some(CollabMessage::Ack{op_id})
+                            }
+                            Err(error)=>Some(CollabMessage::Error{message:error.to_string()}),
+                        }
+                    }
+                    Ok(CollabMessage::CursorUpdate(mut cursor))=>{
+                        cursor.user_id=user;
+                        state.collab.update_cursor(id,cursor).await;None
+                    }
+                    Ok(CollabMessage::SyncRequest{..})=>{
+                        let Some(version)=send_snapshot(&mut ws,&state,&credential,id).await else{break;};
+                        observed=version;None
+                    }
+                    Ok(_)=>Some(CollabMessage::Error{message:"Unsupported client message".into()}),
+                    Err(_)=>Some(CollabMessage::Error{message:"Invalid collaboration message".into()}),
+                };
+                if let Some(response)=response
+                    && !send(&mut ws,&response).await{break;}
+            }
+        }
+    }
+    if let Some(error) = close_error {
+        close_with_error(&mut ws, &error).await;
+    } else {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), ws.send(Message::close()))
+            .await;
+    }
+    state.collab.leave_session(id, user).await;
 }

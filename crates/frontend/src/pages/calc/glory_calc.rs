@@ -1,5 +1,7 @@
 //! Application-owned workbook state and semantic Glory/Sapid presentation.
 use super::*;
+#[path = "snapshot_merge.rs"]
+mod snapshot_merge;
 
 #[cfg(target_arch = "wasm32")]
 #[path = "cell_events.rs"]
@@ -11,14 +13,76 @@ mod clipboard_events;
 #[path = "pointer_events.rs"]
 mod pointer_events;
 
+fn cell_input_text(cell: &serde_json::Value) -> String {
+    if let Some(formula) = cell["formula"].as_str() {
+        if formula.starts_with('=') {
+            formula.into()
+        } else {
+            format!("={formula}")
+        }
+    } else {
+        cell_value_to_string(&cell["value"])
+    }
+}
+fn calculated_text(value: &contrix_doc_engine::calc::CellValue) -> String {
+    use contrix_doc_engine::calc::CellValue;
+    match value {
+        CellValue::Empty => String::new(),
+        CellValue::Number(n) => format_number_default(*n),
+        CellValue::Boolean(v) => if *v { "TRUE" } else { "FALSE" }.into(),
+        CellValue::Text(s) | CellValue::Date(s) => s.clone(),
+        CellValue::Error(s) => format!("#ERR: {s}"),
+    }
+}
+
+/// Apply only properties represented and changed in the editing surface.
+fn merge_visible_delta(
+    target: &mut serde_json::Value,
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) {
+    if before == after {
+        return;
+    }
+    if let (Some(old), Some(new)) = (before.as_object(), after.as_object()) {
+        if !target.is_object() {
+            *target = serde_json::json!({});
+        }
+        for (key, value) in new {
+            let previous = old.get(key).unwrap_or(&serde_json::Value::Null);
+            // IndexMut inserts Null for a missing key. Do not touch unchanged
+            // properties: bool/enumeration fields must retain serde defaults.
+            if previous != value {
+                merge_visible_delta(&mut target[key], previous, value);
+            }
+        }
+    } else {
+        *target = after.clone();
+    }
+}
+
+/// Calculation is independent of visual formatting and legacy style schemas.
+#[derive(serde::Deserialize)]
+struct CalculationCell {
+    value: contrix_doc_engine::calc::CellValue,
+    #[serde(default)]
+    formula: Option<String>,
+}
+
+type CalculatedCells = HashMap<CellKey, contrix_doc_engine::calc::CellValue>;
+type CalculationCache = Option<(u64, CalculatedCells)>;
+
 #[derive(Clone)]
 struct Book {
     snapshot: CalcSnapshot,
     content: serde_json::Value,
+    baseline: serde_json::Value,
     undo: Vec<(CalcSnapshot, serde_json::Value)>,
     redo: Vec<(CalcSnapshot, serde_json::Value)>,
     revision: u64,
     dirty: bool,
+    calculation: RefCell<CalculationCache>,
+    conflict: Option<serde_json::Value>,
 }
 impl Default for Book {
     fn default() -> Self {
@@ -30,10 +94,13 @@ impl Default for Book {
                 sheets: vec!["Sheet1".into()],
             },
             content: serde_json::json!({"sheets": []}),
+            baseline: serde_json::Value::Null,
             undo: Vec::new(),
             redo: Vec::new(),
             revision: 0,
             dirty: false,
+            calculation: RefCell::new(None),
+            conflict: None,
         }
     }
 }
@@ -43,17 +110,77 @@ impl Book {
         if sheets.is_empty() {
             sheets.push("Sheet1".into());
         }
+        self.calculation.borrow_mut().take();
+        self.conflict = None;
         self.snapshot = CalcSnapshot {
             sheets,
             cells,
             styles,
             merged_cells,
         };
+        self.baseline = content.clone();
         self.content = content;
         self.undo.clear();
         self.redo.clear();
         self.dirty = false;
         self.revision += 1;
+    }
+    fn apply_snapshot(&mut self, remote: serde_json::Value) -> bool {
+        if !self.dirty {
+            self.hydrate(remote);
+            return true;
+        }
+        if self.conflict.is_some() {
+            self.conflict = Some(remote);
+            return false;
+        }
+        let local = self.serialize_raw();
+        let Some(merged) = snapshot_merge::merge(&self.baseline, &local, &remote) else {
+            if self.baseline.is_null() && !self.content["id"].is_string() {
+                self.content = remote.clone();
+            }
+            self.conflict = Some(remote);
+            return false;
+        };
+        if !merged.pending {
+            self.hydrate(remote);
+            return true;
+        }
+        let rebase = |history: Vec<(CalcSnapshot, serde_json::Value)>| {
+            history
+                .into_iter()
+                .filter_map(|(snapshot, content)| {
+                    let old = Book {
+                        snapshot,
+                        content,
+                        ..Default::default()
+                    }
+                    .serialize_raw();
+                    let content = merged.rebase_history(&old)?;
+                    let mut book = Book::default();
+                    book.hydrate(content);
+                    Some((book.snapshot, book.content))
+                })
+                .collect()
+        };
+        let undo = rebase(std::mem::take(&mut self.undo));
+        let redo = rebase(std::mem::take(&mut self.redo));
+        self.hydrate(merged.content.clone());
+        self.baseline = remote;
+        self.undo = undo;
+        self.redo = redo;
+        self.dirty = true;
+        true
+    }
+    fn observe_commit(&mut self, committed: serde_json::Value, revision: Option<u64>) {
+        self.baseline = committed.clone();
+        if revision == Some(self.revision) {
+            self.content = committed;
+            self.dirty = false;
+        }
+    }
+    fn structure_changed(&mut self) {
+        self.content["collaboration_structure"] = serde_json::json!(uuid::Uuid::new_v4());
     }
     fn checkpoint(&mut self) {
         self.undo
@@ -65,10 +192,11 @@ impl Book {
         self.changed();
     }
     fn changed(&mut self) {
+        self.calculation.borrow_mut().take();
         self.revision += 1;
         self.dirty = true;
     }
-    fn serialize(&self) -> serde_json::Value {
+    fn serialize_raw(&self) -> serde_json::Value {
         let snap = &self.snapshot;
         let mut root = self.content.as_object().cloned().unwrap_or_default();
         let sheets = snap
@@ -97,22 +225,58 @@ impl Book {
                     .filter(|key| key.0 == si)
                     .map(|key| (key.1, key.2))
                     .collect();
-                let cells = keys.into_iter().map(|(r,c)| {
-                let value = snap.cells.get(&(si,r,c)).cloned().unwrap_or_default();
-                let mut cell = if value.starts_with('=') {
-                    serde_json::json!({"formula":value,"value":{"type":"Empty"}})
-                } else if value.is_empty() {
-                    serde_json::json!({"formula":null,"value":{"type":"Empty"}})
-                } else if let Some(n) = value.parse::<f64>().ok().filter(|n| n.is_finite()) {
-                    serde_json::json!({"formula":null,"value":{"type":"Number","value":n}})
-                } else {
-                    serde_json::json!({"formula":null,"value":{"type":"Text","value":value}})
-                };
-                if let Some(style) = snap.styles.get(&(si,r,c)).and_then(style_to_json) {
-                    cell["format"] = style;
-                }
-                serde_json::json!([{"row":r,"col":c},cell])
-            }).collect();
+                let original_cells = workbook_cells(&self.content);
+                let cells = keys
+                    .into_iter()
+                    .map(|(r, c)| {
+                        let value = snap.cells.get(&(si, r, c)).cloned().unwrap_or_default();
+                        let original = original_cells.get(&(si, r, c));
+                        let original_display = original.map(cell_input_text);
+                        let mut cell = original
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({"comment":null}));
+                        if original_display.as_deref() != Some(value.as_str()) {
+                            let (formula, typed) = if value.starts_with('=') {
+                                (
+                                    serde_json::json!(value),
+                                    serde_json::json!({"type":"Empty"}),
+                                )
+                            } else if value.is_empty() {
+                                (serde_json::Value::Null, serde_json::json!({"type":"Empty"}))
+                            } else if let Some(n) =
+                                value.parse::<f64>().ok().filter(|n| n.is_finite())
+                            {
+                                (
+                                    serde_json::Value::Null,
+                                    serde_json::json!({"type":"Number","value":n}),
+                                )
+                            } else {
+                                (
+                                    serde_json::Value::Null,
+                                    serde_json::json!({"type":"Text","value":value}),
+                                )
+                            };
+                            cell["formula"] = formula;
+                            cell["value"] = typed;
+                        }
+                        let previous_format = original
+                            .and_then(|cell| cell.get("format"))
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let previous_style = style_from_json(&previous_format);
+                        let next_style = snap.styles.get(&(si, r, c)).cloned().unwrap_or_default();
+                        if previous_style != next_style {
+                            let mut format = previous_format;
+                            merge_visible_delta(
+                                &mut format,
+                                &style_to_value(&previous_style),
+                                &style_to_value(&next_style),
+                            );
+                            cell["format"] = format;
+                        }
+                        serde_json::json!([{"row":r,"col":c},cell])
+                    })
+                    .collect();
                 let ranges: Vec<_> = snap
                     .merged_cells
                     .get(&si)
@@ -132,6 +296,162 @@ impl Book {
             .collect();
         root.insert("sheets".into(), serde_json::Value::Array(sheets));
         serde_json::Value::Object(root)
+    }
+    fn ensure_calculated(&self) {
+        if self
+            .calculation
+            .borrow()
+            .as_ref()
+            .is_some_and(|(revision, _)| *revision == self.revision)
+        {
+            return;
+        }
+        let mut values = HashMap::new();
+        let raw = self.serialize_raw();
+        for (si, sheet) in raw["sheets"].as_array().into_iter().flatten().enumerate() {
+            let mut engine = contrix_doc_engine::calc::Sheet::new(String::new());
+            for pair in sheet["cells"].as_array().into_iter().flatten() {
+                if let Ok(reference) = serde_json::from_value(pair[0].clone()) {
+                    let input = serde_json::from_value::<CalculationCell>(pair[1].clone());
+                    let (value, formula) = match input {
+                        Ok(input) => (input.value, input.formula),
+                        Err(_) => (
+                            contrix_doc_engine::calc::CellValue::Error(
+                                "#VALUE! Invalid stored cell value or formula".into(),
+                            ),
+                            None,
+                        ),
+                    };
+                    engine.cells.insert(
+                        reference,
+                        contrix_doc_engine::calc::Cell {
+                            value,
+                            formula,
+                            format: Default::default(),
+                            comment: None,
+                        },
+                    );
+                }
+            }
+            engine.recalculate();
+            for (reference, cell) in engine.cells {
+                values.insert((si, reference.row, reference.col), cell.value);
+            }
+        }
+        *self.calculation.borrow_mut() = Some((self.revision, values));
+    }
+    fn calculated_values(&self) -> CalculatedCells {
+        self.ensure_calculated();
+        self.calculation
+            .borrow()
+            .as_ref()
+            .expect("calculated")
+            .1
+            .clone()
+    }
+    fn display(&self, si: usize, row: u32, col: u32) -> String {
+        self.ensure_calculated();
+        self.calculation
+            .borrow()
+            .as_ref()
+            .expect("calculated")
+            .1
+            .get(&(si, row, col))
+            .map(calculated_text)
+            .unwrap_or_default()
+    }
+    fn numeric(&self, si: usize, row: u32, col: u32) -> Option<f64> {
+        self.ensure_calculated();
+        match self
+            .calculation
+            .borrow()
+            .as_ref()
+            .expect("calculated")
+            .1
+            .get(&(si, row, col))
+        {
+            Some(contrix_doc_engine::calc::CellValue::Number(n)) => Some(*n),
+            _ => None,
+        }
+    }
+    fn serialize(&self) -> serde_json::Value {
+        let mut content = self.serialize_raw();
+        let values = self.calculated_values();
+        for (si, sheet) in content["sheets"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            for pair in sheet["cells"].as_array_mut().into_iter().flatten() {
+                let row = pair[0]["row"].as_u64().unwrap_or(0) as u32;
+                let col = pair[0]["col"].as_u64().unwrap_or(0) as u32;
+                if !pair[1]["formula"].is_null()
+                    && let Some(value) = values.get(&(si, row, col))
+                {
+                    pair[1]["value"] = serde_json::to_value(value).expect("cell values serialize");
+                }
+            }
+        }
+        self.calculation.borrow_mut().take();
+        content
+    }
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn apply_remote(&mut self, payload: &serde_json::Value) {
+        if let Some((_user, patch)) = cell_patch_from_operation(payload) {
+            if self.dirty {
+                let base = workbook_cells(&self.content);
+                let local = workbook_cells(&self.serialize());
+                let key = (patch.sheet, patch.row, patch.col);
+                if base.get(&key) != local.get(&key) {
+                    let mut server = self.content.clone();
+                    apply_cell_patch(&mut server, &patch);
+                    self.conflict = Some(server);
+                    return;
+                }
+                let mut merged = self.serialize();
+                if !apply_cell_patch(&mut merged, &patch) {
+                    return;
+                }
+                let rebase = |history: Vec<(CalcSnapshot, serde_json::Value)>| {
+                    history
+                        .into_iter()
+                        .map(|(snapshot, content)| {
+                            let mut checkpoint = Book {
+                                snapshot,
+                                content,
+                                ..Default::default()
+                            };
+                            let mut merged = checkpoint.serialize();
+                            apply_cell_patch(&mut merged, &patch);
+                            checkpoint.hydrate(merged);
+                            (checkpoint.snapshot, checkpoint.content)
+                        })
+                        .collect()
+                };
+                let undo = rebase(std::mem::take(&mut self.undo));
+                let redo = rebase(std::mem::take(&mut self.redo));
+                let mut baseline = self.content.clone();
+                apply_cell_patch(&mut baseline, &patch);
+                self.hydrate(merged);
+                self.baseline = baseline.clone();
+                self.content = baseline;
+                self.undo = undo;
+                self.redo = redo;
+                self.dirty = true;
+            } else {
+                let mut content = self.serialize();
+                if apply_cell_patch(&mut content, &patch) {
+                    self.hydrate(content);
+                }
+            }
+        } else if let Some((_user, replacement)) = workbook_replace_from_operation(payload) {
+            if self.dirty {
+                self.conflict = Some(replacement);
+            } else {
+                self.hydrate(replacement);
+            }
+        }
     }
 }
 
@@ -475,6 +795,7 @@ impl Editor {
         };
         self.book.revise(|b| {
             b.checkpoint();
+            b.structure_changed();
             fn shift<T>(
                 map: &mut HashMap<CellKey, T>,
                 si: usize,
@@ -537,6 +858,7 @@ impl Editor {
         }
         self.book.revise(|b| {
             b.checkpoint();
+            b.structure_changed();
             let mut rows: Vec<_> = (first..=last)
                 .map(|r| {
                     let values: Vec<_> = (0..NUM_COLS)
@@ -850,11 +1172,16 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         clipboard_events::install(&scope, ed);
     }
     let loaded = scope.cage(false);
+    let version = scope.cage(0i32);
+    let remote_version = scope.cage(0i32);
+    let submitted = Rc::new(RefCell::new(None::<serde_json::Value>));
     let title = scope.cage("Spreadsheet".to_owned());
     let connected = scope.cage(ConnectionState::Connecting);
     let collaborators = scope.cage(Vec::<String>::new());
+    #[cfg(target_arch = "wasm32")]
     let session = scope.cage(None::<CollabHandle>);
     let token = auth.with(|a| a.token.clone().unwrap_or_default());
+    #[cfg(target_arch = "wasm32")]
     let self_id = auth.with(|a| {
         a.user
             .as_ref()
@@ -867,8 +1194,28 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         match api_get::<DocumentResponse>(&format!("/documents/{request_id}"), &load_token).await {
             Ok(doc) => {
                 title.revise(|v| *v = doc.name);
-                ed.book.revise(|b| b.hydrate(doc.content));
-                ed.status.revise(|v| *v = "Saved".into());
+                if doc.version >= version.get() {
+                    ed.book.revise(|book| {
+                        book.apply_snapshot(doc.content);
+                    });
+                    if ed.book.with(|book| book.conflict.is_some()) {
+                        remote_version.revise(|value| *value = doc.version);
+                        ed.status.revise(|value| {
+                            *value =
+                                "Conflict: local edits preserved while loading server state.".into()
+                        });
+                    } else {
+                        version.revise(|value| *value = doc.version);
+                        ed.status.revise(|value| {
+                            *value = if ed.book.with(|book| book.dirty) {
+                                "Unsaved changes"
+                            } else {
+                                "Saved"
+                            }
+                            .into()
+                        });
+                    }
+                }
                 loaded.revise(|v| *v = true);
                 ed.layout.revise(|v| *v += 1);
             }
@@ -881,6 +1228,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     {
         let weak = scope.downgrade();
         let author = self_id.clone();
+        let submitted = submitted.clone();
         let handle = connect_with_reconnect(
             id.clone(),
             token.clone(),
@@ -890,25 +1238,48 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                 }
                 match message {
                     CollabMessage::Operation(payload) => {
-                        let replacement =
-                            if let Some((user, patch)) = cell_patch_from_operation(&payload) {
-                                let mut content = ed.book.with(Book::serialize);
-                                if user == author || !apply_cell_patch(&mut content, &patch) {
-                                    return;
-                                }
-                                Some(content)
-                            } else {
-                                workbook_replace_from_operation(&payload)
-                                    .and_then(|(user, v)| (user != author).then_some(v))
-                            };
-                        if let Some(content) = replacement {
-                            ed.book.revise(|b| b.hydrate(content));
-                            ed.layout.revise(|v| *v += 1);
+                        if payload["user_id"].as_str() == Some(author.as_str()) {
+                            return;
                         }
-                    }
-                    CollabMessage::DocumentState { content, .. } if !ed.book.with(|b| b.dirty) => {
-                        ed.book.revise(|b| b.hydrate(content));
+                        ed.book.revise(|book| book.apply_remote(&payload));
+                        if ed.book.with(|book| book.conflict.is_some()) {
+                            ed.status.revise(|value| *value = "Conflict: local edits preserved. Reload to accept the server version or save a copy.".into());
+                        }
                         ed.layout.revise(|v| *v += 1);
+                    }
+                    CollabMessage::DocumentState {
+                        content,
+                        version: server_version,
+                    } => {
+                        let server_version = i32::try_from(server_version).unwrap_or(i32::MAX);
+                        if server_version <= version.get() {
+                            return;
+                        }
+                        let own_commit = submitted.borrow().as_ref() == Some(&content);
+                        if own_commit {
+                            ed.book.revise(|book| book.observe_commit(content, None));
+                            version.revise(|value| *value = server_version);
+                        } else {
+                            ed.book.revise(|book| {
+                                book.apply_snapshot(content);
+                            });
+                            if ed.book.with(|book| book.conflict.is_some()) {
+                                remote_version.revise(|value| *value = server_version);
+                                ed.status.revise(|value|*value="Conflict: local edits preserved. Choose a version before saving.".into());
+                            } else {
+                                version.revise(|value| *value = server_version);
+                                ed.status.revise(|value| {
+                                    *value = if ed.book.with(|book| book.dirty) {
+                                        "Unsaved changes"
+                                    } else {
+                                        "Saved"
+                                    }
+                                    .into()
+                                });
+                            }
+                            loaded.revise(|value| *value = true);
+                            ed.layout.revise(|value| *value += 1);
+                        }
                     }
                     CollabMessage::UserJoined {
                         user_id, username, ..
@@ -940,48 +1311,43 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
     }
     let timer = Rc::new(RefCell::new(None::<Timeout>));
     let saving = scope.cage(false);
+    let failed = scope.cage(false);
     let save: Rc<dyn Fn()> = Rc::new({
         let weak = scope.downgrade();
         let id = id.clone();
         let token = token.clone();
-        let user = self_id;
+        let submitted = submitted.clone();
         move || {
-            if !loaded.get() || saving.get() || !ed.book.with(|b| b.dirty) {
+            if !loaded.get()
+                || saving.get()
+                || !ed.book.with(|b| b.dirty)
+                || ed.book.with(|b| b.conflict.is_some())
+            {
                 return;
             }
             let Some(scope) = weak.upgrade() else {
                 return;
             };
-            let (content, revision, previous) = ed
-                .book
-                .with(|b| (b.serialize(), b.revision, b.content.clone()));
-            let operation = if let Some(patch) = single_cell_patch(&previous, &content) {
-                serde_json::json!({"type":"SetProperty","path":["workbook","sheets",patch.sheet.to_string(),"cells"],
-                    "key":format!("{}:{}",patch.row,patch.col),"value":patch.new_value,"old_value":patch.old_value})
-            } else {
-                serde_json::json!({"type":"Replace","path":["workbook"],"old_value":previous,"new_value":content})
-            };
-            session.with(|handle| {
-                if let Some(handle) = handle {
-                    let _ = handle.send_operation(&user, operation);
-                }
-            });
+            let (content, revision) = ed.book.with(|b| (b.serialize(), b.revision));
             let id = id.clone();
             let token = token.clone();
+            let expected_version = version.get();
+            *submitted.borrow_mut() = Some(content.clone());
+            failed.revise(|value| *value = false);
             saving.revise(|v| *v = true);
             ed.status.revise(|v| *v = "Saving…".into());
             let _ = scope.spawn(async move {
-                let req = serde_json::json!({"content":content});
+                let req =
+                    serde_json::json!({"content":content,"expected_version":expected_version});
                 match api_put::<serde_json::Value, _>(&format!("/documents/{id}"), &req, &token)
                     .await
                 {
-                    Ok(_) => {
-                        ed.book.revise(|b| {
-                            b.content = content;
-                            if b.revision == revision {
-                                b.dirty = false;
-                            }
-                        });
+                    Ok(response) => {
+                        if let Some(next_version)=response["version"].as_i64().and_then(|value|i32::try_from(value).ok())
+                            && next_version>=version.get() {
+                            ed.book.revise(|book|book.observe_commit(content,Some(revision)));
+                            version.revise(|value|*value=next_version);
+                        }
                         ed.status.revise(|v| {
                             *v = if ed.book.with(|b| b.dirty) {
                                 "Unsaved changes".into()
@@ -990,7 +1356,13 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                             }
                         });
                     }
-                    Err(error) => ed.status.revise(|v| *v = format!("Save failed: {error}")),
+                    Err(error) => {
+                        let advanced=version.get()>expected_version&&ed.book.with(|book|book.conflict.is_none());
+                        failed.revise(|value|*value = !advanced);
+                        ed.status.revise(|value|*value=if advanced {
+                            if ed.book.with(|book|book.dirty){"Concurrent changes merged; saving latest edits.".into()}else{"Saved".into()}
+                        }else{format!("Save failed: {error}. Local changes retained; retry Save or reload.")});
+                    }
                 }
                 saving.revise(|v| *v = false);
             });
@@ -1005,7 +1377,11 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             let _revision = ed.book.with(|b| b.revision);
             let busy = saving.get();
             timer.borrow_mut().take();
-            if loaded.get() && ed.book.with(|b| b.dirty) && !busy {
+            if loaded.get()
+                && ed.book.with(|b| b.dirty && b.conflict.is_none())
+                && !busy
+                && !failed.get()
+            {
                 ed.status.revise(|v| *v = "Unsaved changes".into());
                 let save = save.clone();
                 *timer.borrow_mut() = Some(Timeout::new(1500, move || save()));
@@ -1019,6 +1395,24 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         }
     });
     let formula_node = scope.cage(None);
+    let formula_reconcile = scope.cage(0_u64);
+    scope.effect({
+        let weak = scope.downgrade();
+        move || {
+            let node = formula_node.get();
+            if formula_reconcile.get() == 0 {
+                return;
+            }
+            if let (Some(scope), Some(node)) = (weak.upgrade(), node) {
+                // Escape can restore the last rendered value within one host tick.
+                // Reconcile the native draft after routing, even when the binding
+                // sees equal values and therefore does not emit a value patch.
+                if let Err(error) = scope.set_input_value(node, ed.formula.get_untracked()) {
+                    scope.report_error(error);
+                }
+            }
+        }
+    });
     let address = scope.cage("A1".to_owned());
     scope.effect(move || {
         let range = ed.range();
@@ -1075,6 +1469,41 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             let save = save.clone();
             move || save()
         }),
+        Box::new(when(
+            scope.bond(move || ed.book.with(|book| book.conflict.is_some())),
+            {
+                let save = save.clone();
+                move || {
+                    let save = save.clone();
+                    row().class("editor-conflict").fill((
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .label("Use server version")
+                            .on_press(move || {
+                                let remote = ed.book.with(|book| book.conflict.clone());
+                                if let Some(remote) = remote {
+                                    ed.book.revise(|book| book.hydrate(remote));
+                                    version.revise(|value| *value = remote_version.get());
+                                    failed.revise(|value| *value = false);
+                                    ed.status.revise(|value| *value = "Saved".into());
+                                }
+                            }),
+                        sapid::button()
+                            .theme(crate::components::ui::theme())
+                            .label("Keep my version")
+                            .on_press(move || {
+                                version.revise(|value| *value = remote_version.get());
+                                ed.book.revise(|book| {
+                                    book.conflict = None;
+                                    book.changed();
+                                });
+                                failed.revise(|value| *value = false);
+                                save();
+                            }),
+                    ))
+                }
+            },
+        )),
         action("Comments", move || comments_open.revise(|v| *v = !*v)),
         action("Version history", move || {
             versions_open.revise(|v| *v = !*v)
@@ -1597,7 +2026,12 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                                 let (r, c) = ed.active.get();
                                 ed.activate(((r + 1).min(NUM_ROWS - 1), c));
                             }
-                            glory::render::KeyboardCommand::Dismiss => ed.activate(ed.active.get()),
+                            glory::render::KeyboardCommand::Dismiss => {
+                                ed.activate(ed.active.get());
+                                formula_reconcile.revise(|revision| {
+                                    *revision = revision.wrapping_add(1);
+                                });
+                            }
                             _ => {}
                         }
                     }
@@ -1780,7 +2214,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         )),
         when(show_chart, move || widget(move|scope|chart_view(scope,ed).build(scope))),
         group().fill((crate::components::comments_pane::CommentsPane(scope.clone(),auth,id.clone(),comments_open),
-        crate::components::version_history::VersionHistory(scope.clone(),auth,id.clone(),versions_open),
+        crate::components::version_history::VersionHistory(scope.clone(),auth,id.clone(),versions_open, version),
         when(ai_open,{let id=id.clone();move||{let id=id.clone();widget(move|scope|crate::components::ai_assist::AiAssist(scope.clone(),auth,id.clone()).build(scope))}}),)),
         row().class("status-bar").fill((
             text().content(scope.bond(move || {
@@ -1791,10 +2225,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                     let values: Vec<_> = selected
                         .iter()
                         .filter_map(|(r, c)| {
-                            b.snapshot
-                                .cells
-                                .get(&(si, *r, *c))
-                                .and_then(|v| evaluated_numeric(v, si, &b.snapshot.cells))
+                            b.numeric(si, *r, *c)
                         })
                         .collect();
                     let sum: f64 = values.iter().sum();
@@ -2263,13 +2694,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                     let scope = cell_scope.upgrade().expect("live spreadsheet cell");
                     let value = scope.bond(move || {
                         ed.book.with(|b| {
-                            let raw = b
-                                .snapshot
-                                .cells
-                                .get(&(si, r, c))
-                                .map(String::as_str)
-                                .unwrap_or("");
-                            let value = evaluate_cell_display(raw, si, &b.snapshot.cells);
+                            let value = b.display(si, r, c);
                             let style = b
                                 .snapshot
                                 .styles
@@ -2483,14 +2908,9 @@ fn chart_view(scope: &Scope, ed: Editor) -> impl Widget {
                             (*bytes <= 256).then_some(ch)
                         })
                         .collect();
-                    let value = b
-                        .snapshot
-                        .cells
-                        .get(&(si, r, range.end.1))
-                        .and_then(|v| evaluated_numeric(v, si, &b.snapshot.cells))
-                        .filter(|value| {
-                            value.is_finite() && value.abs() <= sapid::charts::MAX_CHART_VALUE
-                        });
+                    let value = b.numeric(si, r, range.end.1).filter(|value| {
+                        value.is_finite() && value.abs() <= sapid::charts::MAX_CHART_VALUE
+                    });
                     (label, value)
                 })
                 .collect();
@@ -2753,5 +3173,368 @@ mod tests {
             view().build(scope)
         })).expect("validation runs in an active editor Owner");
         app.clear().expect("dispose test editor");
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    fn book() -> Book {
+        let mut workbook = contrix_doc_engine::Workbook::new("Review".into());
+        let sheet = &mut workbook.sheets[0];
+        sheet.set_cell(
+            0,
+            0,
+            contrix_doc_engine::calc::CellValue::Text("00123".into()),
+        );
+        sheet.set_cell(0, 1, contrix_doc_engine::calc::CellValue::Boolean(true));
+        sheet.set_cell(
+            0,
+            2,
+            contrix_doc_engine::calc::CellValue::Date("2026-11-09".into()),
+        );
+        sheet.set_cell(
+            0,
+            3,
+            contrix_doc_engine::calc::CellValue::Error("#N/A".into()),
+        );
+        let mut book = Book::default();
+        book.hydrate(serde_json::to_value(workbook).unwrap());
+        book
+    }
+    #[test]
+    fn unrelated_edit_preserves_native_types_and_formula_cache() {
+        let mut book = book();
+        let before = workbook_cells(&book.content);
+        book.checkpoint();
+        book.snapshot.cells.insert((0, 1, 0), "7".into());
+        book.snapshot.cells.insert((0, 1, 1), "=A2+1".into());
+        let content = book.serialize();
+        let after = workbook_cells(&content);
+        for col in 0..4 {
+            assert_eq!(before[&(0, 0, col)], after[&(0, 0, col)]);
+        }
+        assert_eq!(
+            after[&(0, 1, 1)]["value"],
+            serde_json::json!({"type":"Number","value":8.0})
+        );
+        assert_eq!(book.display(0, 1, 1), "8");
+        book.content["sheets"][0]["cells"][0][1]["format"]["wrap_text"] = serde_json::json!(true);
+        book.snapshot.styles.insert(
+            (0, 0, 0),
+            CellStyle {
+                bold: true,
+                ..Default::default()
+            },
+        );
+        let styled = book.serialize();
+        let styled_cells = workbook_cells(&styled);
+        assert_eq!(styled_cells[&(0, 0, 0)]["format"]["wrap_text"], true);
+        assert_eq!(styled_cells[&(0, 0, 0)]["format"]["bold"], true);
+        book.checkpoint();
+        book.snapshot.cells.insert((0, 1, 0), "9".into());
+        assert_eq!(book.display(0, 1, 1), "10");
+    }
+    #[test]
+    fn remote_other_cell_preserves_local_dirty_and_undo() {
+        let mut book = book();
+        let baseline = book.content.clone();
+        book.checkpoint();
+        book.snapshot.cells.insert((0, 1, 0), "local".into());
+        let patch = serde_json::json!({"user_id":"other","op_type":{"type":"SetProperty","path":["workbook","sheets","0","cells"],"key":"2:0","value":{"formula":null,"value":{"type":"Text","value":"remote"}},"old_value":null}});
+        book.apply_remote(&patch);
+        assert!(book.dirty);
+        assert_eq!(book.undo.len(), 1);
+        assert_eq!(book.snapshot.cells[&(0, 1, 0)], "local");
+        assert_eq!(book.snapshot.cells[&(0, 2, 0)], "remote");
+        assert_ne!(book.content, baseline);
+    }
+    #[test]
+    fn remote_replace_and_same_cell_do_not_destroy_pending_edits() {
+        let mut book = book();
+        book.checkpoint();
+        book.snapshot.cells.insert((0, 0, 0), "local".into());
+        let before = book.serialize();
+        let remote = serde_json::json!({"user_id":"other","op_type":{"type":"Replace","path":["workbook"],"new_value":book.content}});
+        book.apply_remote(&remote);
+        assert!(book.conflict.is_some());
+        assert!(book.dirty);
+        assert_eq!(book.serialize(), before);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_merge_regressions {
+    use super::*;
+    fn book() -> Book {
+        let workbook = contrix_doc_engine::Workbook::new("Merge".into());
+        let mut book = Book::default();
+        book.hydrate(serde_json::to_value(workbook).unwrap());
+        book
+    }
+    fn edit(book: &mut Book, row: u32, col: u32, value: &str) {
+        book.checkpoint();
+        book.snapshot.cells.insert((0, row, col), value.into());
+    }
+    fn peer(base: &serde_json::Value, row: u32, col: u32, value: &str) -> serde_json::Value {
+        let mut book = Book::default();
+        book.hydrate(base.clone());
+        edit(&mut book, row, col, value);
+        book.serialize()
+    }
+    #[test]
+    fn disjoint_snapshots_keep_pending_cells_and_rebase_undo_redo() {
+        let mut book = book();
+        let base = book.content.clone();
+        edit(&mut book, 0, 0, "local");
+        book.redo = book.undo.clone();
+        let remote = peer(&base, 0, 1, "remote");
+        assert!(book.apply_snapshot(remote.clone()));
+        assert!(book.dirty);
+        assert!(book.conflict.is_none());
+        assert_eq!(book.baseline, remote);
+        assert_eq!(book.display(0, 0, 0), "local");
+        assert_eq!(book.display(0, 0, 1), "remote");
+        assert_eq!(book.undo.len(), 1);
+        assert_eq!(book.redo.len(), 1);
+        for (snapshot, content) in book.undo.iter().chain(&book.redo) {
+            let checkpoint = Book {
+                snapshot: snapshot.clone(),
+                content: content.clone(),
+                ..Default::default()
+            };
+            assert_eq!(
+                checkpoint.display(0, 0, 1),
+                "remote",
+                "Undo/Redo cannot remove a collaborator's change"
+            );
+        }
+        let (snapshot, content) = book.undo.pop().unwrap();
+        book.snapshot = snapshot;
+        book.content = content;
+        book.changed();
+        assert_eq!(book.display(0, 0, 0), "");
+        assert_eq!(book.display(0, 0, 1), "remote");
+        assert!(book.apply_snapshot(book.baseline.clone()));
+        assert!(!book.dirty, "undoing back to server baseline is clean");
+    }
+    #[test]
+    fn overlapping_snapshot_preserves_local_value_history_and_baseline() {
+        let mut book = book();
+        let base = book.content.clone();
+        edit(&mut book, 0, 0, "local");
+        let remote = peer(&base, 0, 0, "different remote");
+        assert!(!book.apply_snapshot(remote.clone()));
+        assert_eq!(book.display(0, 0, 0), "local");
+        assert_eq!(book.baseline, base);
+        assert_eq!(book.conflict, Some(remote));
+        assert!(book.dirty);
+        assert_eq!(book.undo.len(), 1);
+    }
+    #[test]
+    fn derived_formula_cache_does_not_create_a_false_cell_conflict() {
+        let mut engine = contrix_doc_engine::Workbook::new("Formula".into());
+        engine.sheets[0].set_cell(0, 0, contrix_doc_engine::calc::CellValue::Number(1.0));
+        engine.sheets[0].set_formula(0, 1, "=A1+1".into());
+        engine.sheets[0].recalculate();
+        let base = serde_json::to_value(engine).unwrap();
+        let mut book = Book::default();
+        book.hydrate(base.clone());
+        edit(&mut book, 0, 2, "local");
+        let remote = peer(&base, 0, 0, "7");
+        assert!(book.apply_snapshot(remote));
+        assert!(book.dirty);
+        assert_eq!(book.display(0, 0, 1), "8");
+        assert_eq!(book.display(0, 0, 2), "local");
+        assert_eq!(
+            workbook_cells(&book.serialize())[&(0, 0, 1)]["value"],
+            serde_json::json!({"type":"Number","value":8.0})
+        );
+    }
+    #[test]
+    fn successive_snapshots_advance_common_baseline_without_losing_local_edits() {
+        let mut book = book();
+        let base = book.content.clone();
+        edit(&mut book, 0, 0, "local");
+        let first = peer(&base, 0, 1, "first remote");
+        assert!(book.apply_snapshot(first.clone()));
+        let second = peer(&first, 0, 2, "second remote");
+        assert!(book.apply_snapshot(second.clone()));
+        assert_eq!(book.baseline, second);
+        assert!(book.dirty);
+        assert!(book.conflict.is_none());
+        assert_eq!(book.display(0, 0, 0), "local");
+        assert_eq!(book.display(0, 0, 1), "first remote");
+        assert_eq!(book.display(0, 0, 2), "second remote");
+    }
+    #[test]
+    fn structural_or_metadata_changes_conflict_with_concurrent_cell_edits() {
+        let mut book = book();
+        let base = book.content.clone();
+        edit(&mut book, 0, 0, "local");
+        let mut remote = peer(&base, 0, 1, "shifted");
+        remote["collaboration_structure"] = serde_json::json!("row inserted");
+        assert!(!book.apply_snapshot(remote));
+        assert_eq!(book.display(0, 0, 0), "local");
+        let mut book = Book::default();
+        book.hydrate(base.clone());
+        book.checkpoint();
+        book.content["sheets"][0]["column_widths"]["0"] = serde_json::json!(180);
+        assert!(
+            !book.apply_snapshot(peer(&base, 0, 1, "remote")),
+            "metadata editing must not change the common baseline"
+        );
+        assert_eq!(book.content["sheets"][0]["column_widths"]["0"], 180);
+    }
+    #[test]
+    fn own_commit_keeps_newer_typing_and_sets_the_next_merge_baseline() {
+        let mut book = book();
+        edit(&mut book, 0, 0, "submitted");
+        let revision = book.revision;
+        let submitted = book.serialize();
+        edit(&mut book, 0, 0, "typed while saving");
+        book.observe_commit(submitted.clone(), Some(revision));
+        assert!(book.dirty);
+        assert_eq!(book.display(0, 0, 0), "typed while saving");
+        assert_eq!(book.baseline, submitted);
+        assert!(book.apply_snapshot(peer(&submitted, 0, 1, "remote")));
+        assert_eq!(book.display(0, 0, 0), "typed while saving");
+        assert_eq!(book.display(0, 0, 1), "remote");
+    }
+}
+
+#[cfg(test)]
+mod new_cell_format_regressions {
+    use super::*;
+    fn empty_book() -> Book {
+        let mut book = Book::default();
+        book.hydrate(
+            serde_json::to_value(contrix_doc_engine::Workbook::new("New styled cells".into()))
+                .unwrap(),
+        );
+        book
+    }
+    fn strict_cell(content: &serde_json::Value) -> contrix_doc_engine::calc::Cell {
+        let book: contrix_doc_engine::Workbook = serde_json::from_value(content.clone())
+            .expect("formatted new cells must deserialize as a complete native workbook");
+        book.sheets[0]
+            .get_cell(0, 0)
+            .expect("formatted input must not be skipped")
+            .clone()
+    }
+    #[test]
+    fn bold_on_a_new_number_keeps_typed_display_and_round_trip() {
+        let mut book = empty_book();
+        book.checkpoint();
+        book.snapshot.cells.insert((0, 0, 0), "5".into());
+        book.checkpoint();
+        book.snapshot.styles.insert(
+            (0, 0, 0),
+            CellStyle {
+                bold: true,
+                ..Default::default()
+            },
+        );
+        let raw = book.serialize_raw();
+        let cell = strict_cell(&raw);
+        assert!(matches!(
+            cell.value,
+            contrix_doc_engine::calc::CellValue::Number(5.0)
+        ));
+        assert!(cell.format.bold);
+        assert_eq!(book.display(0, 0, 0), "5");
+        book.hydrate(book.serialize());
+        assert_eq!(book.display(0, 0, 0), "5");
+        assert!(strict_cell(&book.content).format.bold);
+    }
+    #[test]
+    fn format_before_inline_input_keeps_text_and_native_font_fields() {
+        let mut book = empty_book();
+        book.checkpoint();
+        book.snapshot.styles.insert(
+            (0, 0, 0),
+            CellStyle {
+                font_family: "Arial".into(),
+                font_size: "18".into(),
+                underline: true,
+                ..Default::default()
+            },
+        );
+        let empty = book.serialize_raw();
+        let cell = strict_cell(&empty);
+        assert!(matches!(
+            cell.value,
+            contrix_doc_engine::calc::CellValue::Empty
+        ));
+        book.checkpoint();
+        book.snapshot
+            .cells
+            .insert((0, 0, 0), "Saved via shortcut".into());
+        assert_eq!(book.display(0, 0, 0), "Saved via shortcut");
+        let persisted = book.serialize();
+        let cell = strict_cell(&persisted);
+        assert!(
+            matches!(cell.value,contrix_doc_engine::calc::CellValue::Text(ref text) if text=="Saved via shortcut")
+        );
+        assert_eq!(cell.format.font_family.as_deref(), Some("Arial"));
+        assert_eq!(cell.format.font_size, Some(18.0));
+        assert!(cell.format.underline);
+        book.hydrate(persisted);
+        assert_eq!(book.display(0, 0, 0), "Saved via shortcut");
+    }
+    #[test]
+    fn delta_does_not_insert_null_for_unchanged_native_fields() {
+        let mut format = serde_json::json!({});
+        let before = style_to_value(&CellStyle::default());
+        let after = style_to_value(&CellStyle {
+            bold: true,
+            ..Default::default()
+        });
+        merge_visible_delta(&mut format, &before, &after);
+        assert_eq!(format, serde_json::json!({"bold":true}));
+        let parsed: contrix_doc_engine::calc::CellFormat = serde_json::from_value(format).unwrap();
+        assert!(parsed.bold);
+        assert!(!parsed.italic);
+    }
+    #[test]
+    fn legacy_malformed_visual_format_does_not_hide_values_or_break_formulas() {
+        let mut workbook = contrix_doc_engine::Workbook::new("Legacy".into());
+        workbook.sheets[0].set_cell(0, 0, contrix_doc_engine::calc::CellValue::Number(5.0));
+        workbook.sheets[0].set_formula(0, 1, "=A1+2".into());
+        let mut native = serde_json::to_value(workbook).unwrap();
+        let legacy_format = serde_json::json!({"bold":null,"horizontal_align":"legacy-unknown"});
+        for pair in native["sheets"][0]["cells"].as_array_mut().unwrap() {
+            pair[1]["format"] = legacy_format.clone();
+        }
+        let mut book = Book::default();
+        book.hydrate(native);
+        assert_eq!(book.display(0, 0, 0), "5");
+        assert_eq!(book.display(0, 0, 1), "7");
+        book.checkpoint();
+        book.snapshot.cells.insert((0, 0, 0), "9".into());
+        assert_eq!(book.display(0, 0, 1), "11");
+        let persisted = workbook_cells(&book.serialize());
+        for col in 0..2 {
+            assert_eq!(
+                persisted[&(0, 0, col)]["format"],
+                legacy_format,
+                "calculation must not overwrite the original format"
+            );
+        }
+        assert_eq!(
+            persisted[&(0, 0, 1)]["value"],
+            serde_json::json!({"type":"Number","value":11.0})
+        );
+    }
+    #[test]
+    fn malformed_typed_value_is_a_visible_error_instead_of_an_empty_cell() {
+        let mut workbook = contrix_doc_engine::Workbook::new("Invalid value".into());
+        workbook.sheets[0].set_cell(0, 0, contrix_doc_engine::calc::CellValue::Number(5.0));
+        let mut native = serde_json::to_value(workbook).unwrap();
+        native["sheets"][0]["cells"][0][1]["value"] =
+            serde_json::json!({"type":"Number","value":"invalid"});
+        let mut book = Book::default();
+        book.hydrate(native);
+        assert!(book.display(0, 0, 0).contains("#VALUE!"));
     }
 }

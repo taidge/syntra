@@ -4,7 +4,7 @@
 //! document.  Multiple users can join the session, apply operations, and
 //! see each other's cursor positions in real time via a broadcast channel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,10 @@ pub struct CollabSession {
     pub redo_stacks: HashMap<Uuid, Vec<Operation>>,
     /// Counter used to cycle through `USER_COLORS`.
     color_index: usize,
+    seen: HashSet<OpId>,
+    history_start: u64,
+    history_bytes: usize,
+    connections: HashMap<Uuid, usize>,
 }
 
 impl CollabSession {
@@ -129,6 +133,10 @@ impl CollabSession {
             undo_stacks: HashMap::new(),
             redo_stacks: HashMap::new(),
             color_index: 0,
+            seen: HashSet::new(),
+            history_start: 0,
+            history_bytes: 0,
+            connections: HashMap::new(),
         }
     }
 
@@ -150,6 +158,7 @@ impl CollabSession {
             last_active: Utc::now(),
         };
 
+        *self.connections.entry(user_id).or_default() += 1;
         self.participants.insert(user_id, cursor);
 
         // Notify existing participants.
@@ -164,7 +173,16 @@ impl CollabSession {
 
     /// Remove a user from the session and notify others.
     pub fn leave(&mut self, user_id: Uuid) {
+        if let Some(count) = self.connections.get_mut(&user_id) {
+            *count -= 1;
+            if *count != 0 {
+                return;
+            }
+        }
+        self.connections.remove(&user_id);
         self.participants.remove(&user_id);
+        self.undo_stacks.remove(&user_id);
+        self.redo_stacks.remove(&user_id);
         let _ = self.broadcast.send(CollabMessage::UserLeft { user_id });
     }
 
@@ -180,7 +198,10 @@ impl CollabSession {
                 op.base_version, self.version
             ));
         }
-        if self.operations.iter().any(|existing| existing.id == op.id) {
+        if op.base_version < self.history_start {
+            return Err("operation predates retained history; resynchronize".into());
+        }
+        if self.seen.contains(&op.id) {
             return Err("duplicate operation id".to_string());
         }
 
@@ -188,7 +209,7 @@ impl CollabSession {
         // was generated against. `base_version` is the server version the
         // client had seen — NOT the per-client Lamport counter, which bears no
         // relation to positions in the global `operations` log.
-        let base = (op.base_version as usize).min(self.operations.len());
+        let base = ((op.base_version - self.history_start) as usize).min(self.operations.len());
         let ops_to_transform = &self.operations[base..];
 
         for concurrent in ops_to_transform {
@@ -196,13 +217,20 @@ impl CollabSession {
         }
 
         self.version += 1;
-        self.operations.push(op.clone());
+        self.record(op.clone());
 
         // Track the operation on the user's undo stack and clear redo.
         self.undo_stacks
             .entry(op.user_id)
             .or_default()
             .push(op.clone());
+        let undo = self.undo_stacks.entry(op.user_id).or_default();
+        while undo.len() > 100 {
+            undo.remove(0);
+        }
+        if serde_json::to_vec(&*undo).map_or(true, |v| v.len() > 8 * 1024 * 1024) {
+            undo.clear();
+        }
         self.redo_stacks.entry(op.user_id).or_default().clear();
 
         // Broadcast the (transformed) operation and its ack.
@@ -223,6 +251,32 @@ impl CollabSession {
         Ok((self.version, op))
     }
 
+    /// Drop transient OT history after a durable authoritative snapshot.
+    pub fn reset_history(&mut self, version: u64) {
+        self.version = version;
+        self.history_start = version;
+        self.history_bytes = 0;
+        self.operations.clear();
+        self.seen.clear();
+        self.undo_stacks.clear();
+        self.redo_stacks.clear();
+    }
+
+    fn record(&mut self, op: Operation) {
+        let bytes = serde_json::to_vec(&op).map_or(0, |v| v.len());
+        self.history_bytes = self.history_bytes.saturating_add(bytes);
+        self.seen.insert(op.id.clone());
+        self.operations.push(op);
+        while self.operations.len() > 2048 || self.history_bytes > 8 * 1024 * 1024 {
+            let removed = self.operations.remove(0);
+            self.history_bytes = self
+                .history_bytes
+                .saturating_sub(serde_json::to_vec(&removed).map_or(0, |v| v.len()));
+            self.seen.remove(&removed.id);
+            self.history_start += 1;
+        }
+    }
+
     /// Undo the last operation by the given user.
     pub fn undo(&mut self, user_id: Uuid) -> Result<u64, String> {
         let stack = self.undo_stacks.entry(user_id).or_default();
@@ -233,7 +287,7 @@ impl CollabSession {
         self.redo_stacks.entry(user_id).or_default().push(last_op);
 
         self.version += 1;
-        self.operations.push(inverse_op.clone());
+        self.record(inverse_op.clone());
         let _ = self
             .broadcast
             .send(CollabMessage::Operation(inverse_op.clone()));
@@ -253,7 +307,7 @@ impl CollabSession {
         self.undo_stacks.entry(user_id).or_default().push(redo_op);
 
         self.version += 1;
-        self.operations.push(new_op.clone());
+        self.record(new_op.clone());
         let _ = self
             .broadcast
             .send(CollabMessage::Operation(new_op.clone()));

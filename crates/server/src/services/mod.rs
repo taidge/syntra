@@ -1,13 +1,17 @@
 pub mod ai;
 pub mod audit;
+pub mod collaboration;
 pub mod database_backup;
 pub mod email;
+pub mod maintenance;
 pub mod notification;
 pub mod notification_bus;
 pub mod password;
 pub mod password_crypto;
+pub mod persistence;
 pub mod s3_storage;
 pub mod storage;
+pub mod tenancy;
 pub mod thumbnail;
 pub mod webhook;
 pub mod wopi_sessions;

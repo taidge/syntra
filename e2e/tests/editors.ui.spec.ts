@@ -57,7 +57,7 @@ test.describe('Glory document editors @ui', () => {
       { type: 'Table', id: '7ab041ae-61e7-4146-9b52-9efef8e14f31', rows: [], column_widths: [120] },
     ];
     const seeded = await request.put(`${API_BASE}/documents/${fixture.id}`, {
-      headers: { Authorization: `Bearer ${fixture.token}` }, data: { content },
+      headers: { Authorization: `Bearer ${fixture.token}` }, data: { content, expected_version: 1 },
     });
     expect(seeded.ok()).toBeTruthy();
     await openEditor(page, fixture, 'writer');
@@ -143,7 +143,7 @@ for (const kind of ['slides', 'whiteboard'] as const) {
       content.layers[0].elements = [image];
     }
     const seeded = await request.put(`${API_BASE}/documents/${fixture.id}`, {
-      headers: { Authorization: `Bearer ${fixture.token}` }, data: { content },
+      headers: { Authorization: `Bearer ${fixture.token}` }, data: { content, expected_version: 1 },
     });
     expect(seeded.ok()).toBeTruthy();
     await openEditor(page, fixture, kind);

@@ -49,6 +49,7 @@ pub(super) fn install(scope: &Scope, ed: Editor, save: Rc<dyn Fn()>) {
         });
     });
     let weak = scope.downgrade();
+    let focus_document = document.clone();
     let key =
         Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
             if (event.ctrl_key() || event.meta_key())
@@ -144,7 +145,12 @@ pub(super) fn install(scope: &Scope, ed: Editor, save: Rc<dyn Fn()>) {
                     "ArrowUp" => ed.step(-1, 0, true),
                     "ArrowDown" => ed.step(1, 0, true),
                     "Delete" | "Backspace" => {
-                        if ed.active.get() != target {
+                        // Shift navigation updates the logical selection before
+                        // its deferred DOM focus. A focused cell still in that
+                        // selection must not collapse the range when clearing.
+                        if !in_selection(target, ed.anchor.get(), ed.end.get())
+                            && !ed.extra.with(|cells| cells.contains(&target))
+                        {
                             ed.activate(target);
                         }
                         let cells = ed.selected();
@@ -173,13 +179,28 @@ pub(super) fn install(scope: &Scope, ed: Editor, save: Rc<dyn Fn()>) {
                 }
             }
             let weak = weak.clone();
+            let focus_document = focus_document.clone();
+            let focus_origin = focus_document.active_element();
+            let focus_point = ed.active.get();
+            let focus_sheet = ed.sheet.get();
             wasm_bindgen_futures::spawn_local(async move {
                 gloo_timers::future::TimeoutFuture::new(20).await;
-                if weak.upgrade().is_none() {
+                if weak.upgrade().is_none()
+                    || ed.editing.get().is_some()
+                    || ed.active.get() != focus_point
+                    || ed.sheet.get() != focus_sheet
+                {
                     return;
                 }
-                if ed.editing.get().is_none() {
-                    focus_cell(ed.active.get());
+                let focused = focus_document.active_element();
+                let origin_retired = focus_origin
+                    .as_ref()
+                    .is_some_and(|origin| !origin.is_connected())
+                    && focused == focus_document.body().map(Into::into);
+                // A later selection or another focused control owns its focus.
+                // A retired inline input can hand focus back through body.
+                if focused == focus_origin || origin_retired {
+                    focus_cell(focus_point);
                 }
             });
         });

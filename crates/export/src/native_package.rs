@@ -21,9 +21,10 @@ pub fn seal(bytes: Vec<u8>, native_path: &str) -> Result<Vec<u8>, String> {
     let mut hashes = BTreeMap::new();
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|error| error.to_string())?;
-        let name = file.name().to_string();
+        let name = file.name().map_err(|error| error.to_string())?.into_owned();
         let mut data = Vec::new();
-        file.read_to_end(&mut data)
+        crate::ooxml::bounded(&mut file)
+            .read_to_end(&mut data)
             .map_err(|error| error.to_string())?;
         if name != native_path {
             hashes.insert(name.clone(), digest(&data));
@@ -35,6 +36,7 @@ pub fn seal(bytes: Vec<u8>, native_path: &str) -> Result<Vec<u8>, String> {
         .ok_or_else(|| "Missing native document part".to_string())?;
     let model: serde_json::Value =
         serde_json::from_slice(native).map_err(|error| error.to_string())?;
+    crate::ooxml_import::model_budget(&model)?;
     parts.insert(
         native_path.into(),
         serde_json::to_vec(&serde_json::json!({"model":model,"parts":hashes}))
@@ -58,11 +60,16 @@ pub fn read(bytes: &[u8], native_path: &str) -> Option<serde_json::Value> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).ok()?;
     let wrapper: serde_json::Value = {
         let mut file = archive.by_name(native_path).ok()?;
-        if file.size() > 20 * 1024 * 1024 {
+        if file.size() > (contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2) as u64 {
             return None;
         }
         let mut data = Vec::new();
-        file.read_to_end(&mut data).ok()?;
+        crate::ooxml::bounded_with_limit(
+            &mut file,
+            (contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2) as u64,
+        )
+        .read_to_end(&mut data)
+        .ok()?;
         serde_json::from_slice(&data).ok()?
     };
     let hashes = wrapper.get("parts")?.as_object()?;
@@ -77,12 +84,16 @@ pub fn read(bytes: &[u8], native_path: &str) -> Option<serde_json::Value> {
             return None;
         }
         let mut data = Vec::new();
-        file.read_to_end(&mut data).ok()?;
+        crate::ooxml::bounded(&mut file)
+            .read_to_end(&mut data)
+            .ok()?;
         if expected.as_str()? != digest(&data) {
             return None;
         }
     }
-    wrapper.get("model").cloned()
+    let model = wrapper.get("model")?;
+    crate::ooxml_import::model_budget(model).ok()?;
+    Some(model.clone())
 }
 
 #[cfg(test)]
@@ -90,7 +101,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn externally_edited_ooxml_does_not_use_stale_native_model() {
+    fn externally_edited_ooxml_does_not_use_stale_native_model()
+    -> Result<(), Box<dyn std::error::Error>> {
         let path = "customXml/model.json";
         let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
         zip.start_file("document.xml", SimpleFileOptions::default())
@@ -104,7 +116,7 @@ mod tests {
         let mut edited = ZipWriter::new(Cursor::new(Vec::new()));
         for index in 0..source.len() {
             let mut file = source.by_index(index).unwrap();
-            let name = file.name().to_string();
+            let name = file.name()?.into_owned();
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
             edited
@@ -119,5 +131,6 @@ mod tests {
                 .unwrap();
         }
         assert!(read(&edited.finish().unwrap().into_inner(), path).is_none());
+        Ok(())
     }
 }

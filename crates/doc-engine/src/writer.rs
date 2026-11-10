@@ -981,3 +981,144 @@ mod tests {
         assert!(text.contains("Only line"));
     }
 }
+
+// Shared compatibility adapter for legacy plain-text collaboration messages.
+#[derive(Deserialize)]
+struct WriterDocLite {
+    #[serde(default)]
+    body: Vec<serde_json::Value>,
+}
+
+pub fn extract_run_text(runs: &[serde_json::Value]) -> String {
+    runs.iter()
+        .filter_map(|r| r.get("text").and_then(|t| t.as_str()))
+        .collect::<String>()
+}
+
+pub fn writer_content_to_plain(content: &serde_json::Value) -> String {
+    let doc: WriterDocLite = match serde_json::from_value(content.clone()) {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+    doc.body
+        .iter()
+        .filter_map(|block| {
+            if block["type"] == "PageBreak" {
+                Some("\u{000c}".to_string())
+            } else {
+                block
+                    .get("runs")?
+                    .as_array()
+                    .map(|runs| extract_run_text(runs))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn plain_writer_run(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "text": text, "bold": false, "italic": false, "underline": false,
+        "strikethrough": false, "font_family": null, "font_size": null,
+        "color": null, "background_color": null, "link": null,
+        "superscript": false, "subscript": false
+    })
+}
+
+/// Splice the changed character range while retaining formatting on unaffected runs.
+pub fn replace_writer_runs(runs: &[serde_json::Value], text: &str) -> Vec<serde_json::Value> {
+    let old = extract_run_text(runs).chars().collect::<Vec<_>>();
+    let new = text.chars().collect::<Vec<_>>();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let replacement: String = new[prefix..new.len() - suffix].iter().collect();
+    let mut result = Vec::new();
+    let mut offset = 0;
+    let mut inserted = false;
+    for run in runs {
+        let chars = run["text"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .collect::<Vec<_>>();
+        let end = offset + chars.len();
+        let mut value: String = chars[..prefix.saturating_sub(offset).min(chars.len())]
+            .iter()
+            .collect();
+        if !inserted && end >= prefix {
+            value.push_str(&replacement);
+            inserted = true;
+        }
+        value.extend(chars[(old.len() - suffix).saturating_sub(offset).min(chars.len())..].iter());
+        if !value.is_empty() {
+            let mut updated = run.clone();
+            updated["text"] = serde_json::Value::String(value);
+            result.push(updated);
+        }
+        offset = end;
+    }
+    if result.is_empty() {
+        result.push(plain_writer_run(text));
+    }
+    result
+}
+
+pub fn writer_content_with_text(base: &serde_json::Value, text: &str) -> serde_json::Value {
+    // A metadata-only save must never rewrite rich blocks or their stable IDs.
+    if writer_content_to_plain(base) == text {
+        return base.clone();
+    }
+    let mut content = base.clone();
+    let Some(object) = content.as_object_mut() else {
+        return serde_json::json!({ "body": [] });
+    };
+    let mut replacement = Vec::new();
+    for line in text.split('\n') {
+        for (index, part) in line.split('\u{000c}').enumerate() {
+            if index > 0 {
+                replacement.push(serde_json::json!({ "type": "PageBreak" }));
+            }
+            if part.is_empty() && line.contains('\u{000c}') {
+                continue;
+            }
+            replacement.push(serde_json::json!({
+                "type": "Paragraph",
+                "id": uuid::Uuid::new_v4(),
+                "runs": [plain_writer_run(part)],
+                "alignment": "Left",
+                "indent_level": 0,
+                "spacing": { "before": 0.0, "after": 8.0, "line_height": 1.15 }
+            }));
+        }
+    }
+    let mut replacement = replacement.into_iter();
+    let mut blocks = Vec::new();
+    for original in base["body"].as_array().into_iter().flatten() {
+        if original.get("runs").is_none() && original["type"] != "PageBreak" {
+            // Tables, images, lists and other rich blocks are not represented by
+            // the plain-text surface. Keep them rather than silently deleting them.
+            blocks.push(original.clone());
+            continue;
+        }
+        if let Some(mut next) = replacement.next() {
+            if let (Some(runs), Some(next_runs)) =
+                (original["runs"].as_array(), next["runs"].as_array())
+            {
+                let line = extract_run_text(next_runs);
+                next = original.clone();
+                if extract_run_text(runs) != line {
+                    next["runs"] = serde_json::Value::Array(replace_writer_runs(runs, &line));
+                }
+            }
+            blocks.push(next);
+        }
+    }
+    blocks.extend(replacement);
+    object.insert("body".into(), serde_json::Value::Array(blocks));
+    content
+}

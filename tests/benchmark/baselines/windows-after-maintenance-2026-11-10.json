@@ -1,0 +1,395 @@
+{
+  "schema": 2,
+  "summarized_at_utc": "2026-11-09T21:23:34.660297Z",
+  "scope": "已验收的中间分发包，HTTP503分类修正前",
+  "binary": "target/package-smoke/9138fb211c3c4872b43ecc565ecdeec3/package/contrix-server.exe",
+  "binary_sha256": "b22ad53302dd0f3c82b3323a992923cdceae85c15b816c850a1718f877959280",
+  "binary_mtime_utc": "2026-11-09T21:16:38Z",
+  "binary_size_bytes": 36311040,
+  "accepted_package_smoke_result": "target/package-smoke/9138fb211c3c4872b43ecc565ecdeec3/result.json",
+  "accepted_package_smoke_result_sha256": "d3d008ef9a2f67cd80cc33eda61c77dc4cbf0dcaf4436abfaf0bbd4fdff3da55",
+  "host": "Windows-11-10.0.26300-SP0",
+  "logical_cpus": 28,
+  "measurement_controls": {
+    "sequential_scenarios": true,
+    "fixed_accepted_package_binary": true,
+    "coordinator_reported_build_browser_and_package_work_finished_before_measurement": true,
+    "background_host_load_or_power_policy_not_instrumented": true,
+    "failed_workload_requests_retried": false,
+    "failed_put_resyncs_are_explicit_unmeasured_reads": true,
+    "global_cargo_temp_or_proxy_settings_changed": false,
+    "server_configuration_source": "Repository config and migrations copied by the benchmark; isolated development overlay and database/storage per instance."
+  },
+  "scenarios": [
+    {
+      "name": "2-workers-32KiB",
+      "started_at_utc": "2026-11-09T21:21:22Z",
+      "exit_code": 0,
+      "success": true,
+      "load": {
+        "workers": 2,
+        "requests_per_worker": 100,
+        "mix": "90% GET /documents/:id, 10% CAS PUT; one independent document per worker",
+        "hot_exports": 30,
+        "hot_title_bytes": 32768,
+        "warmup_reads_per_document": 5
+      },
+      "transport": "HTTP/1 loopback; fresh urllib connection per request; system proxies disabled",
+      "workload_attempts": 200,
+      "workload_successes": 200,
+      "workload_failures": 0,
+      "workload_error_rate": 0.0,
+      "error_counts": {
+        "http_429": 0,
+        "http_503": 0,
+        "http_500": 0,
+        "other_http": 0,
+        "io": 0,
+        "other": 0,
+        "resync_failures": 0
+      },
+      "failed_put_resync_attempts_excluded_from_measurement": 0,
+      "http_mixed": {
+        "elapsed_s": 3.918364000011934,
+        "attempted_requests_per_second": 51.04171026463873,
+        "successful_requests_per_second": 51.04171026463873,
+        "failures": [],
+        "failed_workload_requests": 0,
+        "get": {
+          "p50_ms": 32.98709999944549,
+          "p95_ms": 67.1991999988677,
+          "p99_ms": 135.7068000070285,
+          "count": 180,
+          "max_ms": 136.4181999961147
+        },
+        "put": {
+          "p50_ms": 35.3391999960877,
+          "p95_ms": 111.58340000838507,
+          "p99_ms": 276.62409999175,
+          "count": 20,
+          "max_ms": 276.62409999175
+        }
+      },
+      "cross_document": {
+        "hot_document_title_bytes": 32768,
+        "hot_workload": "serial POST export/json",
+        "cold_workload": "up to 100 GETs of an independent Writer, stop after hot exports finish",
+        "cold_baseline": {
+          "p50_ms": 17.910800001118332,
+          "p95_ms": 40.6451000017114,
+          "p99_ms": 42.52699999778997,
+          "count": 100,
+          "max_ms": 42.78760000306647
+        },
+        "cold_while_hot": {
+          "p50_ms": 33.128700000816025,
+          "p95_ms": 66.86359999002889,
+          "p99_ms": 67.23779998719692,
+          "count": 30,
+          "max_ms": 67.23779998719692
+        }
+      },
+      "memory": {
+        "samples": 109,
+        "sampled_peak_rss_bytes": 19968000,
+        "sampled_peak_rss_mib": 19.04296875,
+        "method": "server process RSS sampled every 50ms"
+      },
+      "errors": [],
+      "raw_artifact": "target/performance/after-maintenance-http-2w.json",
+      "raw_artifact_sha256": "6cfd88682d4847d8857fe518db716a45e14910fa135f8b5c7e3946a86b8225c9",
+      "instance_directory": "target/performance/http-instance-69ffbe877b05433fba2849a0d3ae2389",
+      "stdout_log": "target/performance/http-instance-69ffbe877b05433fba2849a0d3ae2389/stdout.log",
+      "stderr_log": "target/performance/http-instance-69ffbe877b05433fba2849a0d3ae2389/stderr.log",
+      "copied_binary_sha256": "b22ad53302dd0f3c82b3323a992923cdceae85c15b816c850a1718f877959280",
+      "copied_config_tree_sha256": "e48d476c84e83e6042b552f67ff2d1f975f3be22be91bccdf6af05748d9fb867",
+      "copied_migrations_tree_sha256": "aac0b941f7350eb5456f2d946a2111a7121ac641b99e12831a48cadf396a3fab",
+      "database_settings": {
+        "url": "sqlite://data/benchmark.db",
+        "max_connections": 5,
+        "checkout_timeout_ms": 3000,
+        "operation_timeout_ms": 15000,
+        "busy_timeout_ms": 3000,
+        "derived_admission_capacity": 10
+      },
+      "database_settings_evidence": {
+        "copied_default": "target/performance/http-instance-69ffbe877b05433fba2849a0d3ae2389/config/default.toml",
+        "copied_development": "target/performance/http-instance-69ffbe877b05433fba2849a0d3ae2389/config/development.toml",
+        "development_database_overrides": {},
+        "benchmark_child_environment_database_override": "CONTRIX_DATABASE_URL=sqlite://data/benchmark.db",
+        "admission_capacity_basis": "Database implementation admits max_connections * 2; not an independently sampled runtime counter."
+      },
+      "failure_phase_annotations": []
+    },
+    {
+      "name": "8-workers-2MiB",
+      "started_at_utc": "2026-11-09T21:21:42Z",
+      "exit_code": 1,
+      "success": false,
+      "load": {
+        "workers": 8,
+        "requests_per_worker": 100,
+        "mix": "90% GET /documents/:id, 10% CAS PUT; one independent document per worker",
+        "hot_exports": 30,
+        "hot_title_bytes": 2097152,
+        "warmup_reads_per_document": 5
+      },
+      "transport": "HTTP/1 loopback; fresh urllib connection per request; system proxies disabled",
+      "workload_attempts": 800,
+      "workload_successes": 793,
+      "workload_failures": 7,
+      "workload_error_rate": 0.00875,
+      "error_counts": {
+        "http_429": 0,
+        "http_503": 6,
+        "http_500": 1,
+        "other_http": 0,
+        "io": 0,
+        "other": 0,
+        "resync_failures": 0
+      },
+      "failed_put_resync_attempts_excluded_from_measurement": 1,
+      "http_mixed": {
+        "elapsed_s": 13.784529299999122,
+        "attempted_requests_per_second": 58.03607671972165,
+        "successful_requests_per_second": 57.528261048424085,
+        "failures": [
+          {
+            "method": "PUT",
+            "at_request": 19,
+            "elapsed_ms": 135.12229999469128,
+            "error": "RuntimeError: PUT /documents/56d5d53b-60b6-416f-84b9-3bca47238909: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'"
+          },
+          {
+            "method": "GET",
+            "at_request": 65,
+            "elapsed_ms": 21.671300011803396,
+            "error": "RuntimeError: GET /documents/56d5d53b-60b6-416f-84b9-3bca47238909: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'"
+          },
+          {
+            "method": "GET",
+            "at_request": 24,
+            "elapsed_ms": 152.5530999933835,
+            "error": "RuntimeError: GET /documents/0fecc9d5-d895-4ec4-9bd2-6c7c29a3b556: HTTP 500, body='{\"success\":false,\"error\":{\"code\":500,\"message\":\"Database error: database admission capacity exceeded\",\"details\":null}}'"
+          },
+          {
+            "method": "GET",
+            "at_request": 20,
+            "elapsed_ms": 89.64360000391025,
+            "error": "RuntimeError: GET /documents/d1b24194-0ff3-441c-9e86-8fcba19fb30a: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'"
+          },
+          {
+            "method": "GET",
+            "at_request": 28,
+            "elapsed_ms": 151.52519999537617,
+            "error": "RuntimeError: GET /documents/d1b24194-0ff3-441c-9e86-8fcba19fb30a: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'"
+          },
+          {
+            "method": "GET",
+            "at_request": 70,
+            "elapsed_ms": 107.7303999918513,
+            "error": "RuntimeError: GET /documents/d1b24194-0ff3-441c-9e86-8fcba19fb30a: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'"
+          },
+          {
+            "method": "GET",
+            "at_request": 68,
+            "elapsed_ms": 81.32149999437388,
+            "error": "RuntimeError: GET /documents/06a419af-93d2-479d-b18d-54b84d154bbd: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'"
+          }
+        ],
+        "failed_workload_requests": 7,
+        "get": {
+          "p50_ms": 126.27229999634437,
+          "p95_ms": 202.68900001246948,
+          "p99_ms": 253.35960001393687,
+          "count": 714,
+          "max_ms": 317.6351000001887
+        },
+        "put": {
+          "p50_ms": 152.92110000154935,
+          "p95_ms": 345.4584000137402,
+          "p99_ms": 453.757899987977,
+          "count": 79,
+          "max_ms": 453.757899987977
+        }
+      },
+      "cross_document": {
+        "hot_document_title_bytes": 2097152,
+        "hot_workload": "serial POST export/json",
+        "cold_workload": "up to 100 GETs of an independent Writer, stop after hot exports finish",
+        "cold_baseline": {
+          "p50_ms": 18.65110000653658,
+          "p95_ms": 40.40310000709724,
+          "p99_ms": 43.5492999968119,
+          "count": 100,
+          "max_ms": 50.346499992883764
+        },
+        "cold_while_hot": {
+          "p50_ms": 35.361400005058385,
+          "p95_ms": 50.37609999999404,
+          "p99_ms": 52.11020000569988,
+          "count": 64,
+          "max_ms": 52.11020000569988
+        }
+      },
+      "memory": {
+        "samples": 193,
+        "sampled_peak_rss_bytes": 26669056,
+        "sampled_peak_rss_mib": 25.43359375,
+        "method": "server process RSS sampled every 50ms"
+      },
+      "errors": [
+        "mixed workload recorded 7 request/resync failures; see http_mixed.failures"
+      ],
+      "raw_artifact": "target/performance/after-maintenance-http-8w-2m.json",
+      "raw_artifact_sha256": "82606994dd8f29b14a8b88d2c6b633bf8f7c03dd830c3335ee8da31805afc12e",
+      "instance_directory": "target/performance/http-instance-26fe912b9c3f463c9f8cb04aa2f02c0d",
+      "stdout_log": "target/performance/http-instance-26fe912b9c3f463c9f8cb04aa2f02c0d/stdout.log",
+      "stderr_log": "target/performance/http-instance-26fe912b9c3f463c9f8cb04aa2f02c0d/stderr.log",
+      "copied_binary_sha256": "b22ad53302dd0f3c82b3323a992923cdceae85c15b816c850a1718f877959280",
+      "copied_config_tree_sha256": "e48d476c84e83e6042b552f67ff2d1f975f3be22be91bccdf6af05748d9fb867",
+      "copied_migrations_tree_sha256": "aac0b941f7350eb5456f2d946a2111a7121ac641b99e12831a48cadf396a3fab",
+      "database_settings": {
+        "url": "sqlite://data/benchmark.db",
+        "max_connections": 5,
+        "checkout_timeout_ms": 3000,
+        "operation_timeout_ms": 15000,
+        "busy_timeout_ms": 3000,
+        "derived_admission_capacity": 10
+      },
+      "database_settings_evidence": {
+        "copied_default": "target/performance/http-instance-26fe912b9c3f463c9f8cb04aa2f02c0d/config/default.toml",
+        "copied_development": "target/performance/http-instance-26fe912b9c3f463c9f8cb04aa2f02c0d/config/development.toml",
+        "development_database_overrides": {},
+        "benchmark_child_environment_database_override": "CONTRIX_DATABASE_URL=sqlite://data/benchmark.db",
+        "admission_capacity_basis": "Database implementation admits max_connections * 2; not an independently sampled runtime counter."
+      },
+      "failure_phase_annotations": [
+        {
+          "method": "PUT",
+          "at_request": 19,
+          "elapsed_ms": 135.12229999469128,
+          "error": "RuntimeError: PUT /documents/56d5d53b-60b6-416f-84b9-3bca47238909: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'",
+          "phase": "JWT authentication middleware, before document handler; active-session DB query or active-tenant DB validation cannot be distinguished from the recorded response.",
+          "cause_evidence": "Response reports Authentication service temporarily unavailable. No internal cause was logged; do not infer a more specific DB failure from this response alone."
+        },
+        {
+          "method": "GET",
+          "at_request": 65,
+          "elapsed_ms": 21.671300011803396,
+          "error": "RuntimeError: GET /documents/56d5d53b-60b6-416f-84b9-3bca47238909: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'",
+          "phase": "JWT authentication middleware, before document handler; active-session DB query or active-tenant DB validation cannot be distinguished from the recorded response.",
+          "cause_evidence": "Response reports Authentication service temporarily unavailable. No internal cause was logged; do not infer a more specific DB failure from this response alone."
+        },
+        {
+          "method": "GET",
+          "at_request": 24,
+          "elapsed_ms": 152.5530999933835,
+          "error": "RuntimeError: GET /documents/0fecc9d5-d895-4ec4-9bd2-6c7c29a3b556: HTTP 500, body='{\"success\":false,\"error\":{\"code\":500,\"message\":\"Database error: database admission capacity exceeded\",\"details\":null}}'",
+          "phase": "Document handler DB access after JWT middleware; exact ACL-chain or document JOIN query was not traced.",
+          "cause_evidence": "Response explicitly reports database admission capacity exceeded; temporary admission was surfaced as HTTP 500."
+        },
+        {
+          "method": "GET",
+          "at_request": 20,
+          "elapsed_ms": 89.64360000391025,
+          "error": "RuntimeError: GET /documents/d1b24194-0ff3-441c-9e86-8fcba19fb30a: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'",
+          "phase": "JWT authentication middleware, before document handler; active-session DB query or active-tenant DB validation cannot be distinguished from the recorded response.",
+          "cause_evidence": "Response reports Authentication service temporarily unavailable. No internal cause was logged; do not infer a more specific DB failure from this response alone."
+        },
+        {
+          "method": "GET",
+          "at_request": 28,
+          "elapsed_ms": 151.52519999537617,
+          "error": "RuntimeError: GET /documents/d1b24194-0ff3-441c-9e86-8fcba19fb30a: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'",
+          "phase": "JWT authentication middleware, before document handler; active-session DB query or active-tenant DB validation cannot be distinguished from the recorded response.",
+          "cause_evidence": "Response reports Authentication service temporarily unavailable. No internal cause was logged; do not infer a more specific DB failure from this response alone."
+        },
+        {
+          "method": "GET",
+          "at_request": 70,
+          "elapsed_ms": 107.7303999918513,
+          "error": "RuntimeError: GET /documents/d1b24194-0ff3-441c-9e86-8fcba19fb30a: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'",
+          "phase": "JWT authentication middleware, before document handler; active-session DB query or active-tenant DB validation cannot be distinguished from the recorded response.",
+          "cause_evidence": "Response reports Authentication service temporarily unavailable. No internal cause was logged; do not infer a more specific DB failure from this response alone."
+        },
+        {
+          "method": "GET",
+          "at_request": 68,
+          "elapsed_ms": 81.32149999437388,
+          "error": "RuntimeError: GET /documents/06a419af-93d2-479d-b18d-54b84d154bbd: HTTP 503, body='{\"error\":{\"code\":503,\"message\":\"Authentication service temporarily unavailable\"},\"success\":false}'",
+          "phase": "JWT authentication middleware, before document handler; active-session DB query or active-tenant DB validation cannot be distinguished from the recorded response.",
+          "cause_evidence": "Response reports Authentication service temporarily unavailable. No internal cause was logged; do not infer a more specific DB failure from this response alone."
+        }
+      ]
+    }
+  ],
+  "all_scenarios_passed": false,
+  "before_comparison": {
+    "artifact": "tests/benchmark/baselines/windows-before-maintenance-2026-11-10.json",
+    "binary_sha256": "17c667dfe0115c9d785c43a60fe048009135d3485017071ed9f440a8ebbc60ac",
+    "matching_scenario": "2-workers-32KiB",
+    "matching_parameters": {
+      "workers": 2,
+      "requests_per_worker": 100,
+      "mix": "90% GET /documents/:id, 10% CAS PUT; one independent document per worker",
+      "hot_exports": 30,
+      "hot_title_bytes": 32768,
+      "warmup_reads_per_document": 5
+    },
+    "before_http_mixed": {
+      "elapsed_s": 6.92093069999828,
+      "attempted_requests_per_second": 28.89784751060283,
+      "successful_requests_per_second": 28.89784751060283,
+      "failures": [],
+      "failed_workload_requests": 0,
+      "get": {
+        "p50_ms": 37.05389999959152,
+        "p95_ms": 62.70520000543911,
+        "p99_ms": 99.84719999192748,
+        "count": 180,
+        "max_ms": 118.27289999928325
+      },
+      "put": {
+        "p50_ms": 165.083500003675,
+        "p95_ms": 828.5328000056325,
+        "p99_ms": 1320.0485999986995,
+        "count": 20,
+        "max_ms": 1320.0485999986995
+      }
+    },
+    "before_cross_document": {
+      "hot_document_title_bytes": 32768,
+      "hot_workload": "serial POST export/json",
+      "cold_workload": "up to 100 GETs of an independent Writer, stop after hot exports finish",
+      "cold_baseline": {
+        "p50_ms": 29.070300006424077,
+        "p95_ms": 49.23249999410473,
+        "p99_ms": 132.0115000125952,
+        "count": 100,
+        "max_ms": 182.33909999253228
+      },
+      "cold_while_hot": {
+        "p50_ms": 45.69079999055248,
+        "p95_ms": 91.58379999280442,
+        "p99_ms": 118.9382000011392,
+        "count": 31,
+        "max_ms": 118.9382000011392
+      }
+    },
+    "before_memory": {
+      "samples": 175,
+      "sampled_peak_rss_bytes": 18849792,
+      "method": "server process RSS sampled every 50ms"
+    },
+    "limitations": [
+      "The old baseline explicitly records uncontrolled background host load. Differences are descriptive observations, not causal speedup claims or SLO evidence.",
+      "There is no matching before measurement for the 8-worker 2MiB scenario.",
+      "Successful-request latency excludes failed requests; inspect error rate and both attempted/successful throughput together.",
+      "Cold overlap sample counts differ; p99 with 30 or 31 samples is essentially the observed maximum.",
+      "RSS is sampled process resident memory, not allocator usage or a guaranteed OS high-water mark."
+    ]
+  },
+  "archive_retained": "target/dist/phase2-before-http-backpressure-contrix-office-x86_64-pc-windows-msvc.zip",
+  "archive_retained_sha256": "af9a4150024b0915c1d6c9303611f11446c0a20a1f0c5596ebbf2b46916273fd"
+}

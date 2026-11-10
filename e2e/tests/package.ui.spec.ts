@@ -1,0 +1,31 @@
+import { test, expect } from '@playwright/test';
+import { registerUser, uniqueEmail, uniqueUsername } from './helpers';
+
+test('package smoke: real login creates saves and reloads a Writer document @ui', async ({page,request})=>{
+  test.setTimeout(60_000);
+  const email=uniqueEmail();const password='PackageSmoke@12345';
+  await registerUser(request,uniqueUsername(),email,password);
+  const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.addInitScript(()=>localStorage.setItem('locale','en'));
+  await page.goto('/login');
+  await page.getByLabel('Email',{exact:true}).fill(email);
+  await page.getByLabel('Password',{exact:true}).fill(password);
+  const loggedIn=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/v1/auth/login'&&response.request().method()==='POST');
+  await page.getByRole('button',{name:'Sign In',exact:true}).click();
+  expect((await loggedIn).status()).toBe(200);
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await page.getByRole('button',{name:'Writer document',exact:true}).click();
+  await expect(page).toHaveURL(/\/writer\/[0-9a-f-]+$/);
+  await expect(page.locator('.save-status')).toHaveText('All changes saved');
+  const content='Packaged Office saves 世界 without a source checkout';
+  const saved=page.waitForResponse(response=>/\/api\/v1\/documents\/[0-9a-f-]+$/.test(new URL(response.url()).pathname)&&response.request().method()==='PUT');
+  await page.getByRole('textbox',{name:'Document body',exact:true}).fill(content);
+  const persisted=await saved;expect(persisted.status()).toBe(200);
+  expect(persisted.request().postDataJSON().expected_version).toBeGreaterThan(0);
+  await expect(page.locator('.save-status')).toHaveText('All changes saved');
+  await page.reload();
+  await expect(page.locator('.save-status')).toHaveText('All changes saved');
+  await expect(page.getByRole('textbox',{name:'Document body',exact:true})).toContainText(content);
+  await page.screenshot({path:test.info().outputPath('package-writer-saved.png')});
+  expect(errors).toEqual([]);
+});

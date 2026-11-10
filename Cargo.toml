@@ -24,14 +24,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Async
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 
 # Database
 diesel = { version = "~2.3.14", features = ["sqlite", "chrono", "uuid"] }
 diesel-async = { version = "~0.9.2", default-features = false, features = ["sqlite", "deadpool"] }
-horme = { version = "=0.4.0", default-features = false, features = ["sqlite-bundled", "deadpool"] }
+horme = { version = "=0.4.0", default-features = false, features = ["sqlite", "deadpool"] }
 deadpool = { version = "0.13", default-features = false, features = ["managed", "rt_tokio_1"] }
-libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+libsqlite3-sys = { version = "0.39.1", features = ["bundled"] }
 
 # Web
 salvo = { version = "0.89", features = ["cors", "logging", "websocket", "serve-static", "cookie", "compression"] }
@@ -65,11 +65,17 @@ glory = { path = ".dependencies/glory/crates/glory", default-features = false }
 sapid = { path = ".dependencies/sapid", features = ["editor", "files", "charts", "json", "dates"] }
 
 # HTTP client
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13.5", features = ["json"] }
 
 # Archive
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.5", default-features = false, features = ["deflate"] }
 
 # Office format parsing
 quick-xml = "0.41"
-calamine = "0.36"
+calamine = "0.38"
+
+# Temporary official upstream compatibility patch: the published Diesel 2.3.14
+# caps libsqlite3-sys below the SQLite security fix. This verified upstream
+# commit allows 0.39; remove this patch once a compatible Diesel release ships.
+[patch.crates-io]
+diesel = { git = "https://github.com/diesel-rs/diesel", rev = "fcd8d71e39bc2ba68b17dff0438b6aadd1869ca0" }

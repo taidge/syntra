@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use contrix_core::dto::ApiResponse;
 use contrix_core::error::AppError;
-use contrix_core::models::{NewFile, NewFileReadStatus, NewFileTag};
+use contrix_core::models::{File, NewDocument, NewFile, NewFileReadStatus, NewFileTag};
 use contrix_core::schema::documents::dsl as d;
 use contrix_core::schema::file_read_status::dsl as frs;
 use contrix_core::schema::file_tags::dsl as ft;
@@ -18,7 +18,14 @@ use contrix_core::schema::tags::dsl as t;
 
 use crate::handlers::access::{load_accessible_file, load_accessible_target_folder};
 use crate::middleware::auth::get_user_id;
-use crate::services::StorageBackend;
+use crate::services::{StorageBackend, StorageService};
+
+fn render_error(res: &mut Response, error: AppError) {
+    res.status_code(
+        StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
+    res.render(Json(ApiResponse::<()>::err(error.to_response())));
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -123,40 +130,14 @@ pub async fn batch_delete(req: &mut Request, depot: &mut Depot, res: &mut Respon
         return;
     }
 
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
-    let now = Utc::now();
     let mut deleted_count: usize = 0;
 
     for file_id in &body.file_ids {
-        match diesel::update(
-            f::files
-                .filter(f::id.eq(file_id))
-                .filter(f::owner_id.eq(&uid)),
-        )
-        .set((
-            f::is_trashed.eq(true),
-            f::trashed_at.eq(Some(now.to_rfc3339())),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await
-        {
+        match crate::handlers::folders::trash_file_tree(&state.db, file_id, &uid).await {
             Ok(n) => deleted_count += n,
-            Err(e) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::<()>::err(
-                    AppError::Database(e.to_string()).to_response(),
-                )));
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => continue,
+            Err(error) => {
+                render_error(res, error);
                 return;
             }
         }
@@ -240,31 +221,16 @@ pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response
         }
     };
 
-    let now = Utc::now();
     let mut moved_count: usize = 0;
 
     for file_id in &body.file_ids {
-        // Skip files the user cannot edit; move the rest.
-        match load_accessible_file(&mut conn, file_id, &uid, "editor").await {
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => continue,
-        }
-
-        match diesel::update(f::files.filter(f::id.eq(file_id)))
-            .set((
-                f::parent_id.eq(&body.target_folder_id),
-                f::room_id.eq(target_folder.room_id.clone()),
-                f::updated_at.eq(now.to_rfc3339()),
-            ))
-            .execute(&mut conn)
+        match crate::handlers::folders::move_file_tree(&state.db, file_id, &target_folder.id, &uid)
             .await
         {
             Ok(n) => moved_count += n,
-            Err(e) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::<()>::err(
-                    AppError::Database(e.to_string()).to_response(),
-                )));
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => continue,
+            Err(error) => {
+                render_error(res, error);
                 return;
             }
         }
@@ -442,20 +408,13 @@ pub async fn batch_download(req: &mut Request, depot: &mut Depot, res: &mut Resp
         .compression_method(zip::CompressionMethod::Deflated);
 
     for file_id in &body.file_ids {
-        let file_row = f::files
-            .filter(f::id.eq(file_id))
-            .filter(f::owner_id.eq(&uid))
-            .filter(f::is_folder.eq(false))
-            .select((f::id, f::name, f::path))
-            .first::<(String, String, String)>(&mut conn)
-            .await
-            .optional();
-
-        let (resolved_file_id, file_name, file_path) = match file_row {
-            Ok(Some(r)) => r,
-            Ok(None) => continue, // Skip files not found or not owned
-            Err(_) => continue,
-        };
+        let (resolved_file_id, file_name, file_path) =
+            match load_accessible_file(&mut conn, file_id, &uid, "viewer").await {
+                Ok(Some(row)) if !row.is_folder && !row.is_trashed => (row.id, row.name, row.path),
+                Ok(Some(_)) => continue,
+                Ok(None) => continue, // Skip files not found or not owned
+                Err(_) => continue,
+            };
 
         let data = match read_file_with_document_fallback(
             &mut conn,
@@ -469,6 +428,7 @@ pub async fn batch_download(req: &mut Request, depot: &mut Depot, res: &mut Resp
             Err(_) => continue, // Skip unreadable files
         };
 
+        let file_name = StorageService::sanitize_file_name(&file_name);
         if zip_writer.start_file(&file_name, options).is_ok() {
             let _ = zip_writer.write_all(&data);
         }
@@ -551,6 +511,14 @@ pub async fn batch_mark_read(req: &mut Request, depot: &mut Depot, res: &mut Res
     let mut marked_count: usize = 0;
 
     for file_id in &body.file_ids {
+        match load_accessible_file(&mut conn, file_id, &uid, "viewer").await {
+            Ok(Some(row)) if !row.is_trashed => {}
+            Ok(_) | Err(AppError::Forbidden(_) | AppError::NotFound(_)) => continue,
+            Err(error) => {
+                render_error(res, error);
+                return;
+            }
+        }
         // Try to update existing read status first (upsert).
         let updated = diesel::update(
             frs::file_read_status
@@ -654,92 +622,142 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
     let mut duplicated_ids: Vec<String> = Vec::new();
 
     for file_id in &body.file_ids {
-        // Fetch the original file record.
-        let file_row = f::files
-            .filter(f::id.eq(file_id))
-            .filter(f::owner_id.eq(&uid))
-            .filter(f::is_folder.eq(false))
-            .select((
-                f::id,
-                f::name,
-                f::path,
-                f::mime_type,
-                f::size,
-                f::parent_id,
-                f::room_id,
-            ))
-            .first::<(
-                String,
-                String,
-                String,
-                Option<String>,
-                i64,
-                Option<String>,
-                Option<String>,
-            )>(&mut conn)
-            .await
-            .optional();
-
-        let (resolved_file_id, original_name, original_path, mime_type, _size, parent_id, room_id) =
-            match file_row {
-                Ok(Some(r)) => r,
-                Ok(None) => continue,
-                Err(_) => continue,
-            };
-
-        // Read the original file data.
+        let original = match load_accessible_file(&mut conn, file_id, &uid, "editor").await {
+            Ok(Some(row)) if !row.is_folder && !row.is_trashed => row,
+            Ok(_) | Err(AppError::Forbidden(_) | AppError::NotFound(_)) => continue,
+            Err(error) => {
+                render_error(res, error);
+                return;
+            }
+        };
         let data = match read_file_with_document_fallback(
             &mut conn,
             &state.storage,
-            &resolved_file_id,
-            &original_path,
+            &original.id,
+            &original.path,
         )
         .await
         {
-            Ok(d) => d,
-            Err(_) => continue,
+            Ok(data) => data,
+            Err(error) => {
+                render_error(res, error);
+                return;
+            }
         };
-
-        // Create the copy.
-        let copy_name = format!("Copy of {}", original_name);
-        let new_file_id = Uuid::new_v4();
-
+        let copy_name = format!("Copy of {}", original.name);
+        let new_file_id = Uuid::new_v4().to_string();
         let storage_path = match state
             .storage
             .save_file(&owner_uuid, &copy_name, &data)
             .await
         {
-            Ok(p) => p,
-            Err(_) => continue,
+            Ok(path) => path,
+            Err(error) => {
+                render_error(res, error);
+                return;
+            }
         };
-
-        let new_file = NewFile {
-            id: new_file_id.to_string(),
-            name: copy_name,
-            path: storage_path,
-            mime_type,
+        let mut new_file = NewFile {
+            id: new_file_id.clone(),
+            name: copy_name.clone(),
+            path: storage_path.clone(),
+            mime_type: original.mime_type.clone(),
             size: data.len() as i64,
             owner_id: uid.clone(),
-            parent_id,
+            parent_id: original.parent_id.clone(),
             is_folder: false,
             is_trashed: false,
             trashed_at: None,
             created_at: now.to_rfc3339(),
             updated_at: now.to_rfc3339(),
-            room_id,
+            room_id: original.room_id.clone(),
             thumbnail_path: None,
             sort_order: 0,
         };
-
-        match diesel::insert_into(f::files)
-            .values(&new_file)
-            .execute(&mut conn)
-            .await
-        {
-            Ok(_) => {
-                duplicated_ids.push(new_file_id.to_string());
+        let actor = uid.clone();
+        let insertion =
+            crate::services::persistence::commit_blob(&state.db, storage_path, move |conn| {
+                conn.immediate_transaction::<_, AppError, _>(|conn| {
+                    let current =
+                        diesel::RunQueryDsl::first::<File>(f::files.find(&original.id), conn)?;
+                    crate::services::persistence::authorize(conn, &current, &actor, "editor")?;
+                    if current.path != original.path
+                        || current.parent_id != original.parent_id
+                        || current.room_id != original.room_id
+                        || current.updated_at != original.updated_at
+                    {
+                        return Err(AppError::Conflict(
+                            "Source changed; reload before duplicating".into(),
+                        ));
+                    }
+                    if let Some(parent) = &current.parent_id {
+                        let parent =
+                            diesel::RunQueryDsl::first::<File>(f::files.find(parent), conn)?;
+                        crate::services::persistence::authorize(conn, &parent, &actor, "editor")?;
+                        if !parent.is_folder || parent.room_id != current.room_id {
+                            return Err(AppError::Conflict("Destination folder changed".into()));
+                        }
+                    }
+                    for index in 0..1000 {
+                        let name = if index == 0 {
+                            copy_name.clone()
+                        } else {
+                            format!("Copy {index} of {}", original.name)
+                        };
+                        match crate::handlers::folders::ensure_available_name(
+                            conn,
+                            &actor,
+                            current.parent_id.as_deref(),
+                            current.room_id.as_deref(),
+                            &name,
+                            None,
+                        ) {
+                            Ok(()) => {
+                                new_file.name = name;
+                                break;
+                            }
+                            Err(AppError::Conflict(_)) if index < 999 => continue,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    crate::services::persistence::adjust_quota(conn, &actor, new_file.size)?;
+                    diesel::RunQueryDsl::execute(
+                        diesel::insert_into(f::files).values(&new_file),
+                        conn,
+                    )?;
+                    let linked = diesel::OptionalExtension::optional(
+                        diesel::RunQueryDsl::first::<(String, Option<String>)>(
+                            d::documents
+                                .filter(d::file_id.eq(&current.id))
+                                .select((d::doc_type, d::content)),
+                            conn,
+                        ),
+                    )?;
+                    if let Some((doc_type, content)) = linked {
+                        diesel::RunQueryDsl::execute(
+                            diesel::insert_into(d::documents).values(NewDocument {
+                                id: Uuid::new_v4().to_string(),
+                                file_id: new_file.id.clone(),
+                                doc_type,
+                                content,
+                                version: 1,
+                                created_at: new_file.created_at.clone(),
+                                updated_at: new_file.updated_at.clone(),
+                            }),
+                            conn,
+                        )?;
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+        match insertion {
+            Ok(()) => duplicated_ids.push(new_file_id),
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => continue,
+            Err(error) => {
+                render_error(res, error);
+                return;
             }
-            Err(_) => continue,
         }
     }
 

@@ -12,6 +12,8 @@ pub mod format;
 pub mod html;
 pub mod markdown;
 mod native_package;
+mod ooxml;
+mod ooxml_import;
 pub mod pptx;
 pub mod xlsx;
 
