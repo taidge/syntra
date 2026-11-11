@@ -353,6 +353,24 @@ impl DerefMut for DatabaseLease {
         self.connection.as_mut().expect("live database lease")
     }
 }
+/// An unpolled or cancelled cleanup owner must retire its unchecked connection.
+/// Only a successful cleanup barrier can return it to the idle pool.
+struct CleanupOwner(Option<Object<DbConnection>>);
+
+impl CleanupOwner {
+    fn return_idle(mut self) {
+        drop(self.0.take());
+    }
+}
+
+impl Drop for CleanupOwner {
+    fn drop(&mut self) {
+        if let Some(connection) = self.0.take() {
+            drop(Object::take(connection));
+        }
+    }
+}
+
 impl Drop for DatabaseLease {
     fn drop(&mut self) {
         let Some(mut connection) = self.connection.take() else {
@@ -376,11 +394,12 @@ impl Drop for DatabaseLease {
                 Err(Error::RollbackTransaction)
             }
         });
+        // Create the guard before constructing the future: shutdown can drop
+        // that future without ever polling its body.
+        let owner = CleanupOwner(Some(connection));
         runtime.spawn(async move {
-            if cleanup.await.is_err() {
-                drop(Object::take(connection));
-            } else {
-                drop(connection);
+            if cleanup.await.is_ok() {
+                owner.return_idle();
             }
         });
     }
@@ -1082,5 +1101,289 @@ mod tests {
             .unwrap();
         assert_eq!(timeout.timeout, 30);
         settled(&database).await;
+    }
+}
+
+// Bounded diagnostic of physical SQLite connection thread migration.
+#[cfg(test)]
+mod thread_migration_probe {
+    use super::*;
+    use diesel::RunQueryDsl;
+    use std::collections::HashSet;
+    use std::thread::{self, ThreadId};
+
+    #[derive(diesel::QueryableByName)]
+    struct ProbeRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        marker: String,
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        counter: i64,
+    }
+
+    async fn step(lease: &mut DatabaseLease) -> (ProbeRow, ThreadId) {
+        lease
+            .spawn_blocking(|connection| {
+                diesel::sql_query("UPDATE temp.worker_probe SET counter=counter+1")
+                    .execute(connection)?;
+                let row = diesel::sql_query("SELECT marker,counter FROM temp.worker_probe")
+                    .get_result::<ProbeRow>(connection)?;
+                Ok((row, thread::current().id()))
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "bounded diagnostic; explicit coordinator resource window required"]
+    async fn real_database_thread_migration_probe_capacity_one_and_five() {
+        const CALLS_PER_CONNECTION: usize = 32;
+        const BLOCKED_JOBS: usize = 8;
+        for capacity in [1_u32, 5_u32] {
+            let directory = tempfile::tempdir().unwrap();
+            let database = Database::with_timeouts(
+                directory.path().join("probe.sqlite").to_str().unwrap(),
+                capacity,
+                Duration::from_secs(3),
+                Duration::from_secs(15),
+                Duration::from_secs(3),
+            )
+            .unwrap();
+            let migrations =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+            database
+                .run_startup_migrations(move |connection| {
+                    crate::migrations::run_directory(connection, &migrations)
+                })
+                .await
+                .unwrap();
+            // Keep each lease throughout the experiment. Its TEMP row is an
+            // additional identity check, independent of the thread identifier.
+            let mut leases = Vec::new();
+            for index in 0..capacity {
+                let mut lease = database
+                    .checkout(Duration::from_secs(3), None)
+                    .await
+                    .unwrap();
+                let marker = format!("connection-{capacity}-{index}");
+                let row_marker = marker.clone();
+                lease.spawn_blocking(move |connection| {
+                    diesel::sql_query("CREATE TEMP TABLE worker_probe(marker TEXT NOT NULL,counter INTEGER NOT NULL)")
+                        .execute(connection)?;
+                    diesel::sql_query("INSERT INTO temp.worker_probe(marker,counter) VALUES(?,0)")
+                        .bind::<diesel::sql_types::Text,_>(&row_marker).execute(connection)?;
+                    Ok(())
+                }).await.unwrap();
+                leases.push((
+                    marker,
+                    lease,
+                    HashSet::<ThreadId>::new(),
+                    Vec::<String>::new(),
+                ));
+            }
+            let dummy_path = directory.path().join("dummy.bin");
+            std::fs::write(&dummy_path, [7_u8; 4096]).unwrap();
+            let mut expected = vec![0_i64; capacity as usize];
+            for _ in 0..CALLS_PER_CONNECTION {
+                for (index, (marker, lease, threads, trace)) in leases.iter_mut().enumerate() {
+                    // Genuine small Tokio FS work shares the ordinary blocking
+                    // pool. No thread/allocator/runtime limit is changed.
+                    let data = tokio::fs::read(&dummy_path).await.unwrap();
+                    assert_eq!(data.len(), 4096);
+                    let (row, tid) = step(lease).await;
+                    expected[index] += 1;
+                    assert_eq!((&row.marker, row.counter), (&*marker, expected[index]));
+                    threads.insert(tid);
+                    trace.push(format!("{tid:?}"));
+                }
+            }
+            let previous: Vec<_> = leases
+                .iter()
+                .map(|(_, _, _, trace)| trace.last().unwrap().clone())
+                .collect();
+            let mut release = Vec::new();
+            let mut blockers = Vec::new();
+            let mut occupied = HashSet::new();
+            for _ in 0..BLOCKED_JOBS {
+                let path = dummy_path.clone();
+                let (release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
+                let (ready_sender, ready_receiver) = oneshot::channel();
+                release.push(release_sender);
+                blockers.push(tokio::task::spawn_blocking(move || {
+                    let data = std::fs::read(path).unwrap();
+                    assert_eq!(data.len(), 4096);
+                    ready_sender.send(thread::current().id()).unwrap();
+                    // The owned senders also release on unwind. These jobs do
+                    // not hold a DB lease or lock; no timeout is tuned.
+                    let _ = release_receiver.recv();
+                }));
+                occupied.insert(ready_receiver.await.unwrap());
+            }
+            assert_eq!(occupied.len(), BLOCKED_JOBS);
+            let occupied_labels: HashSet<_> =
+                occupied.iter().map(|tid| format!("{tid:?}")).collect();
+            let mut connections = Vec::new();
+            for (index, (marker, lease, threads, trace)) in leases.iter_mut().enumerate() {
+                let positive_control_covered = occupied_labels.contains(&previous[index]);
+                let (row, tid) = step(lease).await;
+                expected[index] += 1;
+                assert_eq!((&row.marker, row.counter), (&*marker, expected[index]));
+                assert!(
+                    !occupied.contains(&tid),
+                    "SQL cannot run on a still-blocked worker"
+                );
+                threads.insert(tid);
+                trace.push(format!("{tid:?}"));
+                let migration_observed = threads.len() > 1;
+                if positive_control_covered {
+                    assert_ne!(trace.last().unwrap(), &previous[index]);
+                    assert!(migration_observed);
+                }
+                connections.push(serde_json::json!({
+                    "connection": index, "sql_calls": expected[index],
+                    "distinct_worker_threads": threads.len(), "trace": trace,
+                    "migration_observed": migration_observed,
+                    "positive_control": if positive_control_covered {"covered_and_migrated"} else {"inconclusive_previous_worker_not_occupied"}
+                }));
+            }
+            // Release and await every owned dummy job before returning leases.
+            drop(release);
+            for blocker in blockers {
+                blocker.await.unwrap();
+            }
+            drop(leases);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while {
+                    let state = database.state();
+                    state.admitted_operations != 0 || state.connections != state.idle_connections
+                } {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(database.state().connections, capacity);
+            assert_eq!(database.state().idle_connections, capacity);
+            println!(
+                "THREAD_MIGRATION_PROBE {}",
+                serde_json::json!({
+                    "capacity": capacity, "calls_per_connection": CALLS_PER_CONNECTION + 1,
+                    "blocked_jobs": BLOCKED_JOBS, "connections": connections,
+                    "sql_and_cleanup_verified": true, "rss_or_d07_causation_proved": false
+                })
+            );
+            drop(database);
+            directory.close().unwrap();
+        }
+    }
+}
+
+// Candidate to append to crates/server/src/database.rs under root-controlled
+// red/green validation. Not compiled or executed during preparation.
+#[cfg(test)]
+mod cleanup_owner_cancellation_regression {
+    use super::*;
+    use diesel::RunQueryDsl;
+    use diesel::connection::SimpleConnection;
+
+    #[derive(diesel::QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+
+    #[test]
+    fn shutdown_before_cleanup_owner_is_polled_retires_the_sqlite_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cleanup-owner.sqlite");
+        let url = path.to_str().unwrap().to_owned();
+        let database = Database::with_timeouts(
+            &url,
+            1,
+            Duration::from_secs(3),
+            Duration::from_secs(15),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let lease = runtime.block_on(async {
+            database
+                .run_startup_migrations(|connection| {
+                    connection.batch_execute(
+                        "CREATE TABLE cleanup_owner_probe(value INTEGER NOT NULL);",
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let mut lease = database
+                .checkout(Duration::from_secs(3), None)
+                .await
+                .unwrap();
+            lease
+                .spawn_blocking(|connection| {
+                    // Use Diesel's managed transaction, not raw BEGIN with an
+                    // invisible transaction-manager depth. INSERT obtains a
+                    // real SQLite writer lock before this worker returns.
+                    <SqliteConnection as Connection>::TransactionManager::begin_transaction(
+                        connection,
+                    )?;
+                    diesel::sql_query("INSERT INTO cleanup_owner_probe(value) VALUES(42)")
+                        .execute(connection)?;
+                    let status = <SqliteConnection as Connection>::TransactionManager::transaction_manager_status_mut(connection);
+                    assert!(matches!(status, TransactionManagerStatus::Valid(valid) if valid.transaction_depth().is_some()));
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            lease
+        });
+
+        let mut peer = SqliteConnection::establish(&url).unwrap();
+        peer.batch_execute("PRAGMA busy_timeout=0;").unwrap();
+        let before = peer
+            .batch_execute("BEGIN IMMEDIATE; ROLLBACK;")
+            .expect_err("positive control: retained lease must hold the SQLite writer");
+        assert!(before.to_string().contains("locked"), "{before}");
+
+        // Entering is not driving a current-thread runtime. drop(lease) queues
+        // its real cleanup worker/owner, but neither new async task can run in
+        // this scope or after it: there is no subsequent block_on/yield/sleep.
+        {
+            let _entered = runtime.enter();
+            drop(lease);
+            assert_eq!(database.state().idle_connections, 0);
+        }
+        // Current-thread shutdown cancels and drops queued async futures. The
+        // pool remains strongly owned by `database`, so default Object::drop
+        // would put the unchecked writer into idle instead of closing it.
+        drop(runtime);
+
+        // No new application checkout occurs: recycle-on-next-borrow cannot
+        // hide a lingering idle writer. This must work without waiting for a
+        // later request or a timer, and must not commit the abandoned write.
+        peer.batch_execute("BEGIN IMMEDIATE; ROLLBACK;")
+            .expect("cancelled cleanup owner must retire its SQLite writer immediately");
+        let count: Count = diesel::sql_query("SELECT COUNT(*) AS count FROM cleanup_owner_probe")
+            .get_result(&mut peer)
+            .unwrap();
+        assert_eq!(
+            count.count, 0,
+            "abandoned write must roll back, never publish"
+        );
+        let state = database.state();
+        assert_eq!(
+            state.connections, 0,
+            "uncertified connection must leave the pool"
+        );
+        assert_eq!(state.idle_connections, 0);
+        assert_eq!(state.admitted_operations, 0);
+
+        drop(peer);
+        drop(database);
+        directory.close().unwrap();
     }
 }

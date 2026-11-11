@@ -12,16 +12,26 @@
 | --- | --- | --- |
 | 安全与授权 | 路径边界、凭证撤销、跨协议 ACL 和单次能力消费已修正并有回归 | 供应链扫描和格式能力不构成全面安全或兼容性认证 |
 | 数据一致性 | CAS、配额/对象补偿、操作/receipt 与日志裁剪处于事务边界；故障及进程恢复验收通过 | 多实例共享桶与真实断电另行验收 |
-| 并发与生命周期 | 本轮 instrumented 100k 的协议、持久化、收敛和退休重开通过，四边界采集完整 | RSS 仍比基线高 96,043,008 字节；原内存要求未达成，当前源码正常 100k 尚待补验 |
+| 并发与生命周期 | 新增 CleanupOwner 取消保护，Linux 写锁红绿及数据库模块定点通过 | 上轮 instrumented 100k 的 RSS 仍高 96,043,008 字节；新窄修不构成 RSS 修复证明 |
 | 效率与性能 | 求值缓存、稀疏导出、GC 查询索引及有界裁剪有直接验证 | 未承诺硬件无关吞吐、零拒绝或稳定延迟提升 |
-| 工程质量与可观测性 | 当前 c04 源码两平台各 620/0/5/0、33 个目标和严格 full Clippy 通过；增加有界事务/GC 观测 | 连接跨 blocking 线程与 arena 保留的因果尚未证实 |
-| 交付与恢复 | 当前 Linux/Windows 正常 release 构建及完整回归身份已绑定 | 当前 c04 的 144、两平台 ZIP/冷备、Garage4、正常 100k 尚未补齐；Docker/macOS/AWS 仍待实际环境 |
+| 工程质量与可观测性 | 双端 620/0/5/0、33 目标及 strict full Clippy 属于 c04/f5/081 基线；新窄修仅 Linux 6 库编译及 14 项数据库回归 | 尚未取得窄修后的全套、Windows、严格 Clippy 或 normal release；迁移与 RSS 因果未证实 |
+| 交付与恢复 | 已有 c04/f5/081 基线的 Linux/Windows normal release 身份，当前窄修未新建发行产物 | 正常 100k、144、两平台 ZIP/冷备、Garage4 与 Docker/macOS/AWS 当前验收仍未补齐 |
 
-当前以 **phase11 的完整源码清单 c04ba1cd…a3f28c（2,494 个文件）及 telemetry f5a1a082…ca0b00** 为准：Linux/Windows 完整 workspace 各 620 通过、0 失败、5 忽略、0 过滤，27 个测试可执行文件与 6 个 doctest；严格 full Clippy、正常 server release 原始构建均退出 0。新正常 ELF 为 f4bef446…612c91，PE 为 2292ad90…1256a9。首次完整的四边界 instrumented 100k 已完成，但 **RSS 充分回收要求仍未满足，目标继续进行**。当前源码尚未补齐非仪表化正常 100k、144 项浏览器/API、两平台 ZIP/冷备及 Garage4；下述 phase9/phase10 结果保留各自旧源码与产物身份，不转称当前源码重跑。
+最新代码已应用 **CleanupOwner 取消保护（database.rs SHA `1210805f…290d9b`）**，本轮仅完成 Linux 六库编译、精确写锁回归红101→绿0，以及数据库模块 **14 通过 / 0 失败 / 1 忽略 / 96 过滤**。既有双端完整 620/0/5/0、27 executable + 6 doctest、strict full Clippy、normal release 及完整四边界 instrumented 100k 仍只归于 c04/f5/`081eead` 产品基线，不冒称窄修后重跑，也不计为 full621。**RSS 原要求仍未满足：上轮收敛后仍比基线高 96,043,008 字节，目标继续进行。** 当前新 query-only 设计只是 target 中的候选，未列为已实现。最新远端 `081eead` 的 [CI 43104241302](https://github.com/arkret-org/office/actions/runs/43104241302) 有7个 failed job，均 runner0/steps0，另2个 skipped；具体原因未知，不能用历史账单 annotation 解释本次状态。
 
 phase9 阶段已补齐安全与格式的直接验收组合，并修复会话退出与重新加入的竞态、延迟退休缺少自动重试的问题。Windows/Linux 完整 workspace 各 **602 通过、0 失败、5 忽略**，两平台严格 Clippy、正常 release，以及 Linux **144 项**浏览器/API 验收通过；当时两平台 phase9 ZIP 的完整烟测与冷备恢复均通过，Garage **4/4** 属于全套之外的独立环境验收。六个提交已按用户授权推送至 `origin/main` 的 `2c9a249`。该次远端 CI 因账户付款/支出额度启动门禁未分配 runner，不能记为远端构建或测试已执行；旧失败 attempt 的状态不说明当前账户是否已恢复。**D07 该阶段正常 release 已完成 100,000 次 ACK、21 个持久化检查点、历史/GC 收敛及同进程退休重开与最终 REST；RSS 充分回收仍未证明**，收敛后仍高于基线 104,259,584 字节，完整内存验收未完成。历史失败、运行时源码快照与提交后的内容等价桥接分别记录如下，不把旧 HEAD 的测试改称新 HEAD 重跑。
 
 2026 年 11 月 9 日启动多 agent 修复。11 月 10 日的 `19d7409` 已通过 **Linux 555 项 Rust、20 项定点重复、Linux/Windows 各 136 项联合 HTTP/浏览器回归，以及两个 ZIP 的浏览器与强停重启验收**。联合运行均无重试，真实 Garage 兼容服务的 3 项验收亦通过。该版本的 8 并发测量保留 **0.75% 的 503 拒绝**。11 月 11 日续修完成 D 盘上的 Linux/amd64 容器实测，并加入鉴权容量、启动诊断和本地冷备演练。各轮证据分别列出，macOS 与真实 AWS 桶仍待运行验证。
+
+### Phase12：CleanupOwner 取消保护与迁移观察（11 月 12 日）
+
+**已实现与边界。** `DatabaseLease::drop` 现在在构造 async owner 前创建 [CleanupOwner](E:/Works/arkret-org/convert/office/crates/server/src/database.rs:358)：只有清理 barrier 成功才普通归还池；错误、未轮询即取消或 shutdown 默认 `Object::take` 退休连接，无 runtime 分支沿用直接退休，Admission 仍由原清理 SQL 闭包持有。当前 `database.rs` SHA 为 `1210805fc711bf99b990bafd7b32c4b915ae1589eab3fbd617c29a37cd290d9b`，绿例完整源清单为 `fb01f959…cabe1a`。该修复封闭的是取消后未认证连接仍 idle 持有 SQLite 写锁的路径，不是已证实的 D07 RSS 原因。
+
+**实际红绿与验证范围。** [确定性回归](E:/Works/arkret-org/convert/office/crates/server/src/database.rs:1295) 使用真实 Diesel 事务和外部 busy_timeout0 写锁正控，在 current-thread runtime 不再 poll 清理任务时 shutdown；不依赖 sleep、专属 worker 或后续 checkout。旧生产逻辑实际退出101，外部 BEGIN 仍报 `database is locked`；窄修后精确 case **1/0/0/110filtered、退出0**，验证立即释放写锁、回滚未提交行及池/Admission 退休。随后数据库模块实际 **14/0/1ignored/96filtered**（已包含该 case，非另加14），原源/环境/ELF 前后相等，绿例与数据库模块均在原双资源门禁3d271通过后执行。仅6库 no-run compile0，未执行新全套、Windows、strict Clippy 或 normal release。 [红例原结果](E:/Works/arkret-org/convert/office/target/review-phase11-validation/cleanup-owner-green-a2a443af8af246aeb3997cff8db770d7/runtime-evidence-e0f31dcab76f4c65b084ac8ac7381bb5/cleanup-owner-red-a54a95fd0c154bd5b9a2b19cf0c28d44-result.json) · [精确绿例](E:/Works/arkret-org/convert/office/target/review-phase11-validation/cleanup-owner-green-a2a443af8af246aeb3997cff8db770d7/runtime-evidence-e0f31dcab76f4c65b084ac8ac7381bb5/cleanup-owner-green-6bce446f85d4464f949760e646f9ead9-result.json) · [数据库模块原日志](E:/Works/arkret-org/convert/office/target/review-phase11-validation/cleanup-owner-green-a2a443af8af246aeb3997cff8db770d7/runtime-evidence-e0f31dcab76f4c65b084ac8ac7381bb5/cleanup-owner-green-930e5fb317d1435792c99b2b0ec26349-test.log)
+
+旧编译包装器 `51359774…4be9d` 在 Cargo0 后因 library kind 判断遗漏 rlib/cdylib 而 false，原件保留；修复包装器后，红例源码 compile `850c1500…097f1`、绿例源码 compile `5c504d72…4065` 均真实0，不能把包装器失败改写成测试失败或覆盖旧 proof。9个原始证明/日志通过 byte-only 导出，源/副本/源after SHA 一致。 [旧 wrapper false](E:/Works/arkret-org/convert/office/target/review-phase11-validation/cleanup-owner-green-a2a443af8af246aeb3997cff8db770d7/runtime-evidence-e0f31dcab76f4c65b084ac8ac7381bb5/phase11-native-compile-libs-6e6c4b2f1fea4bbcb957557ca6534c72-result.json) · [修后红源码编译](E:/Works/arkret-org/convert/office/target/review-phase11-validation/cleanup-owner-green-a2a443af8af246aeb3997cff8db770d7/runtime-evidence-e0f31dcab76f4c65b084ac8ac7381bb5/phase11-native-compile-libs-b1cbbc769c36442e86ae39624113d1c7-result.json) · [绿源码编译](E:/Works/arkret-org/convert/office/target/review-phase11-validation/cleanup-owner-green-a2a443af8af246aeb3997cff8db770d7/runtime-evidence-e0f31dcab76f4c65b084ac8ac7381bb5/phase11-native-compile-libs-bb8ce8ca37eb4e349753ea6eaf753497-result.json) · [字节副本清单](E:/Works/arkret-org/convert/office/target/review-phase11-validation/cleanup-owner-green-a2a443af8af246aeb3997cff8db770d7/runtime-evidence-e0f31dcab76f4c65b084ac8ac7381bb5/byte-copy-proof.json)
+
+**迁移观察不等于内存归因。** 独立 ignored 迁移基线实际退出0、结果 SHA `9f89bd4c…8129cf`，TEMP 标记和计数验证的6/6连接都观察到跨线程。capacity1 普通段只有1个 worker，8-blocker 正控后扩到2；capacity5 普通段每连接涉及9个 worker，但它在同一 PID/运行时内继 capacity1 的8-blocker 正控之后执行，不能称未干预拓扑。该结果证明迁移可发生，未证明正常 D07 的 allocator/RSS 因果；`rss_or_d07_causation_proved=false` 和 `full_suite_acceptance=false` 原样保留。query-only 候选仍只在 target，尚未应用。原 RSS 充分回落要求和当前待补的完整验收保持开放。 [迁移基线原结果](E:/Works/arkret-org/convert/office/target/review-phase11-validation/thread-migration-run-8036b279effb4ca1a03aa8112826218d/actual-migration-fbe724/result.json)
 
 ### Phase11：有界数据库观测、历史流式读取与完整四边界诊断（11 月 12 日）
 
@@ -528,10 +538,10 @@ Rust 总数内含：89 项服务端单元、146 项 API、17 项外部高级格�
 
 ## 当前剩余边界与后续事项
 
-- Docker 的历史 phase3 镜像曾在 D 盘独立 builder 完成真实构建及浏览器验收；当前源码的镜像仍未验收。本地新 builder 创建被自动审批拒绝，未换工具绕过；现有 Desktop 数据盘仍在 C，未在其上构建。当前 8b3 远端运行未分配 runner，具体原因尚未取得，annotation 查询被自动审批拒绝；旧账户付款/额度 annotation 不代表这次原因。继续构建须证明 builder 实际存储在 D 盘或远端，Intel macOS 仍待实际 CI。
+- Docker 的历史 phase3 镜像曾在 D 盘独立 builder 完成真实构建及浏览器验收；当前源码的镜像仍未验收。本地新 builder 创建被自动审批拒绝，未换工具绕过；现有 Desktop 数据盘仍在 C，未在其上构建。最新 081eead 的 CI43104241302 有7个 failed job，均 runner0/steps0，另2个 skipped，具体原因未知；旧账户付款/额度 annotation 不代表这次原因。继续构建须证明 builder 实际存储在 D 盘或远端，Intel macOS 仍待实际 CI。
 - 第二轮外部 PPTX/XLSX 的实现与能力限制见上文；这些是当前模型可表达的兼容能力，不等同完整 Microsoft Office 兼容性认证或精确排版/播放承诺。
 - Calc 可自动合并不同单元格的并发修改；同格不同输入、并发结构或非单元格元数据变化保守提示冲突。离线 CRDT 合并不在当前协议中，历史窗口外操作需要重新同步。
-- 历史保留、对象登记与分页回收仍依赖后台最终收敛，原保护范围不变。phase9/phase10 正常 100k 通过属于旧输入，RSS 残留分别为基线以上 104,259,584 / 94,113,792 字节。本轮 c04 的 instrumented 100k 与四边界完整，但收敛后仍高于基线 96,043,008 字节，原内存要求未满足；当前源码 normal 100k、144、ZIP/冷备和 Garage4 仍待补验。所有权/Weak、历史/GC 清零、allocator free 数量均不替代内存实测；连接/线程/arena 因果仍待验证。取消、慢写及故障注入也不等同真实断电。
+- 历史保留、对象登记与分页回收仍依赖后台最终收敛，原保护范围不变。phase9/phase10 正常 100k 通过属于旧输入，RSS 残留分别为基线以上 104,259,584 / 94,113,792 字节。既有 c04/f5/081 基线的 instrumented 100k 与四边界完整，但收敛后仍高于基线 96,043,008 字节，原内存要求未满足；CleanupOwner 窄修仅有本轮 Linux 定点结果，后续完整回归及当前源码 normal 100k、144、ZIP/冷备和 Garage4 仍待补验。所有权/Weak、历史/GC 清零、allocator free 数量均不替代内存实测；连接/线程/arena 因果仍待验证。取消、慢写及故障注入也不等同真实断电。
 - 正常超限上传在返回 413 前按帧排空，累计预算为 multipart 上限加 1 MiB、总计 2 秒，不按声明长度分配内存；成功 multipart 也需要完成 HTTP framing。超出排空预算或超时会关闭连接，不能保证无限输入、认证/准入前拒绝或持续恶意发送者总能收到完整 JSON。
 - WOPI 临时 capability 存于进程内，重启后需重新交换。空闲长连接每 2 秒复核凭证，消息处理和推送前另行复核。合法邀请 token 仍是 bearer capability，未新增邮箱所有权验证流程。
 - 样式 CSP 保留 inline 以兼容现有控件；脚本使用 hash/nonce 与 WASM 所需策略。Unix symlink 与本地扫描/删除专项已在本次 Linux Rust 套件真实运行通过；Windows junction 已有动态专项。macOS 尚未验收。
