@@ -243,6 +243,44 @@ async fn unauthorized_room_and_group_delete_preserves_members_and_failure_rolls_
         count, 1,
         "failed parent deletion must roll back member deletion"
     );
+    server.db.run(|conn| diesel::sql_query(
+        "CREATE TRIGGER refuse_group_delete BEFORE DELETE ON groups BEGIN SELECT RAISE(ABORT, 'injected-group-delete-failure'); END"
+    ).execute(conn)).await.unwrap();
+    let response = server
+        .client
+        .delete(server.url(&format!("/api/v1/groups/{group_id}")))
+        .headers(server.auth_header(&owner))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 500);
+    let retained_group = group_id.clone();
+    let retained = server
+        .db
+        .run(move |conn| {
+            Ok::<_, diesel::result::Error>((
+                contrix_core::schema::groups::table
+                    .find(&retained_group)
+                    .count()
+                    .get_result::<i64>(conn)?,
+                gm::group_members
+                    .filter(gm::group_id.eq(&retained_group))
+                    .count()
+                    .get_result::<i64>(conn)?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        retained,
+        (1, 1),
+        "group and its member must roll back together"
+    );
+    server
+        .db
+        .run(|conn| diesel::sql_query("DROP TRIGGER refuse_group_delete").execute(conn))
+        .await
+        .unwrap();
     let response = server
         .client
         .delete(server.url(&format!("/api/v1/groups/{group_id}")))
@@ -262,37 +300,203 @@ async fn invitation_details_do_not_disclose_other_users_capabilities() {
     server
         .make_admin(registration["data"]["user"]["id"].as_str().unwrap())
         .await;
-    let (stranger, _) = server
+    let (stranger, outsider_registration) = server
         .register("outsider", "outsider@test.com", "password123")
         .await;
-    let invitation = create(
-        &server,
-        &admin,
-        "/api/v1/invitations",
-        json!({"email":"future-admin@test.com","role":"admin"}),
-    )
-    .await;
-    let id = invitation["id"].as_str().unwrap();
-    let secret = invitation["token"].as_str().unwrap();
-    let response = server
+    let outsider_id = outsider_registration["data"]["user"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server
+        .register(
+            "existinginvitee",
+            "existing-invitee@test.com",
+            "password123",
+        )
+        .await;
+    for (email, expected_users) in [
+        ("future-admin@test.com", 0_i64),
+        ("existing-invitee@test.com", 1_i64),
+    ] {
+        let target = email.to_owned();
+        let original_role = server
+            .db
+            .run(move |conn| {
+                u::users
+                    .filter(u::email.eq(target))
+                    .select(u::role)
+                    .first::<String>(conn)
+                    .optional()
+            })
+            .await
+            .unwrap();
+        let invitation = create(
+            &server,
+            &admin,
+            "/api/v1/invitations",
+            json!({"email":email,"role":"admin"}),
+        )
+        .await;
+        let id = invitation["id"].as_str().unwrap();
+        let secret = invitation["token"].as_str().unwrap();
+        let response = server
+            .client
+            .get(server.url(&format!("/api/v1/invitations/{id}")))
+            .headers(server.auth_header(&stranger))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+        let body = response.text().await.unwrap();
+        assert!(!body.contains(secret));
+        assert!(!body.contains(email));
+
+        // The public accept endpoint intentionally treats the emailed token as
+        // a bearer capability. A known invitation ID or an unrelated JWT is
+        // not that capability; never submit the legitimate token in this test.
+        for (guess, authenticated) in [
+            (id.to_owned(), true),
+            (uuid::Uuid::new_v4().to_string(), false),
+        ] {
+            assert_ne!(guess, secret);
+            let mut request = server
+                .client
+                .post(server.url(&format!("/api/v1/invitations/accept/{guess}")))
+                .json(&json!({"username":"stolenadmin","email":email,"password":"Password123"}));
+            if authenticated {
+                request = request.headers(server.auth_header(&stranger));
+            }
+            assert_eq!(request.send().await.unwrap().status(), 404);
+        }
+        let invitation_id = id.to_owned();
+        let outsider = outsider_id.clone();
+        let target = email.to_owned();
+        let unchanged = server
+            .db
+            .run(move |conn| {
+                use contrix_core::schema::invitations::dsl as inv;
+                Ok::<_, diesel::result::Error>((
+                    inv::invitations
+                        .find(invitation_id)
+                        .select((inv::is_accepted, inv::accepted_at))
+                        .first::<(bool, Option<String>)>(conn)?,
+                    u::users
+                        .filter(u::email.eq(&target))
+                        .count()
+                        .get_result::<i64>(conn)?,
+                    u::users
+                        .find(outsider)
+                        .select(u::role)
+                        .first::<String>(conn)?,
+                    u::users
+                        .filter(u::username.eq("stolenadmin"))
+                        .count()
+                        .get_result::<i64>(conn)?,
+                    u::users
+                        .filter(u::email.eq(target))
+                        .select(u::role)
+                        .first::<String>(conn)
+                        .optional()?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(unchanged.0, (false, None));
+        assert_eq!(unchanged.1, expected_users);
+        assert_ne!(unchanged.2, "admin");
+        assert_eq!(unchanged.3, 0);
+        assert_eq!(unchanged.4, original_role);
+        let response = server
+            .client
+            .get(server.url(&format!("/api/v1/invitations/{id}")))
+            .headers(server.auth_header(&admin))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+}
+
+#[tokio::test]
+async fn password_reset_revokes_existing_wopi_read_write_and_old_jwt_minting() {
+    let server = TestServer::new().await;
+    let (old_jwt, registration) = server
+        .register("wopireset", "wopireset@test.com", "password123")
+        .await;
+    let (_, file, _) = server
+        .create_document(&old_jwt, "reset-protected", "writer", None)
+        .await;
+    let old_wopi = wopi_token(&server, &old_jwt, &file).await;
+    let contents_url = server.url(&format!("/api/v1/wopi/files/{file}/contents"));
+    let before = server
         .client
-        .get(server.url(&format!("/api/v1/invitations/{id}")))
-        .headers(server.auth_header(&stranger))
+        .get(&contents_url)
+        .query(&[("access_token", &old_wopi)])
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 404);
-    let body = response.text().await.unwrap();
-    assert!(!body.contains(secret));
-    assert!(!body.contains("future-admin@test.com"));
+    assert_eq!(before.status(), 200);
+    let original = before.bytes().await.unwrap();
+    insert_reset_token(
+        &server,
+        registration["data"]["user"]["id"].as_str().unwrap(),
+        "wopi-session-reset",
+    )
+    .await;
     let response = server
         .client
-        .get(server.url(&format!("/api/v1/invitations/{id}")))
-        .headers(server.auth_header(&admin))
+        .post(server.url("/api/v1/auth/reset-password"))
+        .json(&json!({"token":"wopi-session-reset","password":"NewWopiPassword123"}))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+    assert_eq!(
+        wopi_host(
+            &server,
+            &old_jwt,
+            &server.url(&format!("/api/v1/wopi/files/{file}"))
+        )
+        .await
+        .status(),
+        401
+    );
+    assert_eq!(
+        server
+            .client
+            .get(&contents_url)
+            .query(&[("access_token", &old_wopi)])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        server
+            .client
+            .post(&contents_url)
+            .query(&[("access_token", &old_wopi)])
+            .body("revoked WOPI must not replace the original")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let (new_jwt, _) = server
+        .login("wopireset@test.com", "NewWopiPassword123")
+        .await;
+    let new_wopi = wopi_token(&server, &new_jwt, &file).await;
+    let after = server
+        .client
+        .get(contents_url)
+        .query(&[("access_token", &new_wopi)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), 200);
+    assert_eq!(after.bytes().await.unwrap(), original);
 }
 
 #[tokio::test]

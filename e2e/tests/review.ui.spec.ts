@@ -1,5 +1,6 @@
 import { test, expect, APIRequestContext, Page } from '@playwright/test';
 import { resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { registerUser, createDocument, uniqueEmail, uniqueUsername } from './helpers';
 const BASE = (process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
 async function authenticate(page: Page, token: string, user: unknown) {
@@ -12,6 +13,48 @@ async function editCell(page:Page, address:string, text:string) {
   await expect(page.getByRole('button',{name:address,exact:true})).toHaveText(text);
 }
 test.describe('Review browser regressions @ui', () => {
+  test('Calc saves and downloads recalculated CSV text, errors and dependent formulas', async ({ page, request }) => {
+    const auth = await registerUser(request, uniqueUsername(), uniqueEmail(), 'Test@12345');
+    const headers = { Authorization: `Bearer ${auth.token}` };
+    const user = (await (await request.get('/api/v1/auth/me', { headers })).json()).data;
+    const { body } = await createDocument(request, auth.token, 'Saved CSV values', 'calc');
+    const id = body.data.id;
+    await authenticate(page, auth.token, user);
+    await page.goto(`${BASE}/calc/${id}`);
+    await expect(page.locator('.save-status')).toHaveText('Saved');
+    const cells = [
+      ['A1', '1', '1'], ['A2', '2', '2'], ['A3', '=SUM(A1:A2)', '3'],
+      ['B1', 'quoted, "text"', 'quoted, "text"'], ['B2', '=B1', 'quoted, "text"'],
+      ['B3', '=A3*2', '6'], ['C1', '=1/0', '#ERR: #DIV/0!'], ['C2', '=C1', '#ERR: #DIV/0!'],
+    ];
+    for (const [address, input, displayed] of cells) {
+      await page.getByRole('button', { name: address, exact: true }).click();
+      await page.getByRole('textbox', { name: 'Formula', exact: true }).fill(input);
+      await page.getByRole('button', { name: 'Apply formula', exact: true }).click();
+      await expect(page.getByRole('button', { name: address, exact: true })).toHaveText(displayed);
+    }
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page.locator('.save-status')).toHaveText('Saved');
+    const persisted = (await (await request.get(`/api/v1/documents/${id}`, { headers })).json()).data;
+    const saved = persisted.content.sheets[0].cells;
+    expect(saved.find((pair: any) => pair[0].row === 2 && pair[0].col === 0)[1].formula).toBe('=SUM(A1:A2)');
+    expect(saved.find((pair: any) => pair[0].row === 1 && pair[0].col === 2)[1].formula).toBe('=C1');
+    await page.reload();
+    await expect(page.locator('.save-status')).toHaveText('Saved');
+    for (const [address, , displayed] of cells) {
+      await expect(page.getByRole('button', { name: address, exact: true })).toHaveText(displayed);
+    }
+    const response = page.waitForResponse(value => value.url().endsWith(`/api/v1/documents/${id}/export/csv`) && value.request().method() === 'POST');
+    const download = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Export csv', exact: true }).click();
+    const exported = await response;
+    expect(exported.status()).toBe(200);
+    expect(exported.request().headers().authorization).toBe(headers.Authorization);
+    const path = await (await download).path();
+    expect(path).not.toBeNull();
+    expect(await readFile(path!, 'utf8')).toBe('1,"quoted, ""text""",#DIV/0!\r\n2,"quoted, ""text""",#DIV/0!\r\n3,6,\r\n');
+  });
+
   test('two browser sessions keep local dirty edits until a persistent snapshot conflict is resolved', async ({browser, request}) => {
     const auth=await registerUser(request,uniqueUsername(),uniqueEmail(),'Test@12345');
     const user=(await (await request.get('/api/v1/auth/me',{headers:{Authorization:`Bearer ${auth.token}`}})).json()).data;
@@ -79,17 +122,30 @@ test.describe('Review browser regressions @ui', () => {
     const picker=page.waitForEvent('filechooser');
     await page.getByRole('button',{name:'Upload',exact:true}).click();
     const uploaded=page.waitForResponse(response=>response.url().endsWith('/api/v1/files/upload')&&response.request().method()==='POST');
-    await (await picker).setFiles(resolve(__dirname,'../../crates/export/tests/fixtures/external-rich.pptx'));
+    await (await picker).setFiles(resolve(__dirname,'../../crates/export/tests/fixtures/external-rich-reordered.pptx'));
     expect((await uploaded).status()).toBe(201);
     await expect(page.locator('.import-warning')).toContainText('External media');
     const download=page.waitForEvent('download');
     await page.getByRole('button',{name:'Download original',exact:true}).click();
-    expect((await download).suggestedFilename()).toBe('external-rich.pptx');
-    await page.getByRole('button',{name:'external-rich.pptx',exact:true}).click();
+    const original = await download;
+    expect(original.suggestedFilename()).toBe('external-rich-reordered.pptx');
+    const originalPath = await original.path();
+    expect(originalPath).not.toBeNull();
+    expect(await readFile(originalPath!)).toEqual(await readFile(resolve(__dirname, '../../crates/export/tests/fixtures/external-rich-reordered.pptx')));
+    await page.getByRole('button',{name:'external-rich-reordered.pptx',exact:true}).click();
     await expect(page).toHaveURL(/\/slides\//);
+    await expect(page.locator('.slide-thumbnail')).toHaveCount(2);
+    const leadingText = page.locator('.slide-canvas img[alt="TextBox"]').first();
+    const leadingSvg = await leadingText.getAttribute('src');
+    expect(Buffer.from(leadingSvg!.split(',')[1], 'base64').toString()).toContain('Second file, first slide');
+    await page.getByRole('button', { name: /^Slide 2:/ }).click();
     const background=page.getByAltText('Slide preview',{exact:true});
     await expect.poll(()=>background.evaluate((image:HTMLImageElement)=>[image.naturalWidth,image.naturalHeight])).toEqual([1280,720]);
     const textObject=page.locator('.slide-canvas img[alt="TextBox"]').first();
+    await expect.poll(async () => {
+      const source = await textObject.getAttribute('src');
+      return source ? Buffer.from(source.split(',')[1], 'base64').toString() : '';
+    }).toContain('font-family="Georgia"');
     const svg=await textObject.getAttribute('src');
     const xml=Buffer.from(svg!.split(',')[1],'base64').toString();
     expect(xml).toContain('font-family="Georgia"');expect(xml).toContain('font-weight="bold"');expect(xml).toContain('#336699');

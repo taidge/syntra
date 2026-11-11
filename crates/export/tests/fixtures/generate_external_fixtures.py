@@ -4,7 +4,7 @@ Run from any cwd with Python's standard library. Fixtures intentionally contain
 both representable features and explicit unsupported features. No customXml.
 """
 from pathlib import Path
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 import base64
 
 HERE = Path(__file__).parent
@@ -93,6 +93,31 @@ def pptx():
     }
     archive('external-rich.pptx',parts)
 
+def pptx_reordered():
+    """Put an independently authored plain slide before the rich slide1."""
+    with ZipFile(HERE / 'external-rich.pptx') as source:
+        parts = {name: source.read(name) for name in source.namelist()}
+    assert not any(name.startswith('customXml/') for name in parts)
+    edits = {
+        'ppt/presentation.xml': ('<p:sldIdLst>', '<p:sldIdLst><p:sldId id="257" r:id="leading"/>'),
+        'ppt/_rels/presentation.xml.rels': ('</Relationships>', f'<Relationship Id="leading" Type="{R}/slide" Target="slides/slide2.xml"/></Relationships>'),
+        '[Content_Types].xml': ('</Types>', '<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>'),
+    }
+    for name, (needle, replacement) in edits.items():
+        xml = parts[name].decode('utf-8')
+        assert xml.count(needle) == 1
+        parts[name] = xml.replace(needle, replacement).encode('utf-8')
+    with ZipFile(HERE / 'external-slide-order.pptx') as source:
+        parts['ppt/slides/slide2.xml'] = source.read('ppt/slides/slide2.xml')
+    # Fixed ZIP headers make this combined fixture reproducible byte for byte.
+    with ZipFile(HERE / 'external-rich-reordered.pptx', 'w') as output:
+        for name, data in sorted(parts.items()):
+            entry = ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            entry.compress_type = ZIP_DEFLATED
+            output.writestr(entry, data)
+
+
 if __name__ == '__main__':
     xlsx()
     pptx()
+    pptx_reordered()

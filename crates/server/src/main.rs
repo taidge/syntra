@@ -251,6 +251,10 @@ async fn main() -> anyhow::Result<()> {
         wopi_sessions: Arc::new(services::WopiSessionStore::new()),
     });
 
+    // Retry session retirement independently: database/storage/trash work must
+    // not postpone this 60-second policy, and constructors never spawn tasks.
+    tokio::spawn(state.collab.clone().run_session_reaper());
+
     // -----------------------------------------------------------------------
     // 8b. Shared transactional trash purge and retryable object cleanup.
     // -----------------------------------------------------------------------

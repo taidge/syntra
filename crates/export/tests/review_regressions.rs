@@ -215,3 +215,34 @@ fn external_pptx_uses_relationship_order_excludes_orphans_and_reports_fidelity()
     assert_eq!(text(1), "First file, second slide");
     assert!(!presentation.metadata.import_warnings.is_empty());
 }
+
+#[test]
+fn reordered_external_pptx_keeps_rich_elements_and_explicit_degradation_warnings() {
+    // The browser uploads and recovers these same independently authored bytes.
+    let bytes = include_bytes!("fixtures/external-rich-reordered.pptx");
+    let archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    assert!(archive.file_names().all(|name| {
+        !name
+            .expect("valid ZIP entry name")
+            .starts_with("customXml/")
+    }));
+    let order = part(bytes, "ppt/presentation.xml");
+    assert!(order.find("r:id=\"leading\"").unwrap() < order.find("r:id=\"slide\"").unwrap());
+    let presentation = contrix_export::pptx::pptx_to_presentation(bytes).unwrap();
+    assert_eq!(presentation.slides.len(), 2);
+    assert!(matches!(&presentation.slides[0].elements[0],
+        SlideElement::TextBox(text) if text.content[0].text == "Second file, first slide"));
+    let rich = &presentation.slides[1];
+    assert!(matches!(&rich.elements[0],
+        SlideElement::TextBox(text) if text.content[0].text == "Rich "));
+    assert!(matches!(&rich.elements[1],
+        SlideElement::Shape(shape) if shape.fill_color.as_deref() == Some("#CC5500")));
+    assert!(matches!(&rich.elements[2],
+        SlideElement::Image(image) if image.url.starts_with("data:image/png;base64,")
+            && image.alt_text == "Tiny red pixel"));
+    assert!(matches!(&rich.elements[4],
+        SlideElement::Chart(chart) if chart.data.datasets[0].values == vec![10., 20., 5.]));
+    let warnings = presentation.metadata.import_warnings.join(" ");
+    assert!(warnings.contains("External media"));
+    assert!(warnings.contains("SmartArt"));
+}

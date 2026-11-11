@@ -950,6 +950,38 @@ mod review_conversion_regressions {
         .unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), "1,3\r\n");
     }
+
+    #[tokio::test]
+    async fn csv_recalculates_saved_text_errors_and_dependency_chains() {
+        use contrix_doc_engine::calc::CellValue;
+        let mut book = contrix_doc_engine::Workbook::new("Saved results".into());
+        let sheet = &mut book.sheets[0];
+        sheet.set_cell(0, 0, CellValue::Number(1.0));
+        sheet.set_cell(1, 0, CellValue::Number(2.0));
+        sheet.set_formula(2, 0, "=SUM(A1:A2)".into());
+        sheet.set_cell(0, 1, CellValue::Text("quoted, \"text\"".into()));
+        sheet.set_formula(1, 1, "=B1".into());
+        sheet.set_formula(2, 1, "=A3*2".into());
+        sheet.set_formula(0, 2, "=1/0".into());
+        sheet.set_formula(1, 2, "=C1".into());
+        // Saved formula caches must not be mistaken for authoritative results.
+        // This is the same export path used by a persisted Calc download.
+        for cell in sheet
+            .cells
+            .values_mut()
+            .filter(|cell| cell.formula.is_some())
+        {
+            cell.value = CellValue::Text("stale cache must not escape".into());
+        }
+        let content = serde_json::to_string(&book).unwrap();
+        let bytes = export_content(content, "calc".into(), ExportFormat::Csv, "csv".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "1,\"quoted, \"\"text\"\"\",#DIV/0!\r\n2,\"quoted, \"\"text\"\"\",#DIV/0!\r\n3,6,\r\n"
+        );
+    }
     #[tokio::test]
     async fn csv_refuses_unbounded_dense_output_but_xlsx_stays_sparse() {
         let mut book = contrix_doc_engine::Workbook::new("Sparse".into());
