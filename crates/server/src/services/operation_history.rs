@@ -6,9 +6,13 @@
 use std::time::Duration;
 
 use contrix_core::error::AppError;
+use diesel::connection::DefaultLoadingMode;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Text};
 
+use crate::database::telemetry::{
+    TransactionStage, immediate_transaction as observed_immediate_transaction,
+};
 use crate::state::DbPool;
 
 pub const MAX_HISTORY_ROWS: usize = 2048;
@@ -26,11 +30,14 @@ pub struct OperationHistoryPage {
 }
 
 #[derive(QueryableByName)]
-struct Entry {
+struct CutoffEntry {
     #[diesel(sql_type = Text)]
     id: String,
     #[diesel(sql_type = Integer)]
     version: i32,
+}
+#[derive(QueryableByName)]
+struct EntryBytes {
     #[diesel(sql_type = BigInt)]
     bytes: i64,
 }
@@ -68,26 +75,46 @@ fn analyze_history(
     current_version: i32,
 ) -> Result<Analysis, AppError> {
     let has_future = has_future_history(conn, document, current_version)?;
-    let entries = diesel::sql_query(
-        "SELECT id,version,LENGTH(CAST(op_data AS BLOB)) AS bytes FROM operation_log
-         WHERE document_id=? AND version<=? ORDER BY version DESC,id DESC LIMIT 2049",
-    )
-    .bind::<Text, _>(document)
-    .bind::<Integer, _>(current_version)
-    .load::<Entry>(conn)?;
-    let mut bytes = 0_i64;
-    let cutoff = entries.iter().enumerate().find_map(|(index, entry)| {
-        let fits = entry.bytes >= 0
-            && bytes
-                .checked_add(entry.bytes)
-                .is_some_and(|sum| sum <= MAX_HISTORY_BYTES);
-        if index == MAX_HISTORY_ROWS || !fits {
-            Some((entry.version, entry.id.clone()))
-        } else {
+    let cutoff_offset = {
+        // Decode only the byte count and release each row before advancing.
+        // No per-entry String or Vec is needed to inspect the retained suffix.
+        let entries = diesel::sql_query(
+            "SELECT LENGTH(CAST(op_data AS BLOB)) AS bytes FROM operation_log
+             WHERE document_id=? AND version<=? ORDER BY version DESC,id DESC LIMIT 2049",
+        )
+        .bind::<Text, _>(document)
+        .bind::<Integer, _>(current_version)
+        .load_iter::<EntryBytes, DefaultLoadingMode>(conn)?;
+        let mut bytes = 0_i64;
+        let mut offset = None;
+        for (index, entry) in entries.enumerate() {
+            let entry = entry?;
+            let fits = entry.bytes >= 0
+                && bytes
+                    .checked_add(entry.bytes)
+                    .is_some_and(|sum| sum <= MAX_HISTORY_BYTES);
+            if index == MAX_HISTORY_ROWS || !fits {
+                offset = Some(index);
+                break;
+            }
             bytes += entry.bytes;
-            None
         }
-    });
+        offset
+    }; // Drop the cursor before reborrowing the connection for the cutoff key.
+    // The caller's transaction keeps the two reads on the same snapshot.
+    let cutoff = cutoff_offset
+        .map(|offset| {
+            diesel::sql_query(
+                "SELECT id,version FROM operation_log WHERE document_id=? AND version<=?
+                 ORDER BY version DESC,id DESC LIMIT 1 OFFSET ?",
+            )
+            .bind::<Text, _>(document)
+            .bind::<Integer, _>(current_version)
+            .bind::<BigInt, _>(offset as i64)
+            .get_result::<CutoffEntry>(conn)
+            .map(|entry| (entry.version, entry.id))
+        })
+        .transpose()?;
     Ok(Analysis { cutoff, has_future })
 }
 
@@ -199,20 +226,24 @@ fn prune_entity(
             has_future: analysis.has_future,
         });
     }
-    conn.immediate_transaction::<_, AppError, _>(|conn| {
-        // The read transaction has ended. Recheck under the write transaction;
-        // another process may have committed or removed the document meanwhile.
-        let current = diesel::sql_query("SELECT id,version FROM documents WHERE id=?")
-            .bind::<Text, _>(&entity.id)
-            .get_result::<Entity>(conn)
-            .optional()?;
-        match current {
-            Some(current) => {
-                prune_operation_history_page(conn, &current.id, current.version, limit)
+    observed_immediate_transaction::<_, AppError>(
+        conn,
+        TransactionStage::OperationHistoryRetention,
+        |conn| {
+            // The read transaction has ended. Recheck under the write transaction;
+            // another process may have committed or removed the document meanwhile.
+            let current = diesel::sql_query("SELECT id,version FROM documents WHERE id=?")
+                .bind::<Text, _>(&entity.id)
+                .get_result::<Entity>(conn)
+                .optional()?;
+            match current {
+                Some(current) => {
+                    prune_operation_history_page(conn, &current.id, current.version, limit)
+                }
+                None => Ok(OperationHistoryPage::default()),
             }
-            None => Ok(OperationHistoryPage::default()),
-        }
-    })
+        },
+    )
 }
 
 fn record_result(

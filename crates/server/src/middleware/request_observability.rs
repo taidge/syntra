@@ -11,6 +11,9 @@ use std::time::Instant;
 use contrix_core::error::AppError;
 use salvo::prelude::*;
 
+use crate::database::telemetry::TransactionSnapshot;
+pub(crate) use crate::database::telemetry::database_cause;
+
 #[derive(Clone, Copy)]
 struct UnavailableReason {
     stage: &'static str,
@@ -28,6 +31,7 @@ pub(crate) struct DatabaseObservation {
     last_database_error: Mutex<Option<&'static str>>,
     unavailable_reason: Mutex<Option<UnavailableReason>>,
     operation_timeout: Mutex<Option<OperationTimeout>>,
+    transaction: Mutex<Option<TransactionSnapshot>>,
 }
 
 struct DatabaseObservationContext {
@@ -82,6 +86,7 @@ struct DatabaseSnapshot {
     last_observed_db_pressure: Option<&'static str>,
     unavailable_reason: Option<UnavailableReason>,
     operation: Option<OperationTimeout>,
+    transaction: Option<TransactionSnapshot>,
 }
 
 impl DatabaseOperationProgress {
@@ -149,6 +154,12 @@ pub(crate) fn observe_statement(
 ) {
     let _ = DATABASE_OBSERVATION.try_with(|context| {
         record(&context.observation, context.operation.as_deref());
+    });
+}
+
+pub(crate) fn record_sqlite_transaction(snapshot: TransactionSnapshot) {
+    observe_statement(|observation, _| {
+        *observation.transaction.lock().unwrap() = Some(snapshot);
     });
 }
 
@@ -224,6 +235,7 @@ pub(crate) async fn observe_ws_operation<T>(
             last_observed_db_pressure,
             unavailable_reason,
             operation,
+            transaction,
         } = db.snapshot();
         let fallback_cause = match error {
             AppError::Database(_) => database_cause(error),
@@ -241,6 +253,12 @@ pub(crate) async fn observe_ws_operation<T>(
         let operation_statements_completed =
             operation.map(|operation| operation.statements_completed);
         let elapsed_us = started.elapsed().as_micros() as u64;
+        let transaction_stage = transaction.map(|value| value.stage.label());
+        let transaction_phase = transaction.map(TransactionSnapshot::phase_label);
+        let transaction_known_immediate = transaction.map(|value| value.known_immediate);
+        let transaction_finished = transaction.map(|value| value.finished);
+        let transaction_elapsed_us = transaction.map(TransactionSnapshot::elapsed_us);
+        let transaction_begin_wait_us = transaction.map(TransactionSnapshot::begin_wait_us);
         tracing::warn!(
             %document_id, %op_client_id, op_counter,
             stage = reason.stage, cause = reason.cause, ?last_observed_db_pressure,
@@ -248,6 +266,8 @@ pub(crate) async fn observe_ws_operation<T>(
             ?operation_statements_completed, elapsed_us, checkout_attempts,
             checkouts_acquired, checkout_wait_us, statements_started,
             statements_completed, sql_run_us,
+            ?transaction_stage, ?transaction_phase, ?transaction_known_immediate,
+            ?transaction_finished, ?transaction_elapsed_us, ?transaction_begin_wait_us,
             "WebSocket operation failed"
         );
     }
@@ -285,6 +305,7 @@ impl DatabaseObservation {
             last_observed_db_pressure: *self.last_database_error.lock().unwrap(),
             unavailable_reason: *self.unavailable_reason.lock().unwrap(),
             operation: *self.operation_timeout.lock().unwrap(),
+            transaction: *self.transaction.lock().unwrap(),
         }
     }
 
@@ -296,23 +317,6 @@ impl DatabaseObservation {
 
     pub(crate) fn record_operation_timeout(&self, operation: &DatabaseOperationProgress) {
         *self.operation_timeout.lock().unwrap() = Some(operation.snapshot());
-    }
-}
-
-pub(crate) fn database_cause(error: &AppError) -> &'static str {
-    let AppError::Database(message) = error else {
-        return "internal_failure";
-    };
-    let message = message
-        .strip_prefix("connection acquisition failed: ")
-        .unwrap_or(message);
-    match message {
-        "database admission capacity exceeded" => "admission_exhausted",
-        "database checkout timed out" => "checkout_timeout",
-        "database operation timed out; cleanup remains admitted" => "operation_timeout",
-        "collaboration database backpressure deadline exceeded" => "ws_backpressure_deadline",
-        _ if error.is_transient_database() => "sqlite_lock_contention",
-        _ => "database_failure",
     }
 }
 
@@ -376,6 +380,7 @@ pub async fn observe_http_request(
         last_observed_db_pressure,
         unavailable_reason,
         operation,
+        transaction,
     } = db.snapshot();
     let status = res.status_code.unwrap_or(StatusCode::OK);
     let reason = if matches!(
@@ -398,12 +403,20 @@ pub async fn observe_http_request(
         let operation_statements_started = operation.map(|operation| operation.statements_started);
         let operation_statements_completed =
             operation.map(|operation| operation.statements_completed);
+        let transaction_stage = transaction.map(|value| value.stage.label());
+        let transaction_phase = transaction.map(TransactionSnapshot::phase_label);
+        let transaction_known_immediate = transaction.map(|value| value.known_immediate);
+        let transaction_finished = transaction.map(|value| value.finished);
+        let transaction_elapsed_us = transaction.map(TransactionSnapshot::elapsed_us);
+        let transaction_begin_wait_us = transaction.map(TransactionSnapshot::begin_wait_us);
         tracing::warn!(
             %request_id, stage = reason.stage, cause = reason.cause, ?last_observed_db_pressure,
             ?operation_stage, ?operation_phase, ?operation_statements_started,
             ?operation_statements_completed,
             elapsed_us, checkout_attempts, checkouts_acquired, checkout_wait_us,
             statements_started, statements_completed, sql_run_us,
+            ?transaction_stage, ?transaction_phase, ?transaction_known_immediate,
+            ?transaction_finished, ?transaction_elapsed_us, ?transaction_begin_wait_us,
             "HTTP {} response", status.as_u16()
         );
     } else {

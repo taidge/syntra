@@ -1,5 +1,9 @@
 //! Atomic database commits for immutable blobs and durable deferred cleanup.
 use super::StorageBackend;
+use crate::database::telemetry::{
+    GcObservation, GcPhase, TransactionStage,
+    immediate_transaction as observed_immediate_transaction,
+};
 use crate::middleware::request_observability::{
     with_database_stage, with_request_database_observation,
 };
@@ -455,15 +459,16 @@ pub fn request_gc(db: &DbPool, storage: &StorageBackend) -> bool {
     let (db, storage) = (db.clone(), storage.clone());
     let guard = RunningGuard;
     runtime.spawn(async move {
+        let (_gc_observation_owner, observation) = db.observe_gc();
         PENDING.store(false, Ordering::Release);
         let mut failed = HashSet::new();
         // Coalesced hints may arrive during cleanup. Catch up in bounded pages
         // before retiring so a burst does not depend on a later HTTP request.
         for _ in 0..16 {
-            match drain_storage_gc_page(&db, &storage, &mut failed).await {
+            match drain_storage_gc_page_observed(&db, &storage, &mut failed, &observation).await {
                 Ok(page) => {
                     if let Some(error) = page.error {
-                        tracing::warn!(%error,"Deferred storage cleanup retains failed objects for retry");
+                        observation.failure(&error);
                     }
                     if page.visited < 100 {
                         break;
@@ -471,7 +476,7 @@ pub fn request_gc(db: &DbPool, storage: &StorageBackend) -> bool {
                     tokio::task::yield_now().await;
                 }
                 Err(error) => {
-                    tracing::warn!(%error,"Deferred storage cleanup failed; durable outbox will retry");
+                    observation.failure(&error);
                     break;
                 }
             }
@@ -505,6 +510,25 @@ async fn drain_storage_gc_page(
     storage: &StorageBackend,
     failed: &mut HashSet<String>,
 ) -> Result<GcDrainPage, AppError> {
+    let (_owner, observation) = db.observe_gc();
+    let result = drain_storage_gc_page_observed(db, storage, failed, &observation).await;
+    match &result {
+        Ok(page) => {
+            if let Some(error) = &page.error {
+                observation.failure(error);
+            }
+        }
+        Err(error) => observation.failure(error),
+    }
+    result
+}
+
+async fn drain_storage_gc_page_observed(
+    db: &DbPool,
+    storage: &StorageBackend,
+    failed: &mut HashSet<String>,
+    observation: &GcObservation,
+) -> Result<GcDrainPage, AppError> {
     let mut visited = 0;
     let mut first_error = None;
     while visited < 100 {
@@ -512,6 +536,8 @@ async fn drain_storage_gc_page(
         // 120-second ownership lease. Database work never waits on storage I/O.
         let limit = (100 - visited).min(16) as i64;
         let excluded = failed.clone();
+        observation.phase(GcPhase::Claim);
+        let claim_observation = observation.clone();
         let (selected, claims) = db
             .run(move |conn| {
                 let now = Utc::now().timestamp();
@@ -525,22 +551,28 @@ async fn drain_storage_gc_page(
                     .take(limit as usize)
                     .collect::<Vec<_>>();
                 let selected = paths.len();
+                claim_observation.selected(selected);
                 if paths.is_empty() {
                     return Ok::<_, AppError>((0, Vec::new()));
                 }
-                let claims = conn.immediate_transaction::<_, AppError, _>(|conn| {
-                    let mut claims = Vec::new();
-                    for entry in paths {
-                        if let Some(token) = super::maintenance::claim_gc_in_transaction(
-                            conn,
-                            &entry.path,
-                            Utc::now().timestamp(),
-                        )? {
-                            claims.push((entry.path, token));
+                let claims = observed_immediate_transaction::<_, AppError>(
+                    conn,
+                    TransactionStage::GcClaim,
+                    |conn| {
+                        let mut claims = Vec::new();
+                        for entry in paths {
+                            if let Some(token) = super::maintenance::claim_gc_in_transaction(
+                                conn,
+                                &entry.path,
+                                Utc::now().timestamp(),
+                            )? {
+                                claims.push((entry.path, token));
+                            }
                         }
-                    }
-                    Ok(claims)
-                })?;
+                        Ok(claims)
+                    },
+                )?;
+                claim_observation.claimed(claims.len());
                 Ok((selected, claims))
             })
             .await?;
@@ -548,15 +580,24 @@ async fn drain_storage_gc_page(
             break;
         }
         visited += selected;
+        observation.phase(GcPhase::Unlink);
         let completed = futures_util::stream::iter(claims)
-            .map(|(path, token)| async move {
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    storage.delete_file(&path),
-                )
-                .await
-                .unwrap_or_else(|_| Err(AppError::Storage("Object deletion timed out".into())));
-                (path, token, result)
+            .map(|(path, token)| {
+                let observation = observation.clone();
+                async move {
+                    let in_flight = observation.unlink();
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        storage.delete_file(&path),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(AppError::Storage("Object deletion timed out".into())));
+                    if let Err(error) = &result {
+                        observation.failure(error);
+                    }
+                    in_flight.finish(result.is_ok());
+                    (path, token, result)
+                }
             })
             .buffer_unordered(8)
             .collect::<Vec<_>>()
@@ -564,9 +605,13 @@ async fn drain_storage_gc_page(
         if completed.is_empty() {
             continue;
         }
-        let (error, failed_paths) = db.run(move |conn| conn.immediate_transaction::<_, AppError, _>(|conn| {
+        observation.phase(GcPhase::Finalize);
+        let finalize_observation = observation.clone();
+        let (error, failed_paths) = db.run(move |conn| {
+          let result = observed_immediate_transaction::<_, AppError>(conn, TransactionStage::GcFinalize, |conn| {
             let mut first_error = None;
             let mut failed_paths = Vec::new();
+            let mut finalized = 0;
             for (path, token, result) in completed {
                 match result {
                     Ok(()) => {
@@ -575,10 +620,10 @@ async fn drain_storage_gc_page(
                         if removed == 1 {
                             diesel::sql_query("UPDATE blob_inventory SET state='deleted',token=NULL,lease_until=0 WHERE path=?")
                                 .bind::<Text, _>(path).execute(conn)?;
+                            finalized += 1;
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(%path, %error, "Deferred blob deletion will retry");
                         failed_paths.push(path.clone());
                         diesel::sql_query("UPDATE storage_gc SET created_at=?,claim_token=NULL,claim_until=0 WHERE path=? AND claim_token=?")
                             .bind::<Text, _>(Utc::now().to_rfc3339()).bind::<Text, _>(path).bind::<Text, _>(token).execute(conn)?;
@@ -586,8 +631,13 @@ async fn drain_storage_gc_page(
                     }
                 }
             }
-            Ok((first_error, failed_paths))
-        })).await?;
+            Ok((first_error, failed_paths, finalized))
+          });
+          result.map(|(error, paths, finalized)| {
+            finalize_observation.finalized(finalized);
+            (error, paths)
+          })
+        }).await?;
         if first_error.is_none() {
             first_error = error;
         }
@@ -1005,128 +1055,146 @@ async fn commit_document_inner(
         .await?;
     let committed_path = new_path.clone();
     let write = move |conn: &mut SqliteConnection| {
-        conn.immediate_transaction::<_, AppError, _>(|conn| {
-            if let Some(credential) = &credential {
-                crate::middleware::auth::validate_credential_in_transaction(
-                    conn, &credential.credential, &credential.method,
-                    &credential.path,
-                )?;
-            }
-            let current = d::documents.find(&id).first::<Document>(conn)?;
-            let file = f::files.find(&current.file_id).first::<File>(conn)?;
-            authorize(conn, &file, &user, "editor")?;
-            check_file_lock(conn, &file.id, &user, token.as_deref())?;
-            if let (Some((client, counter)), Some(hash)) = (&operation_client, &request_hash)
-                && let Some(version) = check_operation_receipt(conn, &id, &user, client, *counter, hash)? {
-                enqueue_gc(conn, &committed_path)?;
-                return Ok(version);
-            }
-
-            if current.version != expected_version {
-                return Err(AppError::Conflict(
-                    "Document changed; reload before saving".into(),
-                ));
-            }
-            // Check against the durable version before incrementing it: a
-            // pre-existing current+1 log must not be legitimized by this write.
-            if operation.is_some()
-                && super::operation_history::has_future_history(conn, &id, current.version)?
-            {
-                return Err(AppError::Conflict(
-                    "Operation history is ahead of the document; synchronize before saving".into(),
-                ));
-            }
-            let next = current
-                .version
-                .checked_add(1)
-                .ok_or_else(|| AppError::Conflict("Document version exhausted".into()))?;
-            let now = Utc::now().to_rfc3339();
-            diesel::insert_into(v::versions)
-                .values(NewVersion {
-                    id: Uuid::new_v4().to_string(),
-                    document_id: id.clone(),
-                    version_number: current.version,
-                    content: current.content,
-                    created_by: user.clone(),
-                    label,
-                    created_at: now.clone(),
-                })
-                .execute(conn)?;
-            let size = i64::try_from(content.len())
-                .map_err(|_| AppError::Validation("Document too large".into()))?;
-            let changed = diesel::update(
-                d::documents
-                    .filter(d::id.eq(&id))
-                    .filter(d::version.eq(expected_version)),
-            )
-            .set((
-                d::content.eq(Some(content)),
-                d::version.eq(next),
-                d::updated_at.eq(&now),
-            ))
-            .execute(conn)?;
-            if changed != 1 {
-                return Err(AppError::Conflict(
-                    "Document changed; reload before saving".into(),
-                ));
-            }
-            if diesel::update(f::files.find(&file.id))
-                .set((
-                    f::path.eq(committed_path),
-                    f::size.eq(size),
-                    f::updated_at.eq(&now),
-                ))
-                .execute(conn)?
-                != 1
-            {
-                return Err(AppError::NotFound("File not found".into()));
-            }
-            replace_file_quota(conn, &file.owner_id, &file.path, file.size, size)?;
-            enqueue_gc(conn, &file.path)?;
-            if let (Some(operation), Some(op_id)) = (operation, operation_id) {
-                use contrix_core::schema::operation_log::dsl as ol;
-                let mut data = serde_json::to_value(&operation).map_err(|error| AppError::Validation(error.to_string()))?;
-                if let Some((effects, original)) = effects {
-                    data["transform_format"] = serde_json::json!(1);
-                    data["transformed_ops"] = serde_json::to_value(effects).map_err(|error| AppError::Validation(error.to_string()))?;
-                    data["original_request"] = serde_json::to_value(original).map_err(|error| AppError::Validation(error.to_string()))?;
+        observed_immediate_transaction::<_, AppError>(
+            conn,
+            TransactionStage::DocumentMetadata,
+            |conn| {
+                if let Some(credential) = &credential {
+                    crate::middleware::auth::validate_credential_in_transaction(
+                        conn,
+                        &credential.credential,
+                        &credential.method,
+                        &credential.path,
+                    )?;
                 }
-                diesel::insert_into(ol::operation_log)
-                    .values(NewOperationLogEntry {
-                        id: op_id.clone(),
-                        document_id: id.clone(),
-                        user_id: user.clone(),
-                        op_type: serde_json::to_string(&operation.op_type)
-                            .map_err(|error| AppError::Validation(error.to_string()))?,
-                        op_data: serde_json::to_string(&data)
-                            .map_err(|error| AppError::Validation(error.to_string()))?,
-                        version: next,
-                        created_at: now,
-                    })
-                    .execute(conn)?;
-                let (client, counter) = operation_client.ok_or_else(|| AppError::Internal("Missing operation client".into()))?;
-                let hash = request_hash.ok_or_else(|| AppError::Internal("Missing operation request hash".into()))?;
-                diesel::sql_query("INSERT INTO operation_receipts(id, document_id, client_id, counter, user_id, request_hash, version) VALUES (?, ?, ?, ?, ?, ?, ?)")
-                    .bind::<Text, _>(op_id).bind::<Text, _>(&id).bind::<Text, _>(&client).bind::<BigInt, _>(counter)
-                    .bind::<Text, _>(&user).bind::<Text, _>(hash).bind::<Integer, _>(next).execute(conn)?;
-                diesel::sql_query("INSERT INTO operation_clients(document_id, client_id, user_id, max_counter) VALUES (?, ?, ?, ?) ON CONFLICT(document_id, client_id) DO UPDATE SET max_counter = excluded.max_counter")
-                    .bind::<Text, _>(&id).bind::<Text, _>(client).bind::<Text, _>(user).bind::<BigInt, _>(counter).execute(conn)?;
-                diesel::sql_query("DELETE FROM operation_receipts WHERE document_id = ? AND id IN (SELECT id FROM operation_receipts WHERE document_id = ? ORDER BY version DESC LIMIT -1 OFFSET 2048)")
-                    .bind::<Text, _>(&id).bind::<Text, _>(&id).execute(conn)?;
-                // Audit retention belongs to this same IMMEDIATE transaction.
-                // A failed or insufficient bounded pass cannot publish/ACK a
-                // new operation whose history exceeds the shared policy.
-                let history = super::operation_history::prune_operation_history_page(
-                    conn, &id, next, super::operation_history::MAX_PRUNE_PAGE,
-                )?;
-                if history.has_excess || history.has_future {
+                let current = d::documents.find(&id).first::<Document>(conn)?;
+                let file = f::files.find(&current.file_id).first::<File>(conn)?;
+                authorize(conn, &file, &user, "editor")?;
+                check_file_lock(conn, &file.id, &user, token.as_deref())?;
+                if let (Some((client, counter)), Some(hash)) = (&operation_client, &request_hash)
+                    && let Some(version) =
+                        check_operation_receipt(conn, &id, &user, client, *counter, hash)?
+                {
+                    enqueue_gc(conn, &committed_path)?;
+                    return Ok(version);
+                }
+
+                if current.version != expected_version {
                     return Err(AppError::Conflict(
-                        "Operation history cleanup is backlogged; retry after cleanup".into(),
+                        "Document changed; reload before saving".into(),
                     ));
                 }
-            }
-            Ok(next)
-        })
+                // Check against the durable version before incrementing it: a
+                // pre-existing current+1 log must not be legitimized by this write.
+                if operation.is_some()
+                    && super::operation_history::has_future_history(conn, &id, current.version)?
+                {
+                    return Err(AppError::Conflict(
+                        "Operation history is ahead of the document; synchronize before saving"
+                            .into(),
+                    ));
+                }
+                let next = current
+                    .version
+                    .checked_add(1)
+                    .ok_or_else(|| AppError::Conflict("Document version exhausted".into()))?;
+                let now = Utc::now().to_rfc3339();
+                diesel::insert_into(v::versions)
+                    .values(NewVersion {
+                        id: Uuid::new_v4().to_string(),
+                        document_id: id.clone(),
+                        version_number: current.version,
+                        content: current.content,
+                        created_by: user.clone(),
+                        label,
+                        created_at: now.clone(),
+                    })
+                    .execute(conn)?;
+                let size = i64::try_from(content.len())
+                    .map_err(|_| AppError::Validation("Document too large".into()))?;
+                let changed = diesel::update(
+                    d::documents
+                        .filter(d::id.eq(&id))
+                        .filter(d::version.eq(expected_version)),
+                )
+                .set((
+                    d::content.eq(Some(content)),
+                    d::version.eq(next),
+                    d::updated_at.eq(&now),
+                ))
+                .execute(conn)?;
+                if changed != 1 {
+                    return Err(AppError::Conflict(
+                        "Document changed; reload before saving".into(),
+                    ));
+                }
+                if diesel::update(f::files.find(&file.id))
+                    .set((
+                        f::path.eq(committed_path),
+                        f::size.eq(size),
+                        f::updated_at.eq(&now),
+                    ))
+                    .execute(conn)?
+                    != 1
+                {
+                    return Err(AppError::NotFound("File not found".into()));
+                }
+                replace_file_quota(conn, &file.owner_id, &file.path, file.size, size)?;
+                enqueue_gc(conn, &file.path)?;
+                if let (Some(operation), Some(op_id)) = (operation, operation_id) {
+                    use contrix_core::schema::operation_log::dsl as ol;
+                    let mut data = serde_json::to_value(&operation)
+                        .map_err(|error| AppError::Validation(error.to_string()))?;
+                    if let Some((effects, original)) = effects {
+                        data["transform_format"] = serde_json::json!(1);
+                        data["transformed_ops"] = serde_json::to_value(effects)
+                            .map_err(|error| AppError::Validation(error.to_string()))?;
+                        data["original_request"] = serde_json::to_value(original)
+                            .map_err(|error| AppError::Validation(error.to_string()))?;
+                    }
+                    diesel::insert_into(ol::operation_log)
+                        .values(NewOperationLogEntry {
+                            id: op_id.clone(),
+                            document_id: id.clone(),
+                            user_id: user.clone(),
+                            op_type: serde_json::to_string(&operation.op_type)
+                                .map_err(|error| AppError::Validation(error.to_string()))?,
+                            op_data: serde_json::to_string(&data)
+                                .map_err(|error| AppError::Validation(error.to_string()))?,
+                            version: next,
+                            created_at: now,
+                        })
+                        .execute(conn)?;
+                    let (client, counter) = operation_client
+                        .ok_or_else(|| AppError::Internal("Missing operation client".into()))?;
+                    let hash = request_hash.ok_or_else(|| {
+                        AppError::Internal("Missing operation request hash".into())
+                    })?;
+                    diesel::sql_query("INSERT INTO operation_receipts(id, document_id, client_id, counter, user_id, request_hash, version) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                    .bind::<Text, _>(op_id).bind::<Text, _>(&id).bind::<Text, _>(&client).bind::<BigInt, _>(counter)
+                    .bind::<Text, _>(&user).bind::<Text, _>(hash).bind::<Integer, _>(next).execute(conn)?;
+                    diesel::sql_query("INSERT INTO operation_clients(document_id, client_id, user_id, max_counter) VALUES (?, ?, ?, ?) ON CONFLICT(document_id, client_id) DO UPDATE SET max_counter = excluded.max_counter")
+                    .bind::<Text, _>(&id).bind::<Text, _>(client).bind::<Text, _>(user).bind::<BigInt, _>(counter).execute(conn)?;
+                    diesel::sql_query("DELETE FROM operation_receipts WHERE document_id = ? AND id IN (SELECT id FROM operation_receipts WHERE document_id = ? ORDER BY version DESC LIMIT -1 OFFSET 2048)")
+                    .bind::<Text, _>(&id).bind::<Text, _>(&id).execute(conn)?;
+                    // Audit retention belongs to this same IMMEDIATE transaction.
+                    // A failed or insufficient bounded pass cannot publish/ACK a
+                    // new operation whose history exceeds the shared policy.
+                    let history = super::operation_history::prune_operation_history_page(
+                        conn,
+                        &id,
+                        next,
+                        super::operation_history::MAX_PRUNE_PAGE,
+                    )?;
+                    if history.has_excess || history.has_future {
+                        return Err(AppError::Conflict(
+                            "Operation history cleanup is backlogged; retry after cleanup".into(),
+                        ));
+                    }
+                }
+                Ok(next)
+            },
+        )
     };
     let commit = commit_blob_observed(db, new_path, write, move |version| {
         if let Some(committed) = committed {

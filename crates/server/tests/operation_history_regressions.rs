@@ -1,6 +1,8 @@
 //! Shared policy and the real idle owner; no HTTP traffic is needed to retry.
 //! Synthetic equal-version/non-JSON rows exercise catalog retention metadata,
 //! not production-valid WebSocket operations (covered by messaging tests).
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::time::Duration;
 
 use contrix_core::error::AppError;
@@ -12,6 +14,89 @@ use contrix_server::state::DbPool;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Text};
+
+#[derive(Clone, Copy, Default)]
+struct AllocationCount {
+    enabled: bool,
+    calls: usize,
+    bytes: usize,
+}
+
+thread_local! {
+    // Count only this synchronous test thread, excluding Tokio/pool workers and
+    // other tests. SQLite's C allocations are intentionally outside this probe.
+    static ALLOCATIONS: Cell<AllocationCount> = const { Cell::new(AllocationCount {
+        enabled: false, calls: 0, bytes: 0,
+    }) };
+}
+
+struct CountingAllocator;
+
+fn record_allocation(bytes: usize) {
+    let _ = ALLOCATIONS.try_with(|state| {
+        let mut count = state.get();
+        if count.enabled {
+            count.calls += 1;
+            count.bytes += bytes;
+            state.set(count);
+        }
+    });
+}
+
+// SAFETY: Every allocation/deallocation forwards the original pointer, layout
+// and size to System. The observer only updates allocation-free thread locals.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        record_allocation(layout.size());
+        // SAFETY: Forward the caller's allocation contract unchanged.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record_allocation(layout.size());
+        // SAFETY: Forward the caller's allocation contract unchanged.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        record_allocation(size);
+        // SAFETY: Forward the caller's allocation contract unchanged.
+        unsafe { System.realloc(ptr, layout, size) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: System owns the same pointer and layout from allocation.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn measure_allocations<T>(operation: impl FnOnce() -> T) -> (T, AllocationCount) {
+    struct StopCounting;
+    impl Drop for StopCounting {
+        fn drop(&mut self) {
+            ALLOCATIONS.with(|state| {
+                let mut count = state.get();
+                count.enabled = false;
+                state.set(count);
+            });
+        }
+    }
+    ALLOCATIONS.with(|state| {
+        assert!(!state.get().enabled, "allocation measurements cannot nest");
+        state.set(AllocationCount {
+            enabled: true,
+            ..Default::default()
+        });
+    });
+    let guard = StopCounting;
+    let result = operation();
+    let count = ALLOCATIONS.with(Cell::get);
+    drop(guard);
+    (result, count)
+}
 
 #[derive(QueryableByName)]
 struct Number {
@@ -160,7 +245,8 @@ async fn migration_index_supports_metadata_and_delete_ranges_without_a_sort() {
     let (_directory, db) = fixture().await;
     db.run(|conn| {
         for sql in [
-            "EXPLAIN QUERY PLAN SELECT id,version,LENGTH(CAST(op_data AS BLOB)) AS bytes FROM operation_log WHERE document_id='doc' AND version<=10 ORDER BY version DESC,id DESC LIMIT 2049",
+            "EXPLAIN QUERY PLAN SELECT LENGTH(CAST(op_data AS BLOB)) AS bytes FROM operation_log WHERE document_id='doc' AND version<=10 ORDER BY version DESC,id DESC LIMIT 2049",
+            "EXPLAIN QUERY PLAN SELECT id,version FROM operation_log WHERE document_id='doc' AND version<=10 ORDER BY version DESC,id DESC LIMIT 1 OFFSET 2048",
             "EXPLAIN QUERY PLAN SELECT id FROM operation_log WHERE document_id='doc' AND (version,id)<=(9,'cutoff') ORDER BY version DESC,id DESC LIMIT 1000",
         ] {
             let plan=diesel::sql_query(sql).load::<Plan>(conn)?;
@@ -287,4 +373,120 @@ async fn clean_catch_up_is_read_only_while_an_external_writer_holds_its_lock() {
     assert_eq!(page.removed, 0);
     assert_eq!(page.failed_entities, 0);
     assert!(page.first_error.is_none());
+}
+
+#[test]
+fn inspection_does_not_materialize_an_id_string_for_each_retained_row() {
+    #[derive(QueryableByName)]
+    struct MaterializedEntry {
+        #[diesel(sql_type = Text)]
+        id: String,
+        #[diesel(sql_type = Integer)]
+        version: i32,
+        #[diesel(sql_type = BigInt)]
+        bytes: i64,
+    }
+
+    let mut conn = SqliteConnection::establish(":memory:").unwrap();
+    // Use the actual table and index, without pool scheduling in the measured
+    // thread. These rows only exercise the synchronous catalog inspection.
+    conn.batch_execute(include_str!("../../../migrations/014_operation_log.sql"))
+        .unwrap();
+    conn.batch_execute(include_str!(
+        "../../../migrations/027_operation_history_retention.sql"
+    ))
+    .unwrap();
+    conn.transaction::<_, diesel::result::Error, _>(|conn| {
+        for (document, rows) in [("short", 16), ("large", MAX_HISTORY_ROWS + 1)] {
+            for index in 0..rows {
+                diesel::sql_query("INSERT INTO operation_log(id,document_id,user_id,op_type,op_data,version,created_at) VALUES (?,?,'owner','update','x',1,'2000')")
+                    .bind::<Text, _>(format!("{document}-00000000-0000-4000-8000-{index:012}"))
+                    .bind::<Text, _>(document)
+                    .execute(conn)?;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    for document in ["short", "large"] {
+        conn.transaction::<_, AppError, _>(|conn| {
+            prune_operation_history_page(conn, document, 1, 0)
+        })
+        .unwrap();
+    }
+
+    let (short, short_allocations) = measure_allocations(|| {
+        conn.transaction::<_, AppError, _>(|conn| prune_operation_history_page(conn, "short", 1, 0))
+            .unwrap()
+    });
+    let (large, large_allocations) = measure_allocations(|| {
+        conn.transaction::<_, AppError, _>(|conn| prune_operation_history_page(conn, "large", 1, 0))
+            .unwrap()
+    });
+    // Positive control: this is the old eager metadata projection. It proves
+    // the observer sees real Diesel String/Vec allocations on this platform.
+    let (materialized, eager_allocations) = measure_allocations(|| {
+        diesel::sql_query("SELECT id,version,LENGTH(CAST(op_data AS BLOB)) AS bytes FROM operation_log WHERE document_id='large' AND version<=1 ORDER BY version DESC,id DESC LIMIT 2049")
+            .load::<MaterializedEntry>(&mut conn).unwrap()
+    });
+    assert!(!short.has_excess);
+    assert!(large.has_excess);
+    assert_eq!(large.removed, 0);
+    assert_eq!(materialized.len(), MAX_HISTORY_ROWS + 1);
+    assert!(
+        materialized
+            .iter()
+            .all(|row| { row.id.starts_with("large-") && row.version == 1 && row.bytes == 1 })
+    );
+    assert!(eager_allocations.calls >= MAX_HISTORY_ROWS);
+    // Allow bounded statement/bind/cutoff bookkeeping, without asserting an
+    // allocator-specific exact count or measuring SQLite's own C heap/RSS.
+    assert!(
+        large_allocations.calls <= short_allocations.calls + 64,
+        "2049 rows must not add per-row Rust allocations: short={}, large={}, eager={}",
+        short_allocations.calls,
+        large_allocations.calls,
+        eager_allocations.calls
+    );
+    assert!(large_allocations.bytes <= short_allocations.bytes + 16 * 1024);
+    assert!(large_allocations.calls * 16 < eager_allocations.calls);
+    eprintln!(
+        "history allocations short={}/{}B large={}/{}B eager={}/{}B",
+        short_allocations.calls,
+        short_allocations.bytes,
+        large_allocations.calls,
+        large_allocations.bytes,
+        eager_allocations.calls,
+        eager_allocations.bytes
+    );
+}
+
+#[tokio::test]
+async fn negative_version_ties_and_utf8_nul_bytes_keep_the_same_cutoff() {
+    let (_directory, db) = fixture().await;
+    seed(&db, "negative", MAX_HISTORY_ROWS + 1, -2).await;
+    db.run(|conn| {
+        conn.batch_execute("UPDATE operation_log SET version=-2 WHERE document_id='negative'; INSERT INTO operation_log(id,document_id,user_id,op_type,op_data,version,created_at) VALUES ('future-negative','negative','owner','{}','x',-1,'2000')")?;
+        diesel::sql_query("UPDATE operation_log SET op_data=? WHERE id='negative-00000'")
+            .bind::<Text, _>("é\0x")
+            .execute(conn)?;
+        let bytes = diesel::sql_query("SELECT LENGTH(CAST(op_data AS BLOB)) AS value FROM operation_log WHERE id='negative-00000'")
+            .get_result::<Number>(conn)?;
+        assert_eq!(bytes.value, 4, "the policy counts UTF8 and NUL bytes");
+        let page = conn.immediate_transaction::<_, AppError, _>(|conn| {
+            prune_operation_history_page(conn, "negative", -2, 1000)
+        })?;
+        assert_eq!(page.removed, 1);
+        assert!(!page.has_excess && page.has_future);
+        let oldest = diesel::sql_query("SELECT COUNT(*) AS value FROM operation_log WHERE id='negative-00000'")
+            .get_result::<Number>(conn)?;
+        assert_eq!(oldest.value, 0, "id ordering still breaks negative-version ties");
+        let future = diesel::sql_query("SELECT COUNT(*) AS value FROM operation_log WHERE id='future-negative'")
+            .get_result::<Number>(conn)?;
+        assert_eq!(future.value, 1, "current+1 remains untouched");
+        Ok::<_, AppError>(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(count(&db, "negative").await, MAX_HISTORY_ROWS as i64 + 1);
 }

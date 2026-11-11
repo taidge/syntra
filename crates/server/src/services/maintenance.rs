@@ -1,4 +1,7 @@
 //! Bounded retention and recovery. SQL fences prevent late references racing unlink.
+use crate::database::telemetry::{
+    TransactionStage, immediate_transaction as observed_immediate_transaction,
+};
 use crate::state::DbPool;
 use contrix_core::{config::MaintenanceConfig, error::AppError};
 use diesel::prelude::*;
@@ -66,7 +69,7 @@ impl WriteLease {
 pub(crate) async fn begin_write(db: &DbPool, path: &str) -> Result<WriteLease, AppError> {
     let token = Uuid::new_v4().to_string();
     let (key, claim) = (path.to_owned(), token.clone());
-    db.run(move |conn| conn.immediate_transaction::<_,AppError,_>(|conn| {
+    db.run(move |conn| observed_immediate_transaction::<_,AppError>(conn, TransactionStage::BlobReservation, |conn| {
         let now=chrono::Utc::now().timestamp();
         // Bounded prefix count: all backend writes, not only multipart uploads,
         // stop admission when durable cleanup cannot keep pace.
@@ -229,7 +232,7 @@ pub async fn expire_blob_writes_page(
             if page.is_empty() {
                 return Ok((0, None));
             }
-            conn.immediate_transaction::<_, AppError, _>(|conn| {
+            observed_immediate_transaction::<_, AppError>(conn, TransactionStage::BlobRecovery, |conn| {
                 let limit = batch.min(MAX_GC_BACKLOG - gc_backlog(conn)?);
                 if limit == 0 {
                     return Ok((0, after));
@@ -316,48 +319,52 @@ pub async fn reconcile_page(
     let cutoff = now.saturating_sub(i64::try_from(config.orphan_grace_seconds).unwrap_or(i64::MAX));
     let legacy = config.reconcile_legacy_dedicated_namespace;
     db.run(move |conn| {
-        conn.immediate_transaction::<_, AppError, _>(|conn| {
-            let mut queued = 0;
-            for entry in entries {
-                if !super::storage::managed_blob(&entry.path) {
-                    continue;
-                }
-                let row = diesel::sql_query(
-                    "SELECT state,first_seen,lease_until FROM blob_inventory WHERE path=?",
-                )
-                .bind::<Text, _>(&entry.path)
-                .get_result::<Inventory>(conn)
-                .optional()?;
-                let row = if let Some(row) = row {
-                    row
-                } else {
-                    if !legacy || !legacy_namespace_exists(conn, &entry.path)? {
+        observed_immediate_transaction::<_, AppError>(
+            conn,
+            TransactionStage::StorageReconcile,
+            |conn| {
+                let mut queued = 0;
+                for entry in entries {
+                    if !super::storage::managed_blob(&entry.path) {
                         continue;
                     }
-                    diesel::sql_query(
+                    let row = diesel::sql_query(
+                        "SELECT state,first_seen,lease_until FROM blob_inventory WHERE path=?",
+                    )
+                    .bind::<Text, _>(&entry.path)
+                    .get_result::<Inventory>(conn)
+                    .optional()?;
+                    let row = if let Some(row) = row {
+                        row
+                    } else {
+                        if !legacy || !legacy_namespace_exists(conn, &entry.path)? {
+                            continue;
+                        }
+                        diesel::sql_query(
                         "INSERT INTO blob_inventory(path,state,first_seen) VALUES (?,'observed',?)",
                     )
                     .bind::<Text, _>(&entry.path)
                     .bind::<BigInt, _>(now)
                     .execute(conn)?;
-                    Inventory {
-                        state: "observed".into(),
-                        first_seen: now,
-                        lease_until: 0,
+                        Inventory {
+                            state: "observed".into(),
+                            first_seen: now,
+                            lease_until: 0,
+                        }
+                    };
+                    if entry.modified_at > cutoff
+                        || row.first_seen > cutoff
+                        || row.state == "writing" && row.lease_until > now
+                        || referenced(conn, &entry.path)?
+                    {
+                        continue;
                     }
-                };
-                if entry.modified_at > cutoff
-                    || row.first_seen > cutoff
-                    || row.state == "writing" && row.lease_until > now
-                    || referenced(conn, &entry.path)?
-                {
-                    continue;
+                    super::persistence::enqueue_gc(conn, &entry.path)?;
+                    queued += 1;
                 }
-                super::persistence::enqueue_gc(conn, &entry.path)?;
-                queued += 1;
-            }
-            Ok(queued)
-        })
+                Ok(queued)
+            },
+        )
     })
     .await
 }
@@ -384,7 +391,7 @@ pub async fn expire_uploads_page(
 ) -> Result<usize, AppError> {
     let batch = config.history_batch_size.clamp(1, 1000) as i64;
     let cutoff = now.to_rfc3339();
-    db.run(move|conn|conn.immediate_transaction::<_,AppError,_>(|conn|{
+    db.run(move|conn|observed_immediate_transaction::<_,AppError>(conn, TransactionStage::UploadExpiration, |conn|{
         #[derive(QueryableByName)]struct Chunk {#[diesel(sql_type=Integer)] chunk_index:i32,#[diesel(sql_type=Text)]path:String}
         let mut budget=batch;let mut removed=0;
         for status in ["pending","active"] {
@@ -523,25 +530,30 @@ pub async fn retain_native_history_count_page(
                 {
                     continue;
                 }
-                let count = conn.immediate_transaction::<_, AppError, _>(|conn| {
-                    use contrix_core::schema::documents::dsl as d;
-                    use contrix_core::schema::versions::dsl as v;
-                    let current = d::documents
-                        .find(&entity.id)
-                        .select(d::version)
-                        .first::<i32>(conn)
-                        .optional()?;
-                    let Some(current) = current else { return Ok(0) };
-                    let candidates =
-                        native_history_count_candidates(conn, &entity.id, current, keep, batch)?;
-                    if candidates.is_empty() {
-                        return Ok(0);
-                    }
-                    let ids: Vec<_> = candidates.into_iter().map(|row| row.id).collect();
-                    diesel::delete(v::versions.filter(v::id.eq_any(ids)))
-                        .execute(conn)
-                        .map_err(AppError::from)
-                })?;
+                let count = observed_immediate_transaction::<_, AppError>(
+                    conn,
+                    TransactionStage::NativeHistoryRetention,
+                    |conn| {
+                        use contrix_core::schema::documents::dsl as d;
+                        use contrix_core::schema::versions::dsl as v;
+                        let current = d::documents
+                            .find(&entity.id)
+                            .select(d::version)
+                            .first::<i32>(conn)
+                            .optional()?;
+                        let Some(current) = current else { return Ok(0) };
+                        let candidates = native_history_count_candidates(
+                            conn, &entity.id, current, keep, batch,
+                        )?;
+                        if candidates.is_empty() {
+                            return Ok(0);
+                        }
+                        let ids: Vec<_> = candidates.into_iter().map(|row| row.id).collect();
+                        diesel::delete(v::versions.filter(v::id.eq_any(ids)))
+                            .execute(conn)
+                            .map_err(AppError::from)
+                    },
+                )?;
                 let finished = last_page && index + 1 == entities.len();
                 let next = if finished {
                     String::new()
@@ -589,7 +601,7 @@ pub async fn retain_history_page(
         let cutoff = (now - chrono::Duration::days(config.history_max_age_days.min(36500) as i64))
             .timestamp();
         let expire_age = config.history_max_age_days != 0;
-        let (count,updated)=db.run(move |conn|conn.immediate_transaction::<_,AppError,_>(|conn| {
+        let (count,updated)=db.run(move |conn|observed_immediate_transaction::<_,AppError>(conn, TransactionStage::HistoryRetention, |conn| {
             let (entities,table,foreign)=if native {("documents","versions","document_id")}else{("files","file_versions","file_id")};
             let lower=if native {-1}else{0};
             if next.entity.is_none() {

@@ -26,9 +26,16 @@ use futures_util::future::BoxFuture;
 use horme::GetConnection;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
+pub(crate) mod telemetry;
+
 use crate::middleware::request_observability::{
     WorkerPhase, current_database_observation, current_database_operation,
-    observe_database_operation, observe_statement, with_database_observation,
+    observe_database_operation, observe_statement, record_sqlite_transaction,
+    with_database_observation,
+};
+use telemetry::{
+    ConnectionTransactionObservation, DatabaseTelemetry, GcObservation, GcWorkerObservation,
+    TransactionPhase,
 };
 
 pub type DbConnection = SyncConnectionWrapper<SqliteConnection, SqliteRuntime>;
@@ -61,43 +68,124 @@ impl SqliteRuntime {
     }
 }
 
-#[derive(Default)]
 struct SqliteObservation {
     query_started: Option<Instant>,
+    transaction: Arc<Mutex<ConnectionTransactionObservation>>,
+    transaction_control: Option<TransactionPhase>,
+    telemetry: Arc<DatabaseTelemetry>,
 }
 
 impl Instrumentation for SqliteObservation {
     fn on_connection_event(&mut self, event: InstrumentationEvent<'_>) {
-        observe_statement(|observation, operation| match event {
+        match event {
+            InstrumentationEvent::BeginTransaction { depth, .. } if depth.get() == 1 => {
+                self.transaction.lock().unwrap().begin();
+                self.transaction_control = Some(TransactionPhase::BeginWait);
+                self.publish_transaction();
+            }
+            InstrumentationEvent::CommitTransaction { depth, .. } if depth.get() == 1 => {
+                self.transaction
+                    .lock()
+                    .unwrap()
+                    .change_phase(TransactionPhase::CommitWait);
+                self.transaction_control = Some(TransactionPhase::CommitWait);
+                self.publish_transaction();
+            }
+            InstrumentationEvent::RollbackTransaction { depth, .. } if depth.get() == 1 => {
+                self.transaction
+                    .lock()
+                    .unwrap()
+                    .change_phase(TransactionPhase::RollbackWait);
+                self.transaction_control = Some(TransactionPhase::RollbackWait);
+                self.publish_transaction();
+            }
             InstrumentationEvent::StartQuery { .. } => {
                 self.query_started = Some(Instant::now());
-                observation
-                    .statements_started
-                    .fetch_add(1, Ordering::Relaxed);
-                if let Some(operation) = operation {
-                    operation.statements_started.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            InstrumentationEvent::FinishQuery { error, .. } => {
-                if let Some(started) = self.query_started.take() {
+                observe_statement(|observation, operation| {
                     observation
-                        .sql_run_us
-                        .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
-                    observation
-                        .statements_completed
+                        .statements_started
                         .fetch_add(1, Ordering::Relaxed);
                     if let Some(operation) = operation {
-                        operation
-                            .statements_completed
-                            .fetch_add(1, Ordering::Release);
+                        operation.statements_started.fetch_add(1, Ordering::Relaxed);
                     }
+                });
+            }
+            InstrumentationEvent::FinishQuery { error, .. } => {
+                let elapsed = self.query_started.take().map(|started| started.elapsed());
+                let app_error = error.map(|error| AppError::Database(error.to_string()));
+                let error_cause = app_error.as_ref().map(telemetry::database_cause);
+                observe_statement(|observation, operation| {
+                    if let Some(elapsed) = elapsed {
+                        observation
+                            .sql_run_us
+                            .fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
+                        observation
+                            .statements_completed
+                            .fetch_add(1, Ordering::Relaxed);
+                        if let Some(operation) = operation {
+                            operation
+                                .statements_completed
+                                .fetch_add(1, Ordering::Release);
+                        }
+                    }
+                    if let Some(error) = &app_error {
+                        observation.record_pressure(error);
+                    }
+                });
+                let control = self.transaction_control.take();
+                if control.is_none() && error.is_none() {
+                    return;
                 }
-                if let Some(error) = error {
-                    observation.record_pressure(&AppError::Database(error.to_string()));
+                let mut transaction = self.transaction.lock().unwrap();
+                let mut completed_snapshot = None;
+                if control == Some(TransactionPhase::BeginWait) && error.is_none() {
+                    transaction.change_phase(TransactionPhase::Active);
+                } else if control == Some(TransactionPhase::BeginWait)
+                    || matches!(
+                        control,
+                        Some(TransactionPhase::CommitWait | TransactionPhase::RollbackWait)
+                    ) && error.is_none()
+                {
+                    if let Some(snapshot) = transaction.finish() {
+                        completed_snapshot = Some(snapshot);
+                        self.telemetry.report_transaction_end(
+                            &mut transaction,
+                            snapshot,
+                            error_cause,
+                        );
+                    }
+                } else if error.is_some()
+                    && let Some(snapshot) = transaction.snapshot()
+                {
+                    completed_snapshot = Some(snapshot);
+                    self.telemetry
+                        .report_transaction_end(&mut transaction, snapshot, error_cause);
+                }
+                let snapshot = completed_snapshot.or_else(|| transaction.snapshot());
+                drop(transaction);
+                if let Some(snapshot) = snapshot {
+                    record_sqlite_transaction(snapshot);
                 }
             }
             _ => {}
-        });
+        }
+    }
+}
+
+impl SqliteObservation {
+    fn publish_transaction(&self) {
+        let snapshot = self.transaction.lock().unwrap().snapshot();
+        if let Some(snapshot) = snapshot {
+            record_sqlite_transaction(snapshot);
+        }
+    }
+}
+
+impl Drop for SqliteObservation {
+    fn drop(&mut self) {
+        // Closing a connection ends its transaction; a monitor must not retain
+        // a stale active-writer description after the physical owner retires.
+        let _ = self.transaction.lock().unwrap().finish();
     }
 }
 
@@ -173,6 +261,7 @@ struct Inner {
     operation_timeout: Duration,
     admitted: AtomicUsize,
     checkouts: AtomicU64,
+    telemetry: Arc<DatabaseTelemetry>,
     #[cfg(test)]
     setup_activity: Arc<SetupActivity>,
 }
@@ -335,6 +424,8 @@ impl Database {
         let busy_ms = busy_timeout.as_millis().min(i32::MAX as u128);
         let busy_setting = format!("PRAGMA busy_timeout={busy_ms};");
         let mut manager_config = ManagerConfig::default();
+        let telemetry = DatabaseTelemetry::new(capacity);
+        let manager_telemetry = telemetry.clone();
         manager_config.recycling_method = RecyclingMethod::Fast;
         #[cfg(test)]
         let setup_activity = Arc::new(SetupActivity::default());
@@ -343,6 +434,7 @@ impl Database {
         manager_config.custom_setup = Box::new(move |url| {
             let url = url.to_owned();
             let busy_setting = busy_setting.clone();
+            let telemetry = manager_telemetry.clone();
             let progress = STARTUP_CHECKOUT_PROGRESS.try_with(Arc::clone).ok();
             #[cfg(test)]
             let setup_activity = manager_activity.clone();
@@ -375,7 +467,12 @@ impl Database {
                         })?;
                     }
                     advance("pool checkout completion");
-                    connection.set_instrumentation(SqliteObservation::default());
+                    connection.set_instrumentation(SqliteObservation {
+                        query_started: None,
+                        transaction: telemetry.connection(),
+                        transaction_control: None,
+                        telemetry,
+                    });
                     Ok::<_, diesel::ConnectionError>(connection)
                 })
                 .await
@@ -400,6 +497,7 @@ impl Database {
             operation_timeout,
             admitted: AtomicUsize::new(0),
             checkouts: AtomicU64::new(0),
+            telemetry,
             #[cfg(test)]
             setup_activity,
         })))
@@ -418,6 +516,15 @@ impl Database {
             admitted_operations: self.0.admitted.load(Ordering::Relaxed),
             checkouts: self.0.checkouts.load(Ordering::Relaxed),
         }
+    }
+
+    pub(crate) fn observe_gc(&self) -> (GcWorkerObservation, GcObservation) {
+        self.0.telemetry.start_gc()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn telemetry(&self) -> Arc<DatabaseTelemetry> {
+        self.0.telemetry.clone()
     }
 
     /// Run legacy pure synchronous SQL helpers on the adapter's blocking worker.
@@ -472,6 +579,7 @@ impl Database {
         timeout: Duration,
         startup: Option<Arc<StartupCheckoutProgress>>,
     ) -> horme::Result<DatabaseLease> {
+        self.0.telemetry.ensure_monitor();
         let permit = self
             .0
             .admission
