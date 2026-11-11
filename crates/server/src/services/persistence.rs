@@ -1,6 +1,8 @@
 //! Atomic database commits for immutable blobs and durable deferred cleanup.
 use super::StorageBackend;
-use crate::middleware::request_observability::with_database_stage;
+use crate::middleware::request_observability::{
+    with_database_stage, with_request_database_observation,
+};
 use crate::state::DbPool;
 use chrono::Utc;
 use contrix_core::error::AppError;
@@ -283,6 +285,13 @@ struct GcPath {
     path: String,
 }
 
+// Walk the FIFO index directly: the claim-deadline index cannot also satisfy
+// this ordering and otherwise sorts the eligible backlog before applying LIMIT.
+const SELECT_STORAGE_GC_PATHS_SQL: &str =
+    "SELECT g.path FROM storage_gc g INDEXED BY idx_storage_gc_order WHERE g.claim_until<=?
+     AND NOT EXISTS(SELECT 1 FROM blob_inventory b WHERE b.path=g.path AND b.state='writing' AND b.lease_until>?)
+     ORDER BY g.created_at,g.path LIMIT ?";
+
 async fn queue_unreferenced_candidate(db: DbPool, candidate: String) {
     loop {
         let path = candidate.clone();
@@ -346,7 +355,7 @@ pub async fn stage_blob(
 ) -> Result<StagedBlob, AppError> {
     storage.attach_database(db.clone())?;
     let db = db.clone();
-    tokio::spawn(async move {
+    tokio::spawn(with_request_database_observation(async move {
         let _capacity = capacity;
         let path = format!(
             "{owner}/{}/{}",
@@ -370,7 +379,7 @@ pub async fn stage_blob(
             return Err(error);
         }
         Ok::<_, AppError>(staged)
-    })
+    }))
     .await
     .map_err(|error| AppError::Storage(format!("Staged upload worker failed: {error}")))?
 }
@@ -503,36 +512,38 @@ async fn drain_storage_gc_page(
         // 120-second ownership lease. Database work never waits on storage I/O.
         let limit = (100 - visited).min(16) as i64;
         let excluded = failed.clone();
-        let (selected, claims) = db.run(move |conn| {
-            let now = Utc::now().timestamp();
-            let paths = diesel::sql_query(
-                "SELECT g.path FROM storage_gc g WHERE g.claim_until<=?
-                 AND NOT EXISTS(SELECT 1 FROM blob_inventory b WHERE b.path=g.path AND b.state='writing' AND b.lease_until>?)
-                 ORDER BY g.created_at,g.path LIMIT ?",
-            )
-            .bind::<BigInt, _>(now)
-            .bind::<BigInt, _>(now)
-            .bind::<BigInt, _>(limit + excluded.len() as i64)
-            .load::<GcPath>(conn)?
-            .into_iter()
-            .filter(|entry| !excluded.contains(&entry.path))
-            .take(limit as usize)
-            .collect::<Vec<_>>();
-            let selected = paths.len();
-            if paths.is_empty() {
-                return Ok::<_, AppError>((0, Vec::new()));
-            }
-            let claims = conn.immediate_transaction::<_, AppError, _>(|conn| {
-                let mut claims = Vec::new();
-                for entry in paths {
-                    if let Some(token) = super::maintenance::claim_gc_in_transaction(conn, &entry.path, Utc::now().timestamp())? {
-                        claims.push((entry.path, token));
-                    }
+        let (selected, claims) = db
+            .run(move |conn| {
+                let now = Utc::now().timestamp();
+                let paths = diesel::sql_query(SELECT_STORAGE_GC_PATHS_SQL)
+                    .bind::<BigInt, _>(now)
+                    .bind::<BigInt, _>(now)
+                    .bind::<BigInt, _>(limit + excluded.len() as i64)
+                    .load::<GcPath>(conn)?
+                    .into_iter()
+                    .filter(|entry| !excluded.contains(&entry.path))
+                    .take(limit as usize)
+                    .collect::<Vec<_>>();
+                let selected = paths.len();
+                if paths.is_empty() {
+                    return Ok::<_, AppError>((0, Vec::new()));
                 }
-                Ok(claims)
-            })?;
-            Ok((selected, claims))
-        }).await?;
+                let claims = conn.immediate_transaction::<_, AppError, _>(|conn| {
+                    let mut claims = Vec::new();
+                    for entry in paths {
+                        if let Some(token) = super::maintenance::claim_gc_in_transaction(
+                            conn,
+                            &entry.path,
+                            Utc::now().timestamp(),
+                        )? {
+                            claims.push((entry.path, token));
+                        }
+                    }
+                    Ok(claims)
+                })?;
+                Ok((selected, claims))
+            })
+            .await?;
         if selected == 0 {
             break;
         }
@@ -1219,6 +1230,181 @@ pub async fn purge_trashed(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    async fn gc_selection_database() -> DbPool {
+        let db = DbPool::with_timeouts(
+            ":memory:",
+            1,
+            Duration::from_secs(3),
+            Duration::from_secs(15),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        db.run_startup_migrations(|conn| {
+            crate::migrations::run_directory(
+                conn,
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn gc_selection_uses_fifo_index_without_sorting_the_backlog() {
+        let db = gc_selection_database().await;
+        db.run(|conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                // Reverse insertion and tied timestamps exercise both FIFO keys.
+                for index in (0..1024).rev() {
+                    diesel::sql_query("INSERT INTO storage_gc(path,created_at) VALUES (?,?)")
+                        .bind::<Text, _>(format!("object-{index:04}"))
+                        .bind::<Text, _>(format!("2000-01-01T00:{:02}:00Z", (1023 - index) / 32))
+                        .execute(conn)?;
+                }
+                Ok(())
+            })?;
+
+            #[derive(QueryableByName)]
+            struct QueryPlan {
+                #[diesel(sql_type = Text)]
+                detail: String,
+            }
+            let plan =
+                diesel::sql_query(format!("EXPLAIN QUERY PLAN {SELECT_STORAGE_GC_PATHS_SQL}"))
+                    .bind::<BigInt, _>(10_000_i64)
+                    .bind::<BigInt, _>(10_000_i64)
+                    .bind::<BigInt, _>(16_i64)
+                    .load::<QueryPlan>(conn)?;
+            assert!(
+                plan.iter()
+                    .any(|row| row.detail.contains("idx_storage_gc_order"))
+            );
+            assert!(
+                plan.iter()
+                    .all(|row| !row.detail.to_ascii_uppercase().contains("TEMP B-TREE")),
+                "FIFO selection must apply LIMIT without a temporary sort: {:?}",
+                plan.iter().map(|row| &row.detail).collect::<Vec<_>>()
+            );
+
+            // Compare the production query to its previous, unconstrained form.
+            // Both must independently return the actual oldest sixteen paths.
+            let original =
+                SELECT_STORAGE_GC_PATHS_SQL.replace(" INDEXED BY idx_storage_gc_order", "");
+            assert_ne!(original, SELECT_STORAGE_GC_PATHS_SQL);
+            let expected = (992..1008)
+                .map(|index| format!("object-{index:04}"))
+                .collect::<Vec<_>>();
+            for sql in [SELECT_STORAGE_GC_PATHS_SQL, original.as_str()] {
+                let actual = diesel::sql_query(sql)
+                    .bind::<BigInt, _>(10_000_i64)
+                    .bind::<BigInt, _>(10_000_i64)
+                    .bind::<BigInt, _>(16_i64)
+                    .load::<GcPath>(conn)?
+                    .into_iter()
+                    .map(|row| row.path)
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected);
+            }
+            Ok::<_, AppError>(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_fifo_selection_preserves_claims_writers_and_excluded_failures() {
+        let db = gc_selection_database().await;
+        let temp = tempfile::tempdir().unwrap();
+        let storage = StorageBackend::Local(super::super::StorageService::new(
+            temp.path().to_str().unwrap(),
+        ));
+        for index in 0..48 {
+            std::fs::write(temp.path().join(format!("object-{index:04}")), b"object").unwrap();
+        }
+        let now = Utc::now().timestamp();
+        db.run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                for index in (0..48).rev() {
+                    let path = format!("object-{index:04}");
+                    diesel::sql_query("INSERT INTO storage_gc(path,created_at) VALUES (?,'2000-01-01T00:00:00Z')")
+                        .bind::<Text, _>(&path).execute(conn)?;
+                    diesel::sql_query("INSERT INTO blob_inventory(path,state,first_seen) VALUES (?,'ready',0)")
+                        .bind::<Text, _>(&path).execute(conn)?;
+                }
+                diesel::sql_query("UPDATE storage_gc SET claim_token='active',claim_until=? WHERE path='object-0020'")
+                    .bind::<BigInt, _>(now + 3600).execute(conn)?;
+                diesel::sql_query("UPDATE blob_inventory SET state='deleting' WHERE path='object-0020'")
+                    .execute(conn)?;
+                diesel::sql_query("UPDATE blob_inventory SET state='writing',token='live',lease_until=? WHERE path='object-0021'")
+                    .bind::<BigInt, _>(now + 3600).execute(conn)?;
+                diesel::sql_query("UPDATE storage_gc SET claim_token='expired',claim_until=? WHERE path='object-0022'")
+                    .bind::<BigInt, _>(now - 3600).execute(conn)?;
+                diesel::sql_query("UPDATE blob_inventory SET state='writing',token='expired',lease_until=? WHERE path='object-0023'")
+                    .bind::<BigInt, _>(now - 3600).execute(conn)?;
+                Ok(())
+            })
+        }).await.unwrap();
+
+        // More than one wave's failed prefix must not hide later eligible work:
+        // production selection requests limit + excluded.len() before filtering.
+        let mut failed = (0..20)
+            .map(|index| format!("object-{index:04}"))
+            .collect::<HashSet<_>>();
+        let page = drain_storage_gc_page(&db, &storage, &mut failed)
+            .await
+            .unwrap();
+        assert_eq!(page.visited, 26);
+        assert!(page.error.is_none());
+        assert_eq!(failed.len(), 20);
+        db.run(|conn| {
+            let queued = diesel::sql_query("SELECT path FROM storage_gc ORDER BY path")
+                .load::<GcPath>(conn)?
+                .into_iter()
+                .map(|row| row.path)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                queued,
+                (0..22)
+                    .map(|index| format!("object-{index:04}"))
+                    .collect::<Vec<_>>()
+            );
+            #[derive(QueryableByName)]
+            struct InventoryState {
+                #[diesel(sql_type = Text)]
+                path: String,
+                #[diesel(sql_type = Text)]
+                state: String,
+            }
+            let inventory =
+                diesel::sql_query("SELECT path,state FROM blob_inventory ORDER BY path")
+                    .load::<InventoryState>(conn)?;
+            assert_eq!(inventory.len(), 48);
+            for (index, row) in inventory.iter().enumerate() {
+                assert_eq!(row.path, format!("object-{index:04}"));
+                let expected = match index {
+                    0..20 => "ready",
+                    20 => "deleting",
+                    21 => "writing",
+                    _ => "deleted",
+                };
+                assert_eq!(row.state, expected);
+            }
+            Ok::<_, AppError>(())
+        })
+        .await
+        .unwrap();
+        for index in 0..48 {
+            assert_eq!(
+                temp.path().join(format!("object-{index:04}")).exists(),
+                index < 22
+            );
+        }
+        drop(storage);
+        temp.close().unwrap();
+    }
 
     #[tokio::test]
     async fn commit_notification_reports_durable_success_after_the_caller_times_out() {

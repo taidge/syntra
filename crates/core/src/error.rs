@@ -80,6 +80,7 @@ impl AppError {
             "database admission capacity exceeded"
                 | "database checkout timed out"
                 | "database operation timed out; cleanup remains admitted"
+                | "collaboration database backpressure deadline exceeded"
                 | "database is locked"
                 | "database is busy"
                 | "database table is locked"
@@ -142,6 +143,7 @@ mod tests {
             "database admission capacity exceeded",
             "connection acquisition failed: database checkout timed out",
             "database operation timed out; cleanup remains admitted",
+            "collaboration database backpressure deadline exceeded",
             "database is locked",
             "database is busy",
             "database table is locked: documents",
@@ -162,6 +164,7 @@ mod tests {
             "UNIQUE constraint failed: documents.id",
             "disk I/O error",
             "other timeout",
+            "collaboration database backpressure deadline exceeded: unexpected detail",
         ] {
             let error = AppError::Database(message.into());
             assert!(!error.is_transient_database(), "{message}");

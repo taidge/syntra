@@ -1,4 +1,5 @@
 use crate::middleware::auth::{AuthenticatedCredential, get_credential, validate_credential};
+use crate::middleware::request_observability::{observe_ws_operation, with_database_stage};
 use crate::services::collaboration::{self, Snapshot};
 use crate::state::AppState;
 use contrix_collab::CollabMessage;
@@ -54,7 +55,7 @@ where
             Ok(result) => return result,
             Err(_) => {
                 return Err(AppError::Database(
-                    "database operation timed out; cleanup remains admitted".into(),
+                    "collaboration database backpressure deadline exceeded".into(),
                 ));
             }
         }
@@ -146,8 +147,8 @@ async fn send(ws: &mut WebSocket, message: &CollabMessage) -> bool {
     )
 }
 
-async fn close_with_error(ws: &mut WebSocket, error: &AppError) {
-    let (code, reason) = match error {
+fn close_policy(error: &AppError) -> (u16, &'static str) {
+    match error {
         error if error.is_transient_database() => {
             (1013u16, "Database busy; reconnect to resynchronize")
         }
@@ -158,7 +159,11 @@ async fn close_with_error(ws: &mut WebSocket, error: &AppError) {
             1011u16,
             "Collaboration unavailable; reconnect to resynchronize",
         ),
-    };
+    }
+}
+
+async fn close_with_error(ws: &mut WebSocket, error: &AppError) {
+    let (code, reason) = close_policy(error);
     send(
         ws,
         &CollabMessage::Error {
@@ -269,9 +274,30 @@ async fn handle_ws(
                     Ok(CollabMessage::Operation(mut operation))=>{
                         operation.user_id=user;
                         let op_id=operation.id.clone();
-                        match collaboration::commit_operation_with_credential(&state,id,operation,&credential).await{
+                        let mut close_on_error = false;
+                        let result = observe_ws_operation(
+                            id,
+                            op_id.client_id,
+                            op_id.counter,
+                            async {
+                                let current = collaboration::commit_operation_with_credential(
+                                    &state, id, operation, &credential,
+                                ).await?;
+                                close_on_error = true;
+                                // This operation's observer owns the failure warning.
+                                // Keep the same revalidation/deadline without authorized's
+                                // separate warning, and retain its close-on-error policy.
+                                with_database_stage(
+                                    "ws_revalidation",
+                                    database_backpressure(
+                                        id, || authorized_once(&state, &credential, id),
+                                    ),
+                                ).await?;
+                                Ok(current)
+                            },
+                        ).await;
+                        match result{
                             Ok(current)=>{
-                                if let Err(error)=authorized(&state,&credential,id).await {close_error=Some(error);break;}
                                 let version=current.version as u64;
                                 // Only the committing sender receives an ACK.
                                 // Both document and operation record are durable.
@@ -281,6 +307,10 @@ async fn handle_ws(
                                 }
                                 Some(CollabMessage::Ack{op_id})
                             }
+                            Err(error) if close_on_error => {
+                                close_error = Some(error);
+                                break;
+                            },
                             Err(error)=>Some(CollabMessage::Error{message:error.to_string()}),
                         }
                     }
@@ -307,4 +337,37 @@ async fn handle_ws(
             .await;
     }
     state.collab.leave_session(id, user).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn revalidation_deadline_has_its_own_cause_and_keeps_retryable_close_policy() {
+        let error =
+            database_backpressure(Uuid::nil(), std::future::pending::<Result<(), AppError>>)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Database error: collaboration database backpressure deadline exceeded"
+        );
+        assert_eq!(error.status_code(), 503);
+        assert_eq!(
+            crate::middleware::request_observability::database_cause(&error),
+            "ws_backpressure_deadline"
+        );
+        assert_eq!(
+            close_policy(&error),
+            (1013, "Database busy; reconnect to resynchronize")
+        );
+        let worker =
+            AppError::Database("database operation timed out; cleanup remains admitted".into());
+        assert_eq!(
+            crate::middleware::request_observability::database_cause(&worker),
+            "operation_timeout"
+        );
+        assert_eq!(close_policy(&worker), close_policy(&error));
+    }
 }
