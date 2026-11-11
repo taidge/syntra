@@ -6,6 +6,7 @@ pub mod email;
 pub mod maintenance;
 pub mod notification;
 pub mod notification_bus;
+pub mod operation_history;
 pub mod password;
 pub mod password_crypto;
 pub mod persistence;

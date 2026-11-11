@@ -255,6 +255,15 @@ async fn main() -> anyhow::Result<()> {
     // not postpone this 60-second policy, and constructors never spawn tasks.
     tokio::spawn(state.collab.clone().run_session_reaper());
 
+    // Audit-log row/byte retention also retries without any subsequent traffic
+    // and remains enabled independently of optional version-history retention.
+    tokio::spawn(
+        services::operation_history::run_operation_history_retention(
+            state.db.clone(),
+            std::time::Duration::from_secs(config.maintenance.interval_seconds.max(1)),
+        ),
+    );
+
     // -----------------------------------------------------------------------
     // 8b. Shared transactional trash purge and retryable object cleanup.
     // -----------------------------------------------------------------------

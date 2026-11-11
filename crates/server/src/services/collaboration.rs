@@ -9,8 +9,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
-pub(super) const MAX_HISTORY_OPERATIONS: u64 = 2048;
-const MAX_HISTORY_BYTES: i64 = 32 * 1024 * 1024;
+pub(super) const MAX_HISTORY_OPERATIONS: u64 = super::operation_history::MAX_HISTORY_ROWS as u64;
+const MAX_HISTORY_BYTES: i64 = super::operation_history::MAX_HISTORY_BYTES;
 pub struct Snapshot {
     pub content: Value,
     pub version: i32,
@@ -198,14 +198,6 @@ async fn commit_operation_inner(
         .collab
         .publish_snapshot(id, current.content.clone(), current.version as u64)
         .await;
-    // The snapshot is durable, so bounded audit history is not required to replay
-    // document contents. Retain recent operations for OT and idempotent retries.
-    let doc = id.to_string();
-    if let Err(error)=state.db.run(move |conn| {
-        diesel::RunQueryDsl::execute(diesel::sql_query("DELETE FROM operation_log WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY version DESC) AS n, SUM(LENGTH(CAST(op_data AS BLOB))) OVER (ORDER BY version DESC ROWS UNBOUNDED PRECEDING) AS bytes FROM operation_log WHERE document_id = ?) WHERE n > 2048 OR bytes > 33554432)")
-            .bind::<diesel::sql_types::Text,_>(doc),conn)?;
-        Ok::<_,AppError>(())
-    }).await { tracing::warn!(%id,%error,"Operation history compaction deferred"); }
     Ok(current)
 }
 

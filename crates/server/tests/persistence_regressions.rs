@@ -205,6 +205,249 @@ async fn setup() -> (TestServer, String, String) {
     let user = body["data"]["user"]["id"].as_str().unwrap().to_owned();
     (server, token, user)
 }
+
+/// A valid legacy no-op log entry can carry unknown JSON metadata. This lets
+/// retention tests hit the byte boundary exactly without sending an invalid
+/// oversized websocket message or allocating a large current document.
+fn operation_log_with_size(operation: &contrix_collab::Operation, size: usize) -> String {
+    let mut value = serde_json::to_value(operation).unwrap();
+    value["legacy_fixture_padding"] = json!("");
+    let overhead = serde_json::to_string(&value).unwrap().len();
+    assert!(size >= overhead);
+    value["legacy_fixture_padding"] = json!("x".repeat(size - overhead));
+    let value = serde_json::to_string(&value).unwrap();
+    assert_eq!(value.len(), size);
+    value
+}
+
+async fn seed_two_legacy_operations(
+    server: &TestServer,
+    document: &str,
+    user: &str,
+    first_size: usize,
+    last_size: usize,
+) {
+    let (document, user) = (document.to_owned(), user.to_owned());
+    server.db.run(move |conn| {
+        use contrix_core::{error::AppError, models::{Document, NewOperationLogEntry, NewVersion}, schema::{documents::dsl as d, operation_log::dsl as ol, versions::dsl as v}};
+        use diesel::{prelude::*, sql_types::{BigInt, Integer, Text}};
+        conn.immediate_transaction::<_, AppError, _>(|conn| {
+            let row = d::documents.find(&document).first::<Document>(conn)?;
+            assert_eq!(row.version, 1);
+            let content: Value = serde_json::from_str(row.content.as_ref().unwrap()).unwrap();
+            let client = uuid::Uuid::new_v4();
+            let now = chrono::Utc::now().to_rfc3339();
+            for (counter, size) in [(1_u64, first_size), (2, last_size)] {
+                let operation = contrix_collab::Operation::new(uuid::Uuid::parse_str(&user).unwrap(), client, counter, contrix_collab::OpType::Replace {
+                    path: vec![], old_value: content.clone(), new_value: content.clone(),
+                }).with_base_version(counter);
+                let id = format!("{document}:{client}:{counter}");
+                diesel::insert_into(v::versions).values(NewVersion {
+                    id: uuid::Uuid::new_v4().to_string(), document_id: document.clone(),
+                    version_number: i32::try_from(counter).unwrap(), content: row.content.clone(),
+                    created_by: user.clone(), label: None, created_at: now.clone(),
+                }).execute(conn)?;
+                diesel::insert_into(ol::operation_log).values(NewOperationLogEntry {
+                    id: id.clone(), document_id: document.clone(), user_id: user.clone(),
+                    op_type: serde_json::to_string(&operation.op_type).unwrap(),
+                    op_data: operation_log_with_size(&operation, size),
+                    version: i32::try_from(counter+1).unwrap(), created_at: now.clone(),
+                }).execute(conn)?;
+                diesel::sql_query("INSERT INTO operation_receipts(id,document_id,client_id,counter,user_id,request_hash,version) VALUES (?,?,?,?,?,?,?)")
+                    .bind::<Text,_>(&id).bind::<Text,_>(&document).bind::<Text,_>(client.to_string())
+                    .bind::<BigInt,_>(i64::try_from(counter).unwrap()).bind::<Text,_>(&user)
+                    .bind::<Text,_>(persistence::operation_request_hash(&operation)?)
+                    .bind::<Integer,_>(i32::try_from(counter+1).unwrap()).execute(conn)?;
+            }
+            diesel::sql_query("INSERT INTO operation_clients(document_id,client_id,user_id,max_counter) VALUES (?,?,?,2)")
+                .bind::<Text,_>(&document).bind::<Text,_>(client.to_string()).bind::<Text,_>(&user).execute(conn)?;
+            diesel::update(d::documents.find(&document)).set(d::version.eq(3)).execute(conn)?;
+            Ok(())
+        })
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn operation_history_commit_enforces_exact_32_mib_newest_suffix() {
+    const BUDGET: usize = 32 * 1024 * 1024;
+    for excess in [0_usize, 1] {
+        let (server, token, user) = setup().await;
+        let (id, _, _) = server
+            .create_document(&token, "byte boundary", "writer", None)
+            .await;
+        let initial = document(&server, &token, &id).await["content"].clone();
+        let content = contrix_doc_engine::writer::writer_content_with_text(
+            &initial,
+            "byte retention committed",
+        );
+        let operation = contrix_collab::Operation::new(
+            uuid::Uuid::parse_str(&user).unwrap(),
+            uuid::Uuid::new_v4(),
+            1,
+            contrix_collab::OpType::Replace {
+                path: vec![],
+                old_value: initial,
+                new_value: content.clone(),
+            },
+        )
+        .with_base_version(3);
+        // commit_document_operation serializes through serde_json::Value.
+        let new_log_size = serde_json::to_string(&serde_json::to_value(&operation).unwrap())
+            .unwrap()
+            .len();
+        seed_two_legacy_operations(&server, &id, &user, 2048, BUDGET - new_log_size + excess).await;
+        let version = persistence::commit_document_operation(
+            &server.db,
+            &server.state.storage,
+            &id,
+            &user,
+            3,
+            serde_json::to_string(&content).unwrap(),
+            &operation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(version, 4);
+        #[derive(diesel::QueryableByName)]
+        struct Length {
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            version: i32,
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            bytes: i64,
+        }
+        let key = id.clone();
+        let lengths = server.db.run(move |conn| {
+            use diesel::RunQueryDsl;
+            diesel::sql_query("SELECT version,LENGTH(CAST(op_data AS BLOB)) AS bytes FROM operation_log WHERE document_id=? ORDER BY version")
+                .bind::<diesel::sql_types::Text,_>(key).load::<Length>(conn)
+        }).await.unwrap();
+        assert_eq!(
+            lengths.iter().map(|r| r.version).collect::<Vec<_>>(),
+            if excess == 0 { vec![3, 4] } else { vec![4] }
+        );
+        assert_eq!(
+            lengths.iter().map(|r| r.bytes).sum::<i64>(),
+            if excess == 0 {
+                BUDGET as i64
+            } else {
+                new_log_size as i64
+            }
+        );
+        let after = persistence_snapshot(&server, &id).await;
+        assert_eq!(after["document"]["version"], 4);
+        assert_eq!(
+            serde_json::from_str::<Value>(after["document"]["content"].as_str().unwrap()).unwrap(),
+            content
+        );
+        assert_eq!(after["history"].as_array().unwrap().len(), 3);
+        let blob = server
+            .state
+            .storage
+            .read_file(after["file"]["path"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&blob).unwrap(), content);
+        // Same operation identity remains a receipt hit after its audit suffix is
+        // compacted: replay must not add a version or alter the charged bytes.
+        assert_eq!(
+            persistence::commit_document_operation(
+                &server.db,
+                &server.state.storage,
+                &id,
+                &user,
+                3,
+                serde_json::to_string(&content).unwrap(),
+                &operation
+            )
+            .await
+            .unwrap(),
+            4
+        );
+        assert_eq!(persistence_snapshot(&server, &id).await, after);
+    }
+}
+
+#[tokio::test]
+async fn operation_history_future_row_conflicts_without_partial_metadata_commit() {
+    use diesel::{prelude::*, sql_types::Text};
+    let (server, token, user) = setup().await;
+    let (id, _, _) = server
+        .create_document(&token, "future log guard", "writer", None)
+        .await;
+    seed_two_legacy_operations(&server, &id, &user, 2048, 2048).await;
+    // Deliberately inject an inconsistent legacy future log. A normal commit
+    // must neither erase evidence of it nor ACK past the history resource guard.
+    let key = id.clone();
+    server
+        .db
+        .run(move |conn| {
+            diesel::sql_query(
+                "UPDATE operation_log SET version=4 WHERE document_id=? AND version=3",
+            )
+            .bind::<Text, _>(key)
+            .execute(conn)
+        })
+        .await
+        .unwrap();
+    let before = persistence_snapshot(&server, &id).await;
+    let inventory = inventory_paths(&server).await;
+    let old_path = before["file"]["path"].as_str().unwrap().to_owned();
+    let old_blob = server.state.storage.read_file(&old_path).await.unwrap();
+    let initial: Value =
+        serde_json::from_str(before["document"]["content"].as_str().unwrap()).unwrap();
+    let content = contrix_doc_engine::writer::writer_content_with_text(
+        &initial,
+        "Must not commit past future log",
+    );
+    let operation = contrix_collab::Operation::new(
+        uuid::Uuid::parse_str(&user).unwrap(),
+        uuid::Uuid::new_v4(),
+        1,
+        contrix_collab::OpType::Replace {
+            path: vec![],
+            old_value: initial,
+            new_value: content.clone(),
+        },
+    )
+    .with_base_version(3);
+    let error = persistence::commit_document_operation(
+        &server.db,
+        &server.state.storage,
+        &id,
+        &user,
+        3,
+        serde_json::to_string(&content).unwrap(),
+        &operation,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, contrix_core::error::AppError::Conflict(_)));
+    assert_eq!(persistence_snapshot(&server, &id).await, before);
+    #[derive(diesel::QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        value: i64,
+    }
+    let key = id.clone();
+    let count = server.db.run(move |conn| diesel::sql_query("SELECT COUNT(*) AS value FROM operation_log WHERE document_id=? AND version IN (2,4)")
+        .bind::<Text,_>(key).get_result::<Count>(conn)).await.unwrap();
+    assert_eq!(
+        count.value, 2,
+        "future evidence and old suffix must survive rollback"
+    );
+    let added = inventory_paths(&server)
+        .await
+        .difference(&inventory)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(added.len(), 1);
+    assert_candidate_collected(&server, &added[0]).await;
+    assert_eq!(
+        server.state.storage.read_file(&old_path).await.unwrap(),
+        old_blob
+    );
+}
+
 async fn sql(server: &TestServer, statement: String) {
     server
         .db
@@ -758,6 +1001,7 @@ async fn expired_lock_takeover_contends_and_fences_the_previous_token() {
     // Initialize both pooled connections before imposing the external writer
     // lock. Two channel acknowledgements prove both leases exist; no sleep or
     // cold connection setup is allowed to stand in for lock contention.
+    let warmup_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let (entered, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
     let mut warmers = Vec::new();
     let mut releases = Vec::new();
@@ -778,7 +1022,7 @@ async fn expired_lock_takeover_contends_and_fences_the_previous_token() {
         }));
     }
     for _ in 0..2 {
-        tokio::time::timeout(std::time::Duration::from_secs(5), arrivals.recv())
+        tokio::time::timeout_at(warmup_deadline, arrivals.recv())
             .await
             .unwrap()
             .unwrap();
@@ -787,8 +1031,27 @@ async fn expired_lock_takeover_contends_and_fences_the_previous_token() {
         release.send(()).unwrap();
     }
     for warmer in warmers {
-        warmer.await.unwrap();
+        tokio::time::timeout_at(warmup_deadline, warmer)
+            .await
+            .expect("both warmup SQL workers must finish within the original budget")
+            .unwrap();
     }
+    // run() returns the SQL result before detached lease cleanup returns the
+    // Object to the pool. Observe that completion under the same warmup budget.
+    tokio::time::timeout_at(warmup_deadline, async {
+        loop {
+            let state = server.db.state();
+            if state.connections == 2
+                && state.idle_connections == 2
+                && state.admitted_operations == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both prewarmed leases must finish cleanup before writer contention");
     assert_eq!(server.db.state().idle_connections, 2);
     let mut writer =
         diesel::SqliteConnection::establish(&server.state.config.database.url).unwrap();

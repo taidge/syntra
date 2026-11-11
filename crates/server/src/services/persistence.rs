@@ -1027,6 +1027,15 @@ async fn commit_document_inner(
                     "Document changed; reload before saving".into(),
                 ));
             }
+            // Check against the durable version before incrementing it: a
+            // pre-existing current+1 log must not be legitimized by this write.
+            if operation.is_some()
+                && super::operation_history::has_future_history(conn, &id, current.version)?
+            {
+                return Err(AppError::Conflict(
+                    "Operation history is ahead of the document; synchronize before saving".into(),
+                ));
+            }
             let next = current
                 .version
                 .checked_add(1)
@@ -1104,7 +1113,17 @@ async fn commit_document_inner(
                     .bind::<Text, _>(&id).bind::<Text, _>(client).bind::<Text, _>(user).bind::<BigInt, _>(counter).execute(conn)?;
                 diesel::sql_query("DELETE FROM operation_receipts WHERE document_id = ? AND id IN (SELECT id FROM operation_receipts WHERE document_id = ? ORDER BY version DESC LIMIT -1 OFFSET 2048)")
                     .bind::<Text, _>(&id).bind::<Text, _>(&id).execute(conn)?;
-
+                // Audit retention belongs to this same IMMEDIATE transaction.
+                // A failed or insufficient bounded pass cannot publish/ACK a
+                // new operation whose history exceeds the shared policy.
+                let history = super::operation_history::prune_operation_history_page(
+                    conn, &id, next, super::operation_history::MAX_PRUNE_PAGE,
+                )?;
+                if history.has_excess || history.has_future {
+                    return Err(AppError::Conflict(
+                        "Operation history cleanup is backlogged; retry after cleanup".into(),
+                    ));
+                }
             }
             Ok(next)
         })

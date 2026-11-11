@@ -215,6 +215,336 @@ async fn durable(server: &TestServer, document: &str) -> DurableState {
         .unwrap()
 }
 
+/// Seed an internally coherent no-op suffix, avoiding thousands of storage PUTs
+/// while the operation under test still uses the real authenticated WS path.
+async fn seed_operation_suffix(server: &TestServer, document: &str, count: u64) {
+    let document = document.to_owned();
+    server.db.run(move |conn| {
+        use contrix_core::{error::AppError, models::{Document, File, NewOperationLogEntry, NewVersion}};
+        use diesel::sql_types::{BigInt, Integer, Text};
+        conn.immediate_transaction::<_, AppError, _>(|conn| {
+            let row = d::documents.find(&document).first::<Document>(conn)?;
+            assert_eq!(row.version, 1, "suffix fixture requires a fresh document");
+            let file = f::files.find(&row.file_id).first::<File>(conn)?;
+            let user = Uuid::parse_str(&file.owner_id).unwrap();
+            let content: Value = serde_json::from_str(row.content.as_ref().unwrap()).unwrap();
+            let client = Uuid::new_v4();
+            let now = chrono::Utc::now().to_rfc3339();
+            for counter in 1..=count {
+                let operation = Operation::new(user, client, counter, OpType::Replace {
+                    path: vec![], old_value: content.clone(), new_value: content.clone(),
+                }).with_base_version(counter);
+                let id = format!("{document}:{client}:{counter}");
+                let hash = contrix_server::services::persistence::operation_request_hash(&operation)?;
+                diesel::insert_into(v::versions).values(NewVersion {
+                    id: Uuid::new_v4().to_string(), document_id: document.clone(),
+                    version_number: i32::try_from(counter).unwrap(), content: row.content.clone(),
+                    created_by: file.owner_id.clone(), label: None, created_at: now.clone(),
+                }).execute(conn)?;
+                diesel::insert_into(ol::operation_log).values(NewOperationLogEntry {
+                    id: id.clone(), document_id: document.clone(), user_id: file.owner_id.clone(),
+                    op_type: serde_json::to_string(&operation.op_type).unwrap(),
+                    op_data: serde_json::to_string(&operation).unwrap(),
+                    version: i32::try_from(counter + 1).unwrap(), created_at: now.clone(),
+                }).execute(conn)?;
+                diesel::sql_query("INSERT INTO operation_receipts(id,document_id,client_id,counter,user_id,request_hash,version) VALUES (?,?,?,?,?,?,?)")
+                    .bind::<Text,_>(&id).bind::<Text,_>(&document).bind::<Text,_>(client.to_string())
+                    .bind::<BigInt,_>(i64::try_from(counter).unwrap()).bind::<Text,_>(&file.owner_id)
+                    .bind::<Text,_>(hash).bind::<Integer,_>(i32::try_from(counter+1).unwrap()).execute(conn)?;
+            }
+            diesel::sql_query("INSERT INTO operation_clients(document_id,client_id,user_id,max_counter) VALUES (?,?,?,?)")
+                .bind::<Text,_>(&document).bind::<Text,_>(client.to_string()).bind::<Text,_>(&file.owner_id)
+                .bind::<BigInt,_>(i64::try_from(count).unwrap()).execute(conn)?;
+            diesel::sql_query("DELETE FROM operation_receipts WHERE document_id=? AND id IN (SELECT id FROM operation_receipts WHERE document_id=? ORDER BY version DESC LIMIT -1 OFFSET 2048)")
+                .bind::<Text,_>(&document).bind::<Text,_>(&document).execute(conn)?;
+            diesel::update(d::documents.find(&document)).set(d::version.eq(i32::try_from(count+1).unwrap())).execute(conn)?;
+            Ok(())
+        })
+    }).await.unwrap();
+}
+
+async fn operation_transaction_snapshot(server: &TestServer, document: &str) -> Value {
+    let document = document.to_owned();
+    server.db.run(move |conn| {
+        use contrix_core::{error::AppError, models::{Document, File, OperationLogEntry, Version}};
+        use diesel::sql_types::Text;
+        #[derive(QueryableByName)]
+        struct JsonRow { #[diesel(sql_type = Text)] payload: String }
+        conn.transaction::<_, AppError, _>(|conn| {
+            let row = d::documents.find(&document).first::<Document>(conn)?;
+            let file = f::files.find(&row.file_id).first::<File>(conn)?;
+            let history = v::versions.filter(v::document_id.eq(&document)).order((v::version_number,v::id)).load::<Version>(conn)?;
+            let logs = ol::operation_log.filter(ol::document_id.eq(&document)).order((ol::version,ol::id)).load::<OperationLogEntry>(conn)?;
+            let receipts = diesel::sql_query("SELECT json_object('id',id,'client',client_id,'counter',counter,'user',user_id,'hash',request_hash,'version',version) AS payload FROM operation_receipts WHERE document_id=? ORDER BY version,id")
+                .bind::<Text,_>(&document).load::<JsonRow>(conn)?.into_iter().map(|r|r.payload).collect::<Vec<_>>();
+            let clients = diesel::sql_query("SELECT json_object('client',client_id,'user',user_id,'counter',max_counter) AS payload FROM operation_clients WHERE document_id=? ORDER BY client_id")
+                .bind::<Text,_>(&document).load::<JsonRow>(conn)?.into_iter().map(|r|r.payload).collect::<Vec<_>>();
+            let retained = diesel::sql_query("SELECT json_object('path',path,'size',size) AS payload FROM retained_blobs WHERE owner_id=? ORDER BY path")
+                .bind::<Text,_>(&file.owner_id).load::<JsonRow>(conn)?.into_iter().map(|r|r.payload).collect::<Vec<_>>();
+            let quota = u::users.find(&file.owner_id).select(u::storage_used).first::<i64>(conn)?;
+            Ok(json!({"document":row,"file":file,"history":history,"logs":logs,"receipts":receipts,"clients":clients,"retained":retained,"quota":quota}))
+        })
+    }).await.unwrap()
+}
+
+async fn operation_blob_inventory(server: &TestServer) -> std::collections::BTreeSet<String> {
+    #[derive(QueryableByName)]
+    struct Path {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        path: String,
+    }
+    server
+        .db
+        .run(|conn| {
+            diesel::sql_query("SELECT path FROM blob_inventory")
+                .load::<Path>(conn)
+                .map(|rows| rows.into_iter().map(|row| row.path).collect())
+        })
+        .await
+        .unwrap()
+}
+
+async fn assert_failed_operation_candidate_collected(
+    server: &TestServer,
+    before: &std::collections::BTreeSet<String>,
+) {
+    let added = operation_blob_inventory(server)
+        .await
+        .difference(before)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        added.len(),
+        1,
+        "failed commit must stage exactly one new object"
+    );
+    let candidate = &added[0];
+    #[derive(QueryableByName)]
+    struct Cleanup {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        state: String,
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        pending: i64,
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let key = candidate.clone();
+            let status = server.db.run(move |conn| diesel::sql_query("SELECT state,(SELECT COUNT(*) FROM storage_gc WHERE path=?) AS pending FROM blob_inventory WHERE path=?")
+                .bind::<diesel::sql_types::Text,_>(&key).bind::<diesel::sql_types::Text,_>(&key)
+                .get_result::<Cleanup>(conn)).await.unwrap();
+            if status.state == "deleted" && status.pending == 0 { break; }
+            // Wait for the real detached completion owner to enqueue this
+            // candidate; only then drive the existing idempotent cleanup pass.
+            if status.pending != 0 {
+                contrix_server::services::persistence::drain_storage_gc(&server.db, &server.state.storage).await.unwrap();
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("failed operation candidate must be durably retired and physically removed");
+    assert!(server.state.storage.read_file(candidate).await.is_err());
+    assert!(
+        !server
+            ._temp_dir
+            .path()
+            .join("files")
+            .join(candidate)
+            .exists()
+    );
+    #[derive(QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        value: i64,
+    }
+    let active = server.db.run(|conn| diesel::sql_query("SELECT COUNT(*) AS value FROM blob_inventory b WHERE state IN ('ready','writing') AND NOT EXISTS(SELECT 1 FROM files WHERE path=b.path OR thumbnail_path=b.path) AND NOT EXISTS(SELECT 1 FROM retained_blobs WHERE path=b.path) AND NOT EXISTS(SELECT 1 FROM file_versions WHERE path=b.path) AND NOT EXISTS(SELECT 1 FROM upload_chunks WHERE path=b.path) AND NOT EXISTS(SELECT 1 FROM conversion_jobs WHERE output_path=b.path)")
+        .get_result::<Count>(conn)).await.unwrap();
+    assert_eq!(
+        active.value, 0,
+        "no unreferenced ready/writing candidate may remain"
+    );
+}
+
+#[tokio::test]
+async fn operation_history_delete_failure_never_acks_and_rolls_back_then_retries_once() {
+    let server = TestServer::new().await;
+    let (jwt, _) = server
+        .register("prunerollback", "prunerollback@test.invalid", "password123")
+        .await;
+    let (document, _, _) = server
+        .create_document(&jwt, "prune rollback", "writer", None)
+        .await;
+    seed_operation_suffix(&server, &document, 2048).await;
+    let mut socket = connect(&server, &document, &jwt).await;
+    let (initial, version) = snapshot(&mut socket).await;
+    assert_eq!(version, 2049);
+    let before = operation_transaction_snapshot(&server, &document).await;
+    assert_eq!(before["logs"].as_array().unwrap().len(), 2048);
+    assert_eq!(before["receipts"].as_array().unwrap().len(), 2048);
+    let old_path = before["file"]["path"].as_str().unwrap().to_owned();
+    let old_blob = server.state.storage.read_file(&old_path).await.unwrap();
+    let before_inventory = operation_blob_inventory(&server).await;
+    let target = Uuid::parse_str(&document).unwrap();
+    let published_before = server.state.collab.session_version(target).await;
+    server.db.run(move |conn| diesel::sql_query(format!(
+        "CREATE TRIGGER refuse_target_log_compaction BEFORE DELETE ON operation_log WHEN OLD.document_id='{target}' BEGIN SELECT RAISE(ABORT,'injected-operation-history-delete'); END"
+    )).execute(conn)).await.unwrap();
+    // The trigger must actually fire on an existing row, and preserve the row.
+    let probe_doc = document.clone();
+    let error = server.db.run(move |conn| diesel::sql_query("DELETE FROM operation_log WHERE id=(SELECT id FROM operation_log WHERE document_id=? ORDER BY version LIMIT 1)")
+        .bind::<diesel::sql_types::Text,_>(probe_doc).execute(conn)).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected-operation-history-delete")
+    );
+    let operation = replacement(
+        &initial,
+        version,
+        "A longer changed body must roll quota and metadata back",
+    );
+    send_operation(&mut socket, &operation).await;
+    loop {
+        match next(&mut socket).await {
+            CollabMessage::Error { message } => {
+                assert!(
+                    message.contains("injected-operation-history-delete"),
+                    "{message}"
+                );
+                break;
+            }
+            CollabMessage::UserJoined { .. } | CollabMessage::UserLeft { .. } => {}
+            other => {
+                panic!("prune failure must not ACK or publish the uncommitted operation: {other:?}")
+            }
+        }
+    }
+    assert_eq!(
+        operation_transaction_snapshot(&server, &document).await,
+        before
+    );
+    assert_eq!(
+        server.state.storage.read_file(&old_path).await.unwrap(),
+        old_blob
+    );
+    let published = server.state.collab.session_version(target).await;
+    assert_eq!(published, published_before);
+    assert_failed_operation_candidate_collected(&server, &before_inventory).await;
+    assert_eq!(
+        server.state.storage.read_file(&old_path).await.unwrap(),
+        old_blob
+    );
+    server
+        .db
+        .run(|conn| diesel::sql_query("DROP TRIGGER refuse_target_log_compaction").execute(conn))
+        .await
+        .unwrap();
+    send_operation(&mut socket, &operation).await;
+    ack(&mut socket, &operation).await;
+    let after = operation_transaction_snapshot(&server, &document).await;
+    assert_eq!(after["document"]["version"], version + 1);
+    assert_eq!(after["logs"].as_array().unwrap().len(), 2048);
+    assert_eq!(after["receipts"].as_array().unwrap().len(), 2048);
+    assert_eq!(after["history"].as_array().unwrap().len(), 2049);
+    assert_ne!(after["file"]["path"], before["file"]["path"]);
+    assert_ne!(after["quota"], before["quota"]);
+    send_operation(&mut socket, &operation).await;
+    ack(&mut socket, &operation).await;
+    assert_eq!(
+        operation_transaction_snapshot(&server, &document).await,
+        after,
+        "same op ID must commit exactly once after fault removal"
+    );
+}
+
+#[tokio::test]
+async fn operation_history_row_boundary_and_excessive_backlog_are_transactional() {
+    for count in [2047, 3060] {
+        let server = TestServer::new().await;
+        let (jwt, _) = server
+            .register(
+                "historyboundary",
+                "historyboundary@test.invalid",
+                "password123",
+            )
+            .await;
+        let (document, _, _) = server
+            .create_document(&jwt, "history boundary", "writer", None)
+            .await;
+        seed_operation_suffix(&server, &document, count).await;
+        let mut socket = connect(&server, &document, &jwt).await;
+        let (initial, version) = snapshot(&mut socket).await;
+        let before = operation_transaction_snapshot(&server, &document).await;
+        let inventory = operation_blob_inventory(&server).await;
+        let operation = replacement(&initial, version, "Bounded history commit");
+        send_operation(&mut socket, &operation).await;
+        if count == 2047 {
+            ack(&mut socket, &operation).await;
+            let after = operation_transaction_snapshot(&server, &document).await;
+            assert_eq!(after["logs"].as_array().unwrap().len(), 2048);
+            assert_eq!(after["receipts"].as_array().unwrap().len(), 2048);
+            assert_eq!(after["document"]["version"], version + 1);
+        } else {
+            // Legacy backlog needs >1000 deletions. A partial bounded foreground
+            // pass must roll back, leaving progress to the independent worker.
+            loop {
+                match next(&mut socket).await {
+                    CollabMessage::Error { message } => {
+                        assert!(message.starts_with("Conflict:"), "{message}");
+                        break;
+                    }
+                    CollabMessage::UserJoined { .. } | CollabMessage::UserLeft { .. } => {}
+                    other => panic!("oversized backlog must not ACK/publish: {other:?}"),
+                }
+            }
+            assert_eq!(
+                operation_transaction_snapshot(&server, &document).await,
+                before
+            );
+            assert_failed_operation_candidate_collected(&server, &inventory).await;
+            // Drive the exact production catch-up entry point with no new edit,
+            // then retry the original uncommitted operation identity once.
+            let mut cursor =
+                contrix_server::services::operation_history::OperationHistoryCursor::default();
+            let mut removed = 0;
+            for _ in 0..4 {
+                let page =
+                    contrix_server::services::operation_history::catch_up_operation_history_page(
+                        &server.db,
+                        &mut cursor,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(page.failed_entities, 0);
+                assert!(!page.has_future);
+                removed += page.removed;
+                if !page.has_excess {
+                    break;
+                }
+            }
+            assert_eq!(removed, 3060 - 2048);
+            let caught_up = operation_transaction_snapshot(&server, &document).await;
+            assert_eq!(caught_up["logs"].as_array().unwrap().len(), 2048);
+            let mut expected = before.clone();
+            expected["logs"] = caught_up["logs"].clone();
+            assert_eq!(
+                caught_up, expected,
+                "idle catch-up must only compact audit rows"
+            );
+            send_operation(&mut socket, &operation).await;
+            ack(&mut socket, &operation).await;
+            let committed = operation_transaction_snapshot(&server, &document).await;
+            assert_eq!(committed["document"]["version"], version + 1);
+            assert_eq!(committed["logs"].as_array().unwrap().len(), 2048);
+            assert_eq!(committed["receipts"].as_array().unwrap().len(), 2048);
+            send_operation(&mut socket, &operation).await;
+            ack(&mut socket, &operation).await;
+            assert_eq!(
+                operation_transaction_snapshot(&server, &document).await,
+                committed
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn read_only_api_keys_cannot_upgrade_to_writable_collaboration() {
     let server = TestServer::new().await;

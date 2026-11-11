@@ -31,6 +31,7 @@ pub const MIGRATION_FILES: &[&str] = &[
     "024_remove_integration_settings.sql",
     "025_atomic_persistence.sql",
     "026_storage_maintenance.sql",
+    "027_operation_history_retention.sql",
 ];
 
 #[derive(Clone, Copy, PartialEq)]
