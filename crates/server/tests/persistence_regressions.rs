@@ -4,6 +4,199 @@ use common::TestServer;
 use contrix_server::services::{StorageBackend, StorageService, persistence};
 use serde_json::{Value, json};
 
+/// A loopback S3 transport, not an alternate persistence implementation. Holding
+/// PUT responses fixes the window between the real save preflight and its CAS.
+struct ControlledObjects {
+    endpoint: String,
+    objects: std::sync::Arc<tokio::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+    gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    arrivals: tokio::sync::mpsc::UnboundedReceiver<String>,
+    release: std::sync::Arc<tokio::sync::Semaphore>,
+    listener: tokio::task::JoinHandle<()>,
+}
+
+impl ControlledObjects {
+    async fn new() -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let objects = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::<
+            String,
+            Vec<u8>,
+        >::new()));
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let (arrived, arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (store, held, permits) = (objects.clone(), gate.clone(), release.clone());
+        let listener = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (store, held, permits, arrived) = (
+                    store.clone(),
+                    held.clone(),
+                    permits.clone(),
+                    arrived.clone(),
+                );
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let (method, path, body) = loop {
+                        let mut bytes = [0; 4096];
+                        let count = socket.read(&mut bytes).await.unwrap();
+                        assert!(count > 0, "complete S3 request required");
+                        request.extend_from_slice(&bytes[..count]);
+                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..end]);
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.split_once(':')
+                                        .filter(|(key, _)| {
+                                            key.eq_ignore_ascii_case("content-length")
+                                        })
+                                        .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap_or(0);
+                            if request.len() < end + 4 + length {
+                                continue;
+                            }
+                            let mut first = headers.lines().next().unwrap().split_whitespace();
+                            let method = first.next().unwrap().to_owned();
+                            let path = first
+                                .next()
+                                .unwrap()
+                                .strip_prefix("/test/")
+                                .unwrap()
+                                .to_owned();
+                            break (method, path, request[end + 4..end + 4 + length].to_vec());
+                        }
+                    };
+                    let (status, data) = match method.as_str() {
+                        "PUT" => {
+                            store.lock().await.insert(path.clone(), body);
+                            if held.load(std::sync::atomic::Ordering::SeqCst) {
+                                arrived.send(path).unwrap();
+                                permits.acquire().await.unwrap().forget();
+                            }
+                            (200, Vec::new())
+                        }
+                        "GET" => match store.lock().await.get(&path).cloned() {
+                            Some(data) => (200, data),
+                            None => (404, Vec::new()),
+                        },
+                        "DELETE" => {
+                            store.lock().await.remove(&path);
+                            (204, Vec::new())
+                        }
+                        _ => panic!("unexpected S3 method {method}"),
+                    };
+                    socket.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", data.len()).as_bytes()).await.unwrap();
+                    socket.write_all(&data).await.unwrap();
+                });
+            }
+        });
+        Self {
+            endpoint,
+            objects,
+            gate,
+            arrivals,
+            release,
+            listener,
+        }
+    }
+}
+
+impl Drop for ControlledObjects {
+    fn drop(&mut self) {
+        self.release.close();
+        self.listener.abort();
+    }
+}
+
+async fn persistence_snapshot(server: &TestServer, id: &str) -> Value {
+    let id = id.to_owned();
+    server
+        .db
+        .run(move |conn| {
+            use contrix_core::{
+                models::{Document, File, Version},
+                schema::{documents, files, users, versions},
+            };
+            use diesel::prelude::*;
+            conn.transaction::<_, contrix_core::error::AppError, _>(|conn| {
+                let document = documents::table.find(id).first::<Document>(conn)?;
+                let file = files::table.find(&document.file_id).first::<File>(conn)?;
+                let history = versions::table
+                    .filter(versions::document_id.eq(&document.id))
+                    .order((versions::version_number, versions::id))
+                    .load::<Version>(conn)?;
+                let used = users::table
+                    .find(&file.owner_id)
+                    .select(users::storage_used)
+                    .first::<i64>(conn)?;
+                Ok(json!({"document":document,"file":file,"history":history,"quota":used}))
+            })
+        })
+        .await
+        .unwrap()
+}
+
+async fn inventory_paths(server: &TestServer) -> std::collections::BTreeSet<String> {
+    #[derive(diesel::QueryableByName)]
+    struct Path {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        path: String,
+    }
+    server
+        .db
+        .run(|conn| {
+            use diesel::RunQueryDsl;
+            Ok::<_, contrix_core::error::AppError>(
+                diesel::sql_query("SELECT path FROM blob_inventory")
+                    .load::<Path>(conn)?
+                    .into_iter()
+                    .map(|row| row.path)
+                    .collect(),
+            )
+        })
+        .await
+        .unwrap()
+}
+
+async fn assert_candidate_collected(server: &TestServer, path: &str) {
+    #[derive(diesel::QueryableByName)]
+    struct Cleanup {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        state: String,
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        pending: i64,
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            persistence::drain_storage_gc(&server.db, &server.state.storage)
+                .await
+                .unwrap();
+            let key = path.to_owned();
+            let cleanup = server.db.run(move |conn| {
+                use diesel::RunQueryDsl;
+                diesel::sql_query("SELECT state, (SELECT COUNT(*) FROM storage_gc WHERE path=?) AS pending FROM blob_inventory WHERE path=?")
+                    .bind::<diesel::sql_types::Text, _>(&key)
+                    .bind::<diesel::sql_types::Text, _>(&key)
+                    .get_result::<Cleanup>(conn)
+            }).await.unwrap();
+            if cleanup.state == "deleted" && cleanup.pending == 0 {
+                assert!(server.state.storage.read_file(path).await.is_err());
+                if matches!(&*server.state.storage, StorageBackend::Local(_)) {
+                    assert!(!server._temp_dir.path().join("files").join(path).exists());
+                }
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unreferenced candidate must be physically collected");
+}
+
 async fn setup() -> (TestServer, String, String) {
     let server = TestServer::new().await;
     let (token, body) = server
@@ -50,8 +243,16 @@ async fn quota(server: &TestServer, token: &str) -> i64 {
 
 #[tokio::test]
 async fn concurrent_document_saves_cannot_lose_updates_or_split_download_content() {
-    let (server, token, _) = setup().await;
+    let mut objects = ControlledObjects::new().await;
+    let server = TestServer::new_with_s3_endpoint(&objects.endpoint).await;
+    let (token, _) = server
+        .register("persist", "persist@example.test", "Persist!2026")
+        .await;
     let (id, file, _) = server.create_document(&token, "CAS", "writer", None).await;
+    let original = persistence_snapshot(&server, &id).await;
+    objects
+        .gate
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let save = |content: Value| {
         server
             .client
@@ -60,8 +261,34 @@ async fn concurrent_document_saves_cannot_lose_updates_or_split_download_content
             .json(&json!({"content":content,"expected_version":1}))
             .send()
     };
-    let (a, b) = tokio::join!(save(json!({"text":"one"})), save(json!({"text":"two"})));
-    let mut statuses = [a.unwrap().status().as_u16(), b.unwrap().status().as_u16()];
+    let saves = async { tokio::join!(save(json!({"text":"one"})), save(json!({"text":"two"}))) };
+    tokio::pin!(saves);
+    let candidates = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            _ = &mut saves => panic!("save returned before both PUT gates were released"),
+            paths = async {
+                let first = objects.arrivals.recv().await.unwrap();
+                let second = objects.arrivals.recv().await.unwrap();
+                [first, second]
+            } => paths,
+        }
+    })
+    .await
+    .expect("both requests must finish the old-v1 preflight and reach PUT");
+    assert_ne!(candidates[0], candidates[1]);
+    assert_eq!(persistence_snapshot(&server, &id).await, original);
+    objects
+        .gate
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    objects.release.add_permits(2);
+    let (a, b) = saves.await;
+    let (a, b) = (a.unwrap(), b.unwrap());
+    let loser_content = if a.status() == 409 {
+        json!({"text":"one"})
+    } else {
+        json!({"text":"two"})
+    };
+    let mut statuses = [a.status().as_u16(), b.status().as_u16()];
     statuses.sort();
     assert_eq!(statuses, [200, 409]);
     let current = document(&server, &token, &id).await;
@@ -80,10 +307,73 @@ async fn concurrent_document_saves_cannot_lose_updates_or_split_download_content
         current["content"]
     );
     assert_eq!(quota(&server, &token).await, bytes.len() as i64);
+    let committed = persistence_snapshot(&server, &id).await;
+    assert_eq!(committed["history"].as_array().unwrap().len(), 1);
+    assert_eq!(committed["history"][0]["version_number"], 1);
+    assert_eq!(
+        committed["history"][0]["content"],
+        original["document"]["content"]
+    );
+    assert_eq!(committed["file"]["size"], bytes.len() as i64);
+    let live = committed["file"]["path"].as_str().unwrap();
+    assert!(candidates.iter().any(|path| path == live));
+    let abandoned = candidates.iter().find(|path| *path != live).unwrap();
+    assert_candidate_collected(&server, abandoned).await;
+    assert!(!objects.objects.lock().await.contains_key(abandoned));
+    assert_eq!(
+        objects.objects.lock().await.get(live),
+        Some(&bytes.to_vec())
+    );
+    // The losing editor can explicitly rebase its preserved content on v2.
+    let retry = server
+        .client
+        .put(server.url(&format!("/api/v1/documents/{id}")))
+        .bearer_auth(&token)
+        .json(&json!({"expected_version":2,"content":loser_content}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), 200);
+    let retried = persistence_snapshot(&server, &id).await;
+    assert_eq!(retried["document"]["version"], 3);
+    assert_eq!(retried["history"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        retried["history"][1]["content"],
+        committed["document"]["content"]
+    );
+    let downloaded = server
+        .client
+        .get(server.url(&format!("/api/v1/files/{file}/download")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(downloaded.status(), 200);
+    let bytes = downloaded.bytes().await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        loser_content
+    );
+    assert_eq!(quota(&server, &token).await, bytes.len() as i64);
 }
 
 #[tokio::test]
 async fn failed_restore_rolls_back_history_metadata_and_preserves_old_blob() {
+    assert_failed_restore_rolls_back("files").await;
+}
+
+#[tokio::test]
+async fn failed_restore_document_update_rolls_back_and_collects_new_blob() {
+    assert_failed_restore_rolls_back("documents").await;
+}
+
+#[tokio::test]
+async fn failed_restore_quota_update_rolls_back_and_collects_new_blob() {
+    assert_failed_restore_rolls_back("users").await;
+}
+
+async fn assert_failed_restore_rolls_back(table: &str) {
+    assert!(["documents", "files", "users"].contains(&table));
     let (server, token, _) = setup().await;
     let (id, file, _) = server
         .create_document(&token, "rollback", "writer", None)
@@ -110,7 +400,24 @@ async fn failed_restore_rolls_back_history_metadata_and_preserves_old_blob() {
     let version_id = versions["data"][0]["id"].as_str().unwrap();
     let before = document(&server, &token, &id).await;
     let used = quota(&server, &token).await;
-    sql(&server, "CREATE TRIGGER reject_file_update BEFORE UPDATE ON files BEGIN SELECT RAISE(ABORT, 'injected failure'); END;".into()).await;
+    let snapshot = persistence_snapshot(&server, &id).await;
+    let old_path = snapshot["file"]["path"].as_str().unwrap();
+    let old_blob = server.state.storage.read_file(old_path).await.unwrap();
+    assert_ne!(
+        snapshot["history"][0]["content"].as_str().unwrap().len(),
+        old_blob.len(),
+        "restoring the fixture must change the billed byte count"
+    );
+    let inventory = inventory_paths(&server).await;
+    // Scope the quota fault to its billing column; authentication bookkeeping
+    // must not be the operation that accidentally trips the injected failure.
+    let column = if table == "users" {
+        " OF storage_used"
+    } else {
+        ""
+    };
+    let marker = format!("injected restore {table} failure");
+    sql(&server, format!("CREATE TRIGGER reject_restore_update BEFORE UPDATE{column} ON {table} BEGIN SELECT RAISE(ABORT, '{marker}'); END;")).await;
     let response = server
         .client
         .post(server.url(&format!("/api/v1/documents/{id}/restore/{version_id}")))
@@ -120,6 +427,11 @@ async fn failed_restore_rolls_back_history_metadata_and_preserves_old_blob() {
         .await
         .unwrap();
     assert_eq!(response.status(), 500);
+    let error = response.text().await.unwrap();
+    assert!(
+        error.contains(&marker),
+        "restore must reach the intended {table} failure: {error}"
+    );
     assert_eq!(document(&server, &token, &id).await, before);
     assert_eq!(quota(&server, &token).await, used);
     let download = server
@@ -142,6 +454,59 @@ async fn failed_restore_rolls_back_history_metadata_and_preserves_old_blob() {
         .await
         .unwrap();
     assert_eq!(after, versions);
+    assert_eq!(persistence_snapshot(&server, &id).await, snapshot);
+    assert_eq!(
+        server.state.storage.read_file(old_path).await.unwrap(),
+        old_blob
+    );
+    let after_inventory = inventory_paths(&server).await;
+    let candidates: Vec<_> = after_inventory.difference(&inventory).cloned().collect();
+    assert_eq!(
+        candidates.len(),
+        1,
+        "restore must stage one independent blob before its {table} fault"
+    );
+    assert_ne!(candidates[0], old_path);
+    assert_candidate_collected(&server, &candidates[0]).await;
+    assert_eq!(
+        server.state.storage.read_file(old_path).await.unwrap(),
+        old_blob
+    );
+    assert_eq!(persistence_snapshot(&server, &id).await, snapshot);
+    // A positive control distinguishes the injected SQL failure from an
+    // unrelated restore error, and proves rollback left expected_version usable.
+    sql(&server, "DROP TRIGGER reject_restore_update".into()).await;
+    let restored = server
+        .client
+        .post(server.url(&format!("/api/v1/documents/{id}/restore/{version_id}")))
+        .bearer_auth(&token)
+        .json(&json!({"expected_version":2}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), 200);
+    let restored = persistence_snapshot(&server, &id).await;
+    assert_eq!(restored["document"]["version"], 3);
+    assert_eq!(restored["history"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        restored["document"]["content"],
+        snapshot["history"][0]["content"]
+    );
+    let downloaded = server
+        .client
+        .get(server.url(&format!("/api/v1/files/{file}/download")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(downloaded.status(), 200);
+    let bytes = downloaded.bytes().await.unwrap();
+    assert_eq!(restored["file"]["size"], bytes.len() as i64);
+    assert_eq!(restored["quota"], bytes.len() as i64);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        document(&server, &token, &id).await["content"]
+    );
 }
 
 #[tokio::test]
@@ -337,6 +702,212 @@ async fn exclusive_locks_and_revoked_creator_acl_apply_to_document_writes() {
         .await
         .unwrap();
     assert_eq!(allowed.status(), 200);
+}
+
+#[tokio::test]
+async fn expired_lock_takeover_contends_and_fences_the_previous_token() {
+    use contrix_core::{models::FileLock, schema::file_locks::dsl as fl};
+    use diesel::{connection::SimpleConnection, prelude::*};
+    let (server, token, owner) = setup().await;
+    let (_, peer_body) = server
+        .register("takeover", "takeover@example.test", "Takeover!2026")
+        .await;
+    let peer = peer_body["data"]["user"]["id"].as_str().unwrap().to_owned();
+    let (id, file, _) = server
+        .create_document(&token, "expired lock", "writer", None)
+        .await;
+    let room = uuid::Uuid::new_v4();
+    sql(&server, format!("INSERT INTO rooms(id,name,owner_id,created_at,updated_at) VALUES ('{room}','takeover','{owner}','now','now'); INSERT INTO room_members(id,room_id,user_id,role,joined_at) VALUES ('takeover-owner','{room}','{owner}','owner','now'),('takeover-peer','{room}','{peer}','editor','now'); UPDATE files SET room_id='{room}' WHERE id='{file}';")).await;
+    let old = persistence::acquire_file_lock(&server.db, &file, &owner, "expired-token")
+        .await
+        .unwrap();
+    let old_id = old.id.clone();
+    let expired = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    server
+        .db
+        .run(move |conn| {
+            diesel::update(fl::file_locks.find(old_id))
+                .set(fl::expires_at.eq(expired))
+                .execute(conn)
+        })
+        .await
+        .unwrap();
+
+    // Exchange credentials and warm HTTP bookkeeping before taking the SQL
+    // writer gate. The contending tasks below call the real lock service, so
+    // their held leases cannot be mistaken for authentication writes.
+    let response = server
+        .client
+        .get(server.url("/api/v1/wopi/host/writer/edit"))
+        .query(&[
+            ("access_token", token.as_str()),
+            (
+                "WOPISrc",
+                server.url(&format!("/api/v1/wopi/files/{file}")).as_str(),
+            ),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let html = response.text().await.unwrap();
+    let start = html.find("const wopiSessionToken = ").unwrap() + "const wopiSessionToken = ".len();
+    let wopi: String = serde_json::from_str(html[start..].split(';').next().unwrap()).unwrap();
+    let before = persistence_snapshot(&server, &id).await;
+
+    // Initialize both pooled connections before imposing the external writer
+    // lock. Two channel acknowledgements prove both leases exist; no sleep or
+    // cold connection setup is allowed to stand in for lock contention.
+    let (entered, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+    let mut warmers = Vec::new();
+    let mut releases = Vec::new();
+    for _ in 0..2 {
+        let (release, wait) = std::sync::mpsc::channel();
+        releases.push(release);
+        let (db, entered) = (server.db.clone(), entered.clone());
+        warmers.push(tokio::spawn(async move {
+            db.run(move |conn| {
+                diesel::sql_query("SELECT 1").execute(conn)?;
+                entered.send(()).unwrap();
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Ok::<_, contrix_core::error::AppError>(())
+            })
+            .await
+            .unwrap();
+        }));
+    }
+    for _ in 0..2 {
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrivals.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    for warmer in warmers {
+        warmer.await.unwrap();
+    }
+    assert_eq!(server.db.state().idle_connections, 2);
+    let mut writer =
+        diesel::SqliteConnection::establish(&server.state.config.database.url).unwrap();
+    writer.batch_execute("BEGIN IMMEDIATE").unwrap();
+    let start = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let acquire = |user: String, token: &'static str| {
+        let (db, file, start) = (server.db.clone(), file.clone(), start.clone());
+        tokio::spawn(async move {
+            start.wait().await;
+            persistence::acquire_file_lock(&db, &file, &user, token).await
+        })
+    };
+    let checkouts = server.db.state().checkouts;
+    let a = acquire(owner.clone(), "takeover-a");
+    let b = acquire(peer, "takeover-b");
+    start.wait().await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            assert!(
+                !a.is_finished() && !b.is_finished(),
+                "neither takeover may bypass the held writer"
+            );
+            let state = server.db.state();
+            if state.idle_connections == 0
+                && state.admitted_operations == 2
+                && state.checkouts >= checkouts + 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both real lock-service SQL workers must contend behind the writer gate");
+    writer.batch_execute("COMMIT").unwrap();
+    let (a, b) = (a.await.unwrap(), b.await.unwrap());
+    let winner = match (a, b) {
+        (Ok(winner), Err(error)) | (Err(error), Ok(winner)) => {
+            assert_eq!(error.status_code(), 409);
+            winner
+        }
+        result => panic!("expired takeover must have one winner and one conflict: {result:?}"),
+    };
+    assert_ne!(winner.id, old.id);
+    assert_ne!(winner.lock_token, old.lock_token);
+    let load_lock = || {
+        let (db, file) = (server.db.clone(), file.clone());
+        async move {
+            db.run(move |conn| {
+                fl::file_locks
+                    .filter(fl::file_id.eq(file))
+                    .load::<FileLock>(conn)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let rows = load_lock().await;
+    assert_eq!(rows.len(), 1);
+    let winner_snapshot = serde_json::to_value(&rows[0]).unwrap();
+    assert_eq!(winner_snapshot, serde_json::to_value(&winner).unwrap());
+    assert!(chrono::DateTime::parse_from_rfc3339(&winner.expires_at).unwrap() > chrono::Utc::now());
+    let url = server.url(&format!("/api/v1/wopi/files/{file}"));
+    for operation in ["REFRESH_LOCK", "UNLOCK", "LOCK"] {
+        let mut request = server
+            .client
+            .post(&url)
+            .query(&[("access_token", &wopi)])
+            .header("X-WOPI-Override", operation)
+            .header("X-WOPI-Lock", &old.lock_token);
+        if operation == "LOCK" {
+            request = request
+                .header("X-WOPI-Lock", "stale-replacement")
+                .header("X-WOPI-OldLock", &old.lock_token);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            409,
+            "expired token must not {operation} the winner"
+        );
+        assert_eq!(
+            response.headers()["X-WOPI-Lock"].to_str().unwrap(),
+            winner.lock_token
+        );
+        let rows = load_lock().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(serde_json::to_value(&rows[0]).unwrap(), winner_snapshot);
+    }
+    let rejected = server
+        .client
+        .post(format!("{url}/contents"))
+        .query(&[("access_token", &wopi)])
+        .header("X-WOPI-Lock", &old.lock_token)
+        .body(r#"{"text":"stale overwrite"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 409);
+    assert_eq!(
+        rejected.headers()["X-WOPI-Lock"].to_str().unwrap(),
+        winner.lock_token
+    );
+    assert_eq!(persistence_snapshot(&server, &id).await, before);
+    let rows = load_lock().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(serde_json::to_value(&rows[0]).unwrap(), winner_snapshot);
+    let downloaded = server
+        .client
+        .get(server.url(&format!("/api/v1/files/{file}/download")))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(downloaded.status(), 200);
+    assert_eq!(
+        downloaded.json::<Value>().await.unwrap(),
+        document(&server, &token, &id).await["content"]
+    );
 }
 
 #[tokio::test]

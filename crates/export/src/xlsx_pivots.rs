@@ -1,5 +1,5 @@
 //! Standard cache/table parts for the single-row-field pivot model.
-use super::escape_xml as escape;
+use super::{XlsxExportStats, escape_xml as escape};
 use contrix_doc_engine::calc::*;
 use std::collections::{BTreeMap, BTreeSet};
 const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -29,7 +29,10 @@ fn value_xml(value: &CellValue) -> String {
         _ => "<m/>".into(),
     }
 }
-pub(super) fn build(workbook: &Workbook) -> Result<Vec<PivotParts>, String> {
+pub(super) fn build(
+    workbook: &Workbook,
+    stats: &mut XlsxExportStats,
+) -> Result<Vec<PivotParts>, String> {
     let mut result = Vec::new();
     let mut remaining = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2;
     for (index, pivot) in workbook.pivot_tables.iter().enumerate() {
@@ -78,6 +81,7 @@ pub(super) fn build(workbook: &Workbook) -> Result<Vec<PivotParts>, String> {
         for row in start.row..=end.row {
             records.push_str("<r>");
             for col in start.col..=end.col {
+                stats.pivot_cell_lookups += 1;
                 let cell = source
                     .get_cell(row, col)
                     .map(|c| &c.value)
@@ -114,6 +118,7 @@ pub(super) fn build(workbook: &Workbook) -> Result<Vec<PivotParts>, String> {
         let mut names = Vec::new();
         let mut seen_names = BTreeSet::new();
         for col in start.col..=end.col {
+            stats.pivot_cell_lookups += 1;
             let field = (col - start.col) as usize;
             let name = match source.get_cell(header, col).map(|c| &c.value) {
                 Some(CellValue::Text(name)) if !name.is_empty() => name.clone(),

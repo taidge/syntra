@@ -204,6 +204,12 @@ Office 导入导出使用标准格式解析；原生自定义部件的无损往�
 2. `config/production.toml` — 生产环境覆盖
 3. 环境变量 — 最高优先级（以 `CONTRIX_` 为前缀）
 
+限流按 API、`/assets/`、页面与外壳三类分别计算每 IP 的独立配额，
+每类均使用 `[rate_limit].max_requests` 和固定的 `window_seconds` 窗口，
+生产默认各为 100 次 / 60 秒。已认证 API 请求还受每用户配额限制。
+IP 配额耗尽时，请求在查询 IP 规则前返回 429；IP 配额内请求仍执行 IP 规则。
+转发 IP 请求头默认不受信任，只有部署可信代理时才应启用 `trust_forwarded_headers`。
+
 主要配置项：
 
 ```toml

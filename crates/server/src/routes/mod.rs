@@ -15,32 +15,28 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // Middleware that injects AppState into every request depot.
     let state_injector = StateInjector(state.clone());
 
-    // Edge rate limiter (runs before auth): keys by client IP and protects
-    // every route, including unauthenticated ones.
-    let rate_limiter = RateLimiter::new(
-        state.config.rate_limit.max_requests,
-        state.config.rate_limit.window_seconds,
-        state.config.rate_limit.enabled,
-        state.config.rate_limit.trust_forwarded_headers,
-    );
-
-    // Per-user rate limiter (runs after JWT auth): keys by the authenticated
-    // user id so multiple users behind one NAT/proxy do not share a quota.
-    let user_rate_limiter = RateLimiter::new(
-        state.config.rate_limit.max_requests,
-        state.config.rate_limit.window_seconds,
-        state.config.rate_limit.enabled,
-        state.config.rate_limit.trust_forwarded_headers,
-    );
+    // API calls, compiled assets, and page/shell loads have independent IP
+    // budgets. Reloading the app must not spend another traffic class's quota.
+    // Authenticated API requests additionally retain their per-user limit.
+    // Each implemented route keeps the same configured pre-auth bound.
+    let rate_limiter = || {
+        RateLimiter::new(
+            state.config.rate_limit.max_requests,
+            state.config.rate_limit.window_seconds,
+            state.config.rate_limit.enabled,
+            state.config.rate_limit.trust_forwarded_headers,
+        )
+    };
 
     Router::new()
         .hoop(observe_http_request)
         .hoop(state_injector)
-        .hoop(IpFilter)
-        .hoop(rate_limiter)
         .hoop(SecurityHeaders)
         .push(
             Router::with_path("api/v1")
+                .hoop(rate_limiter())
+                // Bound rejected traffic before IP rules can lease the DB.
+                .hoop(IpFilter)
                 // --- Public routes (no auth required) ---
                 .push(auth_routes())
                 .push(health_routes())
@@ -54,7 +50,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 .push(
                     Router::new()
                         .hoop(jwt_auth_middleware)
-                        .hoop(user_rate_limiter)
+                        .hoop(rate_limiter())
                         .push(auth_protected_routes())
                         // Static batch actions must precede files/{id}/move.
                         .push(batch_routes())
@@ -89,11 +85,21 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                         .push(ai_routes()),
                 ),
         )
-        // Robots.txt at root
-        .push(Router::with_path("robots.txt").get(handlers::capabilities::robots_txt))
-        // --- SPA fallback: serve static files and index.html ---
-        .get(handlers::spa::spa_fallback)
-        .push(Router::with_path("{**rest}").get(handlers::spa::spa_fallback))
+        .push(
+            Router::with_path("assets/{**rest}")
+                .hoop(rate_limiter())
+                .hoop(IpFilter)
+                .get(handlers::spa::spa_fallback),
+        )
+        .push(
+            Router::new()
+                .hoop(rate_limiter())
+                .hoop(IpFilter)
+                .push(Router::with_path("robots.txt").get(handlers::capabilities::robots_txt))
+                // SPA fallback: serve static files and index.html.
+                .get(handlers::spa::spa_fallback)
+                .push(Router::with_path("{**rest}").get(handlers::spa::spa_fallback)),
+        )
 }
 
 // ---------------------------------------------------------------------------

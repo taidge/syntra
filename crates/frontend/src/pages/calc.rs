@@ -158,6 +158,7 @@ struct CellPatch {
     new_value: serde_json::Value,
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
 fn workbook_cells(value: &serde_json::Value) -> HashMap<(usize, u32, u32), serde_json::Value> {
     workbook_cell_entries(value)
         .map(|(key, cell)| (key, cell.clone()))

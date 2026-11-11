@@ -239,6 +239,14 @@ Configuration is loaded from layered sources:
 2. `config/production.toml` — Production overrides
 3. Environment variables — Highest priority (prefixed with `CONTRIX_`)
 
+Rate limits use independent per-IP budgets for API endpoints, `/assets/`, and
+page/shell requests. Each uses `[rate_limit].max_requests` within its fixed
+`window_seconds` window (production defaults: 100 requests / 60 seconds).
+Authenticated API requests also have a per-user budget. Exhausting an IP budget
+returns 429 before querying IP rules; requests within that budget still enforce
+those rules. Forwarded IP headers are ignored unless `trust_forwarded_headers` is enabled
+for a trusted proxy.
+
 Key settings:
 
 ```toml

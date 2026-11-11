@@ -35,17 +35,37 @@ impl TestServer {
     }
 
     pub async fn new_with_ai(ai_config: AiConfig) -> Self {
-        Self::new_configured(ai_config, 30, 900, 15_000, 3_000).await
+        Self::new_configured(ai_config, 30, 900, 15_000, 3_000, None).await
     }
 
     #[allow(dead_code)] // Only transport-specific integration binaries use this constructor.
     pub async fn new_with_body_timeouts(idle_secs: u64, total_secs: u64) -> Self {
-        Self::new_configured(AiConfig::default(), idle_secs, total_secs, 15_000, 3_000).await
+        Self::new_configured(
+            AiConfig::default(),
+            idle_secs,
+            total_secs,
+            15_000,
+            3_000,
+            None,
+        )
+        .await
     }
 
     #[allow(dead_code)] // Save-deadline tests exercise the actual SQLite worker.
     pub async fn new_with_database_deadlines(operation_ms: u64, busy_ms: u64) -> Self {
-        Self::new_configured(AiConfig::default(), 30, 900, operation_ms, busy_ms).await
+        Self::new_configured(AiConfig::default(), 30, 900, operation_ms, busy_ms, None).await
+    }
+
+    #[allow(dead_code)] // Controlled loopback S3 gates exercise HTTP storage races.
+    pub async fn new_with_s3_endpoint(endpoint: &str) -> Self {
+        let url = reqwest::Url::parse(endpoint).expect("valid controlled S3 endpoint");
+        let host = url.host_str().unwrap_or_default().trim_matches(['[', ']']);
+        assert!(
+            host.parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback()),
+            "controlled S3 endpoint must use a loopback IP"
+        );
+        Self::new_configured(AiConfig::default(), 30, 900, 15_000, 3_000, Some(endpoint)).await
     }
 
     async fn new_configured(
@@ -54,6 +74,7 @@ impl TestServer {
         total_secs: u64,
         operation_ms: u64,
         busy_ms: u64,
+        s3_endpoint: Option<&str>,
     ) -> Self {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
@@ -71,8 +92,9 @@ impl TestServer {
         )
         .unwrap();
 
-        // Use the same SQLite parser, atomic runner and catalog as production.
-        db.run(move |conn| {
+        // Use production's startup lease while opening the first connection,
+        // along with the same SQLite parser, atomic runner and catalog.
+        db.run_startup_migrations(move |conn| {
             let directory =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
             contrix_server::migrations::run_directory(conn, &directory)
@@ -80,7 +102,7 @@ impl TestServer {
         .await
         .unwrap();
 
-        let config = AppConfig {
+        let mut config = AppConfig {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 0,
@@ -116,6 +138,14 @@ impl TestServer {
             trash: TrashConfig::default(),
             maintenance: Default::default(),
         };
+        if let Some(endpoint) = s3_endpoint {
+            config.storage.backend = Some("s3".into());
+            config.storage.s3_bucket = Some("test".into());
+            config.storage.s3_region = Some("us-east-1".into());
+            config.storage.s3_access_key = Some("test-access".into());
+            config.storage.s3_secret_key = Some("test-secret".into());
+            config.storage.s3_endpoint = Some(endpoint.into());
+        }
 
         let db_clone = db.clone();
         let storage = Arc::new(StorageBackend::from_config(&config.storage).unwrap());

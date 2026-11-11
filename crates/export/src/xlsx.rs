@@ -24,6 +24,43 @@ mod pivots;
 #[path = "xlsx_styles.rs"]
 mod styles;
 
+/// Actual cell iteration and coordinate-lookup events in XLSX export.
+///
+/// A visit counts one source-map entry consumed by the named pass, or one
+/// chart/pivot coordinate lookup including an absent coordinate. Repeated
+/// passes count separately. Native snapshot visits count the source cells
+/// cloned for budget validation and for the native payload. Generic traversal
+/// of those cloned payloads by Serde, sorting, XML text processing, metadata,
+/// ZIP compression and allocation are outside these counters.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct XlsxExportStats {
+    pub native_snapshot_cell_visits: usize,
+    pub coordinate_cell_visits: usize,
+    pub shared_string_cell_visits: usize,
+    pub style_cell_visits: usize,
+    pub worksheet_grouping_cell_visits: usize,
+    pub worksheet_cell_visits: usize,
+    pub chart_cell_lookups: usize,
+    pub pivot_cell_lookups: usize,
+    /// Number of actual worksheet `<c>` elements emitted, including explicitly
+    /// stored empty cells. Absent coordinates emit no element.
+    pub emitted_cells: usize,
+}
+
+impl XlsxExportStats {
+    /// Sum of the measured source-cell pass events and coordinate lookups.
+    pub fn source_cell_visits(&self) -> usize {
+        self.native_snapshot_cell_visits
+            + self.coordinate_cell_visits
+            + self.shared_string_cell_visits
+            + self.style_cell_visits
+            + self.worksheet_grouping_cell_visits
+            + self.worksheet_cell_visits
+            + self.chart_cell_lookups
+            + self.pivot_cell_lookups
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct NativeWorkbook {
     id: uuid::Uuid,
@@ -51,6 +88,12 @@ struct NativeSheet {
 
 impl From<&Workbook> for NativeWorkbook {
     fn from(workbook: &Workbook) -> Self {
+        Self::from_with_stats(workbook, &mut XlsxExportStats::default())
+    }
+}
+
+impl NativeWorkbook {
+    fn from_with_stats(workbook: &Workbook, stats: &mut XlsxExportStats) -> Self {
         Self {
             id: workbook.id,
             title: workbook.title.clone(),
@@ -63,7 +106,10 @@ impl From<&Workbook> for NativeWorkbook {
                     cells: sheet
                         .cells
                         .iter()
-                        .map(|(reference, cell)| (reference.clone(), cell.clone()))
+                        .map(|(reference, cell)| {
+                            stats.native_snapshot_cell_visits += 1;
+                            (reference.clone(), cell.clone())
+                        })
                         .collect(),
                     column_widths: sheet.column_widths.clone(),
                     row_heights: sheet.row_heights.clone(),
@@ -113,11 +159,20 @@ impl From<NativeWorkbook> for Workbook {
 
 /// Convert a [`Workbook`] to a `.xlsx` byte vector (ZIP archive with Open XML).
 pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
-    crate::ooxml_import::model_budget(&NativeWorkbook::from(wb))?;
+    workbook_to_xlsx_with_stats(wb).map(|(bytes, _)| bytes)
+}
+
+/// Export through the same production serializer and return measured cell
+/// events. Counts describe the passes documented by [`XlsxExportStats`],
+/// without imposing a latency, memory or total-CPU guarantee.
+pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExportStats), String> {
+    let mut stats = XlsxExportStats::default();
+    crate::ooxml_import::model_budget(&NativeWorkbook::from_with_stats(wb, &mut stats))?;
     if wb
         .sheets
         .iter()
         .flat_map(|sheet| sheet.cells.keys())
+        .inspect(|_| stats.coordinate_cell_visits += 1)
         .any(|reference| reference.row >= 1_048_576 || reference.col >= 16_384)
     {
         return Err("Cell coordinates exceed XLSX worksheet dimensions".into());
@@ -161,12 +216,12 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
             .checked_sub(count)
             .ok_or("Chart point expansion budget exceeded")?;
     }
-    let pivot_parts = pivots::build(wb)?;
+    let pivot_parts = pivots::build(wb, &mut stats)?;
     let chart_count: usize = wb.sheets.iter().map(|sheet| sheet.charts.len()).sum();
 
     // Build the shared strings table across all sheets.
-    let (shared_strings, ss_index) = build_shared_strings(wb);
-    let styles = styles::Styles::new(wb);
+    let (shared_strings, ss_index) = build_shared_strings(wb, &mut stats);
+    let styles = styles::Styles::new(wb, &mut stats);
 
     // [Content_Types].xml
     zip.start_file("[Content_Types].xml", options)
@@ -309,6 +364,7 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
             &styles,
             differential_offset,
             (!sheet.charts.is_empty()).then_some(i + 1),
+            &mut stats,
         );
         sheet_xml = sheet_xml.replace(
             "</worksheet>",
@@ -351,7 +407,8 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
                 chart_offset += 1;
                 zip.start_file(format!("xl/charts/chart{chart_offset}.xml"), options)
                     .map_err(|e| e.to_string())?;
-                write!(zip, "{}", sheet_chart_xml(chart, sheet)).map_err(|e| e.to_string())?;
+                write!(zip, "{}", sheet_chart_xml(chart, sheet, &mut stats))
+                    .map_err(|e| e.to_string())?;
             }
         }
     }
@@ -391,22 +448,28 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
     }
     zip.start_file("customXml/contrix-workbook.json", options)
         .map_err(|e| e.to_string())?;
-    serde_json::to_writer(&mut zip, &NativeWorkbook::from(wb)).map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut zip, &NativeWorkbook::from_with_stats(wb, &mut stats))
+        .map_err(|e| e.to_string())?;
 
     zip.finish().map_err(|e| e.to_string())?;
-    crate::native_package::seal(buf.into_inner(), "customXml/contrix-workbook.json")
+    let bytes = crate::native_package::seal(buf.into_inner(), "customXml/contrix-workbook.json")?;
+    Ok((bytes, stats))
 }
 
 /// Build a shared strings table from all text cell values across all sheets.
 ///
 /// Returns the ordered list of unique strings and a lookup map from string to
 /// its index in the table.
-fn build_shared_strings(wb: &Workbook) -> (Vec<String>, HashMap<String, usize>) {
+fn build_shared_strings(
+    wb: &Workbook,
+    stats: &mut XlsxExportStats,
+) -> (Vec<String>, HashMap<String, usize>) {
     let mut strings: Vec<String> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
 
     for sheet in &wb.sheets {
         for cell in sheet.cells.values() {
+            stats.shared_string_cell_visits += 1;
             if let CellValue::Text(ref s) = cell.value
                 && !index.contains_key(s)
             {
@@ -427,6 +490,7 @@ fn sheet_to_xml(
     styles: &styles::Styles,
     differential_offset: usize,
     drawing_number: Option<usize>,
+    stats: &mut XlsxExportStats,
 ) -> String {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -471,6 +535,7 @@ fn sheet_to_xml(
         // Enumerate occupied coordinates: a distant single cell is still O(1).
         let mut rows: BTreeMap<u32, Vec<(u32, &Cell)>> = BTreeMap::new();
         for (reference, cell) in &sheet.cells {
+            stats.worksheet_grouping_cell_visits += 1;
             rows.entry(reference.row)
                 .or_default()
                 .push((reference.col, cell));
@@ -486,6 +551,7 @@ fn sheet_to_xml(
             xml.push_str(&format!("<row r=\"{}\"{height}>", row + 1)); // 1-based row number
 
             for (col, cell) in &row_cells {
+                stats.worksheet_cell_visits += 1;
                 let cell_ref = CellRef::new(row, *col).to_a1();
 
                 let cell_start = xml.len();
@@ -561,6 +627,7 @@ fn sheet_to_xml(
                     (CellValue::Empty, None) => xml.push_str(&format!("<c r=\"{cell_ref}\"/>")),
                 }
                 if xml.len() > cell_start {
+                    stats.emitted_cells += 1;
                     let style = styles.index(&cell.format);
                     xml.insert_str(cell_start + 2, &format!(" s=\"{style}\""));
                 }
@@ -783,15 +850,21 @@ fn drawing_relationships_xml(sheet: &Sheet, chart_offset: usize) -> String {
     xml
 }
 
-fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet) -> String {
+fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet, stats: &mut XlsxExportStats) -> String {
     use contrix_doc_engine::slides::{ChartData, ChartType, Dataset, SlideChart};
-    fn values(sheet: &Sheet, start: &CellRef, end: &CellRef) -> Vec<CellValue> {
+    fn values(
+        sheet: &Sheet,
+        start: &CellRef,
+        end: &CellRef,
+        stats: &mut XlsxExportStats,
+    ) -> Vec<CellValue> {
         let mut values = Vec::new();
         for row in start.row..=end.row {
             for col in start.col..=end.col {
                 if values.len() >= 100_000 {
                     return values;
                 }
+                stats.chart_cell_lookups += 1;
                 values.push(
                     sheet
                         .get_cell(row, col)
@@ -811,7 +884,7 @@ fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet) -> String {
         }],
     });
     if chart.cached_data.is_none() {
-        data.datasets[0].values = values(sheet, &chart.data_start, &chart.data_end)
+        data.datasets[0].values = values(sheet, &chart.data_start, &chart.data_end, stats)
             .into_iter()
             .map(|v| if let CellValue::Number(n) = v { n } else { 0.0 })
             .collect();
@@ -820,12 +893,12 @@ fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet) -> String {
             .collect();
     }
     for (dataset, source) in data.datasets.iter_mut().zip(&chart.series_sources) {
-        dataset.values = values(sheet, &source.value_start, &source.value_end)
+        dataset.values = values(sheet, &source.value_start, &source.value_end, stats)
             .into_iter()
             .map(|v| if let CellValue::Number(n) = v { n } else { 0.0 })
             .collect();
         if let (Some(start), Some(end)) = (&source.label_start, &source.label_end) {
-            data.labels = values(sheet, start, end)
+            data.labels = values(sheet, start, end, stats)
                 .into_iter()
                 .map(|v| match v {
                     CellValue::Text(v) | CellValue::Date(v) | CellValue::Error(v) => v,
@@ -1207,7 +1280,7 @@ mod tests {
         wb.sheets[0].set_cell(0, 0, CellValue::Text("same".into()));
         wb.sheets[0].set_cell(1, 0, CellValue::Text("same".into()));
         wb.sheets[0].set_cell(2, 0, CellValue::Text("different".into()));
-        let (strings, index) = build_shared_strings(&wb);
+        let (strings, index) = build_shared_strings(&wb, &mut XlsxExportStats::default());
         assert_eq!(strings.len(), 2);
         assert_eq!(index.len(), 2);
         assert!(index.contains_key("same"));

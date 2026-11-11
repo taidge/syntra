@@ -48,6 +48,7 @@ fn formula_diamond_dependencies_and_sparse_export_baseline() {
         );
     }
     // Identical nonempty-cell counts, radically different bounding rectangles.
+    let mut near_sparse_stats = None;
     for (last_row, last_col) in [(999, 9), (1_048_575, 16_383)] {
         let mut workbook = contrix_doc_engine::Workbook::new("Sparse export".into());
         for index in 0..1_000 {
@@ -56,20 +57,35 @@ fn formula_diamond_dependencies_and_sparse_export_baseline() {
         workbook.sheets[0].set_cell(last_row, last_col, CellValue::Text("edge".into()));
         let mut samples = Vec::new();
         let mut output_bytes = 0;
+        let mut export_stats = None;
         for _ in 0..30 {
             let start = Instant::now();
-            let bytes = contrix_export::xlsx::workbook_to_xlsx(&workbook).expect("sparse export");
+            let (bytes, stats) = contrix_export::xlsx::workbook_to_xlsx_with_stats(&workbook)
+                .expect("sparse export");
             samples.push(start.elapsed().as_secs_f64() * 1_000.0);
             output_bytes = bytes.len();
+            assert_eq!(stats.emitted_cells, 1001);
+            if let Some(previous) = export_stats {
+                assert_eq!(stats, previous, "cell events are stable across samples");
+            }
+            export_stats = Some(stats);
             let restored = contrix_export::xlsx::xlsx_to_workbook(&bytes).expect("reimport");
             assert!(
                 matches!(restored.sheets[0].get_cell(last_row,last_col).map(|cell| &cell.value), Some(CellValue::Text(value)) if value=="edge")
             );
         }
+        let stats = export_stats.unwrap();
+        if let Some(near) = near_sparse_stats {
+            assert_eq!(stats, near, "empty worksheet area adds no cell events");
+        } else {
+            near_sparse_stats = Some(stats);
+        }
         println!(
             "{}",
             serde_json::json!({"scenario":"sparse_xlsx","populated_cells":1001,
             "last_row":last_row,"last_col":last_col,"output_bytes":output_bytes,"timing":distribution(samples),
+            "source_cell_visits":stats.source_cell_visits(),"cell_events":stats,
+            "cell_event_scope":"source-map pass entries and chart/pivot coordinate lookups; emitted_cells counts worksheet elements; excludes Serde traversal of cloned payloads, sorting, XML byte work, compression and allocation",
             "profile":if cfg!(debug_assertions){"debug"}else{"release"}})
         );
     }

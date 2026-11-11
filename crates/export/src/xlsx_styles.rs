@@ -1,5 +1,5 @@
 //! OOXML style table. Whole formats are deduplicated independently of native caches.
-use super::{differential_format_xml, escape_xml};
+use super::{XlsxExportStats, differential_format_xml, escape_xml};
 use contrix_doc_engine::calc::{Border, BorderStyle, CellFormat, HAlign, VAlign, Workbook};
 use std::collections::BTreeMap;
 
@@ -8,12 +8,13 @@ pub(super) struct Styles {
     indices: BTreeMap<String, usize>,
 }
 impl Styles {
-    pub(super) fn new(workbook: &Workbook) -> Self {
+    pub(super) fn new(workbook: &Workbook, stats: &mut XlsxExportStats) -> Self {
         let unique: BTreeMap<_, _> = workbook
             .sheets
             .iter()
             .flat_map(|s| s.cells.values())
             .map(|c| {
+                stats.style_cell_visits += 1;
                 (
                     serde_json::to_string(&c.format).expect("format serializes"),
                     c.format.clone(),

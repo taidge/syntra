@@ -7,7 +7,7 @@ use salvo::prelude::*;
 /// In-memory rate limiter middleware for Salvo.
 ///
 /// Tracks request counts per client key (user id or IP address) within a
-/// sliding window. Returns 429 Too Many Requests when the limit is exceeded.
+/// fixed window. Returns 429 Too Many Requests when the limit is exceeded.
 pub struct RateLimiter {
     max_requests: u32,
     window_seconds: u64,
@@ -20,7 +20,7 @@ impl RateLimiter {
     /// Create a new rate limiter.
     ///
     /// * `max_requests` - maximum number of requests allowed per window.
-    /// * `window_seconds` - length of the sliding window in seconds.
+    /// * `window_seconds` - length of the fixed window in seconds.
     /// * `enabled` - when `false`, the middleware is a no-op pass-through.
     /// * `trust_forwarded_headers` - whether proxy-provided client IP headers
     ///   are trusted for unauthenticated requests.
