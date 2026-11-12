@@ -1,4 +1,4 @@
-//! Short query leases backed by Horme and Diesel-async's SQLite adapter.
+//! Short query leases with per-connection SQLite workers and bounded admission.
 //!
 //! Cloning/getting a Database never checks out a connection. Only a SQL future
 //! or an explicit transaction acquires one. No raw pool escapes this module.
@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use contrix_core::{config::DatabaseConfig, error::AppError};
+use deadpool::managed::{Object, Pool};
 use diesel::connection::{
     Instrumentation, InstrumentationEvent, TransactionManager, TransactionManagerStatus,
 };
 use diesel::result::{Error, QueryResult};
 use diesel::{Connection, SqliteConnection};
-use diesel_async::pooled_connection::deadpool::{Object, Pool};
 use diesel_async::pooled_connection::{
-    AsyncDieselConnectionManager, ManagerConfig, RecyclingMethod,
+    PoolError as ManagerError, PoolableConnection, RecyclingMethod,
 };
 use diesel_async::sync_connection_wrapper::{SpawnBlocking, SyncConnectionWrapper};
 use futures_util::future::BoxFuture;
@@ -27,6 +27,9 @@ use horme::GetConnection;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 pub(crate) mod telemetry;
+mod worker;
+
+use worker::WorkerHandle;
 
 use crate::middleware::request_observability::{
     WorkerPhase, current_database_observation, current_database_operation,
@@ -55,15 +58,28 @@ pub fn query_error(error: horme::Error) -> Error {
 
 /// Unlike the adapter's default runtime, cancellation never block_in_place's
 /// the HTTP task. Work is serialized in declaration order, including cleanup.
+/// EXPERIMENT: establish/query/rollback use one worker. Physical connection
+/// Drop keeps the prior caller-thread behavior; no full Drop affinity is claimed.
+/// Cancellation/admission anchors remain in the server's ManagedSqlite pool.
 pub struct SqliteRuntime {
     tail: Option<oneshot::Receiver<()>>,
     operation_timeout: Duration,
+    worker: Result<WorkerHandle, Arc<str>>,
 }
 impl SqliteRuntime {
     pub(crate) fn new(operation_timeout: Duration) -> Self {
         Self {
             tail: None,
             operation_timeout,
+            worker: WorkerHandle::start().map_err(|error| Arc::from(error.to_string())),
+        }
+    }
+
+    fn with_worker(operation_timeout: Duration, worker: WorkerHandle) -> Self {
+        Self {
+            tail: None,
+            operation_timeout,
+            worker: Ok(worker),
         }
     }
 }
@@ -208,28 +224,43 @@ impl SpawnBlocking for SqliteRuntime {
         let worker_observation = observation.clone();
         let operation = current_database_operation();
         let worker_operation = operation.clone();
+        // Registration occurs before predecessor wait. Runtime cancellation
+        // destroys the unqueued callback before its outstanding guard retires.
+        let prepared = self
+            .worker
+            .as_ref()
+            .map(|handle| {
+                handle.prepare(move || {
+                    if let Some(progress) = &worker_operation {
+                        progress.set_phase(WorkerPhase::Running);
+                    }
+                    let result = with_database_observation(
+                        worker_observation,
+                        worker_operation.clone(),
+                        task,
+                    );
+                    if let Some(progress) = &worker_operation {
+                        progress.set_phase(WorkerPhase::Returning);
+                    }
+                    result
+                })
+            })
+            .map_err(Arc::clone);
+        let waiting_operation = operation.clone();
         let worker = tokio::spawn(async move {
             if let Some(predecessor) = predecessor {
-                if let Some(progress) = &worker_operation {
+                if let Some(progress) = &waiting_operation {
                     progress.set_phase(WorkerPhase::WaitingPredecessor);
                 }
                 let _ = predecessor.await;
             }
-            if let Some(progress) = &worker_operation {
+            if let Some(progress) = &waiting_operation {
                 progress.set_phase(WorkerPhase::BlockingQueue);
             }
-            let result = tokio::task::spawn_blocking(move || {
-                if let Some(progress) = &worker_operation {
-                    progress.set_phase(WorkerPhase::Running);
-                }
-                let result =
-                    with_database_observation(worker_observation, worker_operation.clone(), task);
-                if let Some(progress) = &worker_operation {
-                    progress.set_phase(WorkerPhase::Returning);
-                }
-                result
-            })
-            .await;
+            let result = match prepared {
+                Ok(prepared) => prepared.run().await,
+                Err(error) => Err(Box::new(std::io::Error::other(error.to_string())) as BoxError),
+            };
             let _ = finished.send(());
             result
         });
@@ -247,15 +278,13 @@ impl SpawnBlocking for SqliteRuntime {
                     }
                     Box::new(std::io::Error::other(TIMEOUT))
                 })?;
-            result
-                .map_err(|error| -> BoxError { Box::new(error) })?
-                .map_err(|error| -> BoxError { Box::new(error) })
+            result.map_err(|error| -> BoxError { Box::new(error) })?
         })
     }
 }
 
 struct Inner {
-    provider: horme::Db<Pool<DbConnection>>,
+    pool: Pool<SqliteManager>,
     admission: Arc<Semaphore>,
     checkout_timeout: Duration,
     operation_timeout: Duration,
@@ -296,6 +325,7 @@ impl StartupCheckoutProgress {
 
 tokio::task_local! {
     static STARTUP_CHECKOUT_PROGRESS: Arc<StartupCheckoutProgress>;
+    static CHECKOUT_ADMISSION: Arc<Admission>;
 }
 
 #[cfg(test)]
@@ -339,69 +369,215 @@ impl Drop for Admission {
 }
 
 pub struct DatabaseLease {
-    connection: Option<Object<DbConnection>>,
-    admission: Option<Admission>,
+    connection: Option<Object<SqliteManager>>,
+    admission: Option<Arc<Admission>>,
 }
 impl Deref for DatabaseLease {
     type Target = DbConnection;
     fn deref(&self) -> &Self::Target {
-        self.connection.as_ref().expect("live database lease")
+        self.connection
+            .as_ref()
+            .expect("live database lease")
+            .connection
+            .as_ref()
+            .expect("live physical connection")
     }
 }
 impl DerefMut for DatabaseLease {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.connection.as_mut().expect("live database lease")
+        self.connection
+            .as_mut()
+            .expect("live database lease")
+            .connection
+            .as_mut()
+            .expect("live physical connection")
     }
 }
-/// An unpolled or cancelled cleanup owner must retire its unchecked connection.
-/// Only a successful cleanup barrier can return it to the idle pool.
-struct CleanupOwner(Option<Object<DbConnection>>);
-
+/// Defaults to disposal. Only a completed, valid cleanup barrier can return
+/// a connection to the idle pool, including when its task is canceled at shutdown.
+struct CleanupOwner {
+    connection: Option<Object<SqliteManager>>,
+}
 impl CleanupOwner {
     fn return_idle(mut self) {
-        drop(self.0.take());
+        let mut connection = self.connection.take().expect("one cleanup owner");
+        connection.admission_anchor = None;
+        drop(connection);
     }
 }
-
 impl Drop for CleanupOwner {
     fn drop(&mut self) {
-        if let Some(connection) = self.0.take() {
+        if let Some(connection) = self.connection.take() {
             drop(Object::take(connection));
         }
     }
 }
-
 impl Drop for DatabaseLease {
     fn drop(&mut self) {
         let Some(mut connection) = self.connection.take() else {
             return;
         };
-        let admission = self.admission.take();
+        // This anchor remains inside the physical owner on timeout/cancellation.
+        // In particular, an aborted unqueued cleanup cannot free admission while
+        // its predecessor is still running on the native connection worker.
+        connection.admission_anchor = self.admission.take();
+        let mut owner = CleanupOwner {
+            connection: Some(connection),
+        };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            drop(Object::take(connection));
-            drop(admission);
             return;
         };
-        // This barrier is queued after every prior operation on this wrapper.
-        // Its closure retains admission even if the cleanup future times out.
-        let cleanup = connection.spawn_blocking(move |connection| {
-            let _admission = admission;
-            let status = <SqliteConnection as Connection>::TransactionManager::transaction_manager_status_mut(connection);
-            if matches!(status, TransactionManagerStatus::Valid(valid) if valid.transaction_depth().is_none()) {
-                Ok(())
-            } else {
-                // Closing an unfinished SQLite transaction rolls it back.
-                Err(Error::RollbackTransaction)
-            }
-        });
-        // Create the guard before constructing the future: shutdown can drop
-        // that future without ever polling its body.
-        let owner = CleanupOwner(Some(connection));
+        let cleanup = owner.connection.as_mut().expect("one cleanup owner")
+            .connection.as_mut().expect("live physical connection")
+            .spawn_blocking(move |connection| {
+                let status = <SqliteConnection as Connection>::TransactionManager::transaction_manager_status_mut(connection);
+                if matches!(status, TransactionManagerStatus::Valid(valid) if valid.transaction_depth().is_none()) {
+                    Ok(())
+                } else {
+                    Err(Error::RollbackTransaction)
+                }
+            });
         runtime.spawn(async move {
             if cleanup.await.is_ok() {
                 owner.return_idle();
             }
         });
+    }
+}
+
+/// Query-worker causal experiment: keep prior synchronous wrapper Drop when
+/// idle, while deferring its admission anchor until real queued/running work ends.
+struct ManagedSqlite {
+    connection: Option<DbConnection>,
+    worker: WorkerHandle,
+    admission_anchor: Option<Arc<Admission>>,
+}
+struct RetireAdmission {
+    worker: WorkerHandle,
+    admission: Option<Arc<Admission>>,
+}
+impl Drop for RetireAdmission {
+    fn drop(&mut self) {
+        self.worker.release_after_jobs(self.admission.take());
+    }
+}
+impl Drop for ManagedSqlite {
+    fn drop(&mut self) {
+        // This guard also posts the anchor on ordinary Rust unwind. Normal
+        // wrapper/idle-C close completes before its caller returns, as before.
+        let _admission = RetireAdmission {
+            worker: self.worker.clone(),
+            admission: self.admission_anchor.take(),
+        };
+        if let Some(connection) = self.connection.take() {
+            drop(connection);
+        }
+    }
+}
+
+struct SqliteManager {
+    url: String,
+    busy_setting: String,
+    operation_timeout: Duration,
+    telemetry: Arc<DatabaseTelemetry>,
+    #[cfg(test)]
+    setup_activity: Arc<SetupActivity>,
+}
+impl deadpool::managed::Manager for SqliteManager {
+    type Type = ManagedSqlite;
+    type Error = ManagerError;
+
+    async fn create(&self) -> Result<ManagedSqlite, Self::Error> {
+        let worker = WorkerHandle::start().map_err(|error| {
+            ManagerError::ConnectionError(diesel::ConnectionError::BadConnection(error.to_string()))
+        })?;
+        let runtime = SqliteRuntime::with_worker(self.operation_timeout, worker.clone());
+        let admission = CHECKOUT_ADMISSION.try_with(Arc::clone).map_err(|_| {
+            ManagerError::ConnectionError(diesel::ConnectionError::BadConnection(
+                "Missing database admission owner".into(),
+            ))
+        })?;
+        let progress = STARTUP_CHECKOUT_PROGRESS.try_with(Arc::clone).ok();
+        let url = self.url.clone();
+        let busy_setting = self.busy_setting.clone();
+        let telemetry = self.telemetry.clone();
+        let connection_worker = worker.clone();
+        #[cfg(test)]
+        let setup_activity = self.setup_activity.clone();
+        if let Some(progress) = &progress {
+            progress.advance("blocking worker queue");
+        }
+        let prepared = worker.prepare(move || {
+            use diesel::connection::SimpleConnection;
+            #[cfg(test)]
+            let _activity = {
+                let active = setup_activity.active.fetch_add(1, Ordering::SeqCst) + 1;
+                setup_activity.peak.fetch_max(active, Ordering::SeqCst);
+                setup_activity.started.fetch_add(1, Ordering::SeqCst);
+                SetupWorker(setup_activity)
+            };
+            let advance = |stage| {
+                if let Some(progress) = &progress {
+                    progress.advance(stage);
+                }
+            };
+            advance("SQLite open");
+            let mut connection = SqliteConnection::establish(&url)?;
+            for (stage, sql) in [
+                ("SQLite busy timeout", busy_setting.as_str()),
+                ("SQLite WAL setup", "PRAGMA journal_mode=WAL;"),
+                ("SQLite synchronous setup", "PRAGMA synchronous=NORMAL;"),
+            ] {
+                advance(stage);
+                connection
+                    .batch_execute(sql)
+                    .map_err(|error| diesel::ConnectionError::BadConnection(error.to_string()))?;
+            }
+            advance("pool checkout completion");
+            connection.set_instrumentation(SqliteObservation {
+                query_started: None,
+                transaction: telemetry.connection(),
+                transaction_control: None,
+                telemetry,
+            });
+            // Build the owned wrapper ON the native worker, before handing it to
+            // a cancelable async oneshot/pool creation future.
+            Ok::<_, diesel::ConnectionError>(ManagedSqlite {
+                connection: Some(SyncConnectionWrapper::with_runtime(connection, runtime)),
+                worker: connection_worker,
+                admission_anchor: Some(admission),
+            })
+        });
+        prepared
+            .run()
+            .await
+            .map_err(|error| {
+                ManagerError::ConnectionError(diesel::ConnectionError::BadConnection(
+                    error.to_string(),
+                ))
+            })?
+            .map_err(ManagerError::ConnectionError)
+    }
+
+    async fn recycle(
+        &self,
+        connection: &mut ManagedSqlite,
+        _: &deadpool::managed::Metrics,
+    ) -> deadpool::managed::RecycleResult<Self::Error> {
+        let connection = connection
+            .connection
+            .as_mut()
+            .expect("live pooled SQLite connection");
+        if std::thread::panicking() || connection.is_broken() {
+            return Err(deadpool::managed::RecycleError::Message(
+                "Broken connection".into(),
+            ));
+        }
+        connection
+            .ping(&RecyclingMethod::Fast)
+            .await
+            .map_err(ManagerError::QueryError)?;
+        Ok(())
     }
 }
 
@@ -442,75 +618,24 @@ impl Database {
             .ok_or_else(|| failure("database admission capacity too large"))?;
         let busy_ms = busy_timeout.as_millis().min(i32::MAX as u128);
         let busy_setting = format!("PRAGMA busy_timeout={busy_ms};");
-        let mut manager_config = ManagerConfig::default();
         let telemetry = DatabaseTelemetry::new(capacity);
-        let manager_telemetry = telemetry.clone();
-        manager_config.recycling_method = RecyclingMethod::Fast;
         #[cfg(test)]
         let setup_activity = Arc::new(SetupActivity::default());
-        #[cfg(test)]
-        let manager_activity = setup_activity.clone();
-        manager_config.custom_setup = Box::new(move |url| {
-            let url = url.to_owned();
-            let busy_setting = busy_setting.clone();
-            let telemetry = manager_telemetry.clone();
-            let progress = STARTUP_CHECKOUT_PROGRESS.try_with(Arc::clone).ok();
+        let manager = SqliteManager {
+            url: url.to_owned(),
+            busy_setting,
+            operation_timeout,
+            telemetry: telemetry.clone(),
             #[cfg(test)]
-            let setup_activity = manager_activity.clone();
-            Box::pin(async move {
-                let advance = move |stage| {
-                    if let Some(progress) = &progress {
-                        progress.advance(stage);
-                    }
-                };
-                advance("blocking worker queue");
-                let connection = tokio::task::spawn_blocking(move || {
-                    use diesel::connection::SimpleConnection;
-                    #[cfg(test)]
-                    let _worker = {
-                        let active = setup_activity.active.fetch_add(1, Ordering::SeqCst) + 1;
-                        setup_activity.peak.fetch_max(active, Ordering::SeqCst);
-                        setup_activity.started.fetch_add(1, Ordering::SeqCst);
-                        SetupWorker(setup_activity)
-                    };
-                    advance("SQLite open");
-                    let mut connection = SqliteConnection::establish(&url)?;
-                    for (stage, sql) in [
-                        ("SQLite busy timeout", busy_setting.as_str()),
-                        ("SQLite WAL setup", "PRAGMA journal_mode=WAL;"),
-                        ("SQLite synchronous setup", "PRAGMA synchronous=NORMAL;"),
-                    ] {
-                        advance(stage);
-                        connection.batch_execute(sql).map_err(|error| {
-                            diesel::ConnectionError::BadConnection(error.to_string())
-                        })?;
-                    }
-                    advance("pool checkout completion");
-                    connection.set_instrumentation(SqliteObservation {
-                        query_started: None,
-                        transaction: telemetry.connection(),
-                        transaction_control: None,
-                        telemetry,
-                    });
-                    Ok::<_, diesel::ConnectionError>(connection)
-                })
-                .await
-                .map_err(|error| diesel::ConnectionError::BadConnection(error.to_string()))??;
-                Ok(SyncConnectionWrapper::with_runtime(
-                    connection,
-                    SqliteRuntime::new(operation_timeout),
-                ))
-            })
-        });
-        let manager =
-            AsyncDieselConnectionManager::<DbConnection>::new_with_config(url, manager_config);
+            setup_activity: setup_activity.clone(),
+        };
         let pool = Pool::builder(manager)
             .max_size(capacity)
             .runtime(deadpool::Runtime::Tokio1)
             .build()
             .map_err(|error| failure(error.to_string()))?;
         Ok(Self(Arc::new(Inner {
-            provider: horme::Db::new(pool),
+            pool,
             admission: Arc::new(Semaphore::new(admitted)),
             checkout_timeout,
             operation_timeout,
@@ -528,7 +653,7 @@ impl Database {
     }
 
     pub fn state(&self) -> DatabaseStatus {
-        let status = self.0.provider.pool().status();
+        let status = self.0.pool.status();
         DatabaseStatus {
             connections: status.size as u32,
             idle_connections: status.available as u32,
@@ -606,21 +731,24 @@ impl Database {
             .try_acquire_owned()
             .map_err(|_| horme::Error::from(failure("database admission capacity exceeded")))?;
         self.0.admitted.fetch_add(1, Ordering::Relaxed);
-        let admission = Admission {
+        let admission = Arc::new(Admission {
             _permit: permit,
             inner: self.0.clone(),
-        };
+        });
         let inner = self.0.clone();
         // Cancellation only detaches this owner. In particular, an in-progress
         // SQLite setup must retain both deadpool's slot and our admission until
         // its blocking worker finishes. A late lease follows the usual cleanup.
         let checkout = tokio::spawn(async move {
-            let mut provider = inner.provider.clone();
-            let acquisition = provider.get_mut_conn();
-            let connection = match startup {
+            let acquisition = CHECKOUT_ADMISSION.scope(admission.clone(), inner.pool.get());
+            let mut connection = match startup {
                 Some(progress) => STARTUP_CHECKOUT_PROGRESS.scope(progress, acquisition).await,
                 None => acquisition.await,
-            }?;
+            }
+            .map_err(|error| horme::Error::Acquire(Box::new(error)))?;
+            // No await separates transfer from the setup/retirement anchor to
+            // DatabaseLease. An aborted ready output is itself safely disposed.
+            connection.admission_anchor = None;
             inner.checkouts.fetch_add(1, Ordering::Relaxed);
             Ok::<_, horme::Error>(DatabaseLease {
                 connection: Some(connection),
@@ -954,7 +1082,7 @@ mod tests {
         let mut second = database.clone();
         let cancelled = tokio::spawn(async move { second.get_mut_conn().await.map(|_| ()) });
         tokio::time::timeout(Duration::from_secs(3), async {
-            while database.0.provider.pool().status().waiting != 2 {
+            while database.0.pool.status().waiting != 2 {
                 tokio::task::yield_now().await;
             }
         })
@@ -1277,8 +1405,7 @@ mod thread_migration_probe {
     }
 }
 
-// Candidate to append to crates/server/src/database.rs under root-controlled
-// red/green validation. Not compiled or executed during preparation.
+// Regression for cancellation of an unpolled database cleanup owner.
 #[cfg(test)]
 mod cleanup_owner_cancellation_regression {
     use super::*;
@@ -1385,5 +1512,302 @@ mod cleanup_owner_cancellation_regression {
         drop(peer);
         drop(database);
         directory.close().unwrap();
+    }
+}
+// Real SQLite and worker lifecycle regressions.
+#[cfg(test)]
+mod query_worker_regressions {
+    use super::*;
+    use diesel::RunQueryDsl;
+    use diesel::connection::SimpleConnection;
+    use std::collections::HashSet;
+    use std::thread::{self, ThreadId};
+
+    #[derive(diesel::QueryableByName)]
+    struct Marker {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        marker: String,
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        value: i64,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+    fn database(capacity: u32) -> (tempfile::TempDir, Database) {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::with_timeouts(
+            directory
+                .path()
+                .join("query-worker.sqlite")
+                .to_str()
+                .unwrap(),
+            capacity,
+            Duration::from_secs(3),
+            Duration::from_secs(15),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        (directory, database)
+    }
+    async fn migrate(database: &Database) {
+        database
+            .run_startup_migrations(|connection| {
+                crate::migrations::run_directory(
+                    connection,
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
+                )?;
+                connection.batch_execute(
+                    "CREATE TABLE native_lifecycle_probe(value INTEGER NOT NULL);",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    async fn settled(database: &Database) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let state = database.state();
+                if state.admitted_operations == 0 && state.connections == state.idle_connections {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("real lease barriers must finish");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_physical_database_connection_keeps_one_query_thread() {
+        for capacity in [1_u32, 5_u32] {
+            let (directory, database) = database(capacity);
+            migrate(&database).await;
+            let (stopped_send, stopped_recv) = std::sync::mpsc::channel();
+            let mut leases = Vec::new();
+            let mut workers = Vec::new();
+            for index in 0..capacity {
+                let mut lease = database
+                    .checkout(Duration::from_secs(3), None)
+                    .await
+                    .unwrap();
+                let worker = lease.connection.as_ref().unwrap().worker.clone();
+                worker.test_on_stopped(stopped_send.clone());
+                let marker = format!("physical-{capacity}-{index}");
+                let stored = marker.clone();
+                let initialized: ThreadId = lease.spawn_blocking(move |connection| {
+                    connection.batch_execute("CREATE TEMP TABLE fixed_worker_probe(marker TEXT NOT NULL,value INTEGER NOT NULL);")?;
+                    diesel::sql_query("INSERT INTO temp.fixed_worker_probe(marker,value) VALUES(?,0)")
+                        .bind::<diesel::sql_types::Text,_>(stored).execute(connection)?;
+                    Ok(thread::current().id())
+                }).await.unwrap();
+                leases.push((lease, marker, HashSet::from([initialized])));
+                workers.push(worker);
+            }
+            // Genuine bounded global-pool FS/blocking work may not move a
+            // physical SQLite connection away from its dedicated query worker.
+            let path = directory.path().join("dummy.bin");
+            std::fs::write(&path, [7_u8; 4096]).unwrap();
+            let mut releases = Vec::new();
+            let mut blockers = Vec::new();
+            for _ in 0..8 {
+                let path = path.clone();
+                let (release_send, release_recv) = std::sync::mpsc::channel::<()>();
+                let (started_send, started_recv) = oneshot::channel();
+                releases.push(release_send);
+                blockers.push(tokio::task::spawn_blocking(move || {
+                    assert_eq!(std::fs::read(path).unwrap().len(), 4096);
+                    started_send.send(()).unwrap();
+                    let _ = release_recv.recv();
+                }));
+                tokio::time::timeout(Duration::from_secs(3), started_recv)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            for value in 1_i64..=32 {
+                for (lease, expected, threads) in &mut leases {
+                    let (row, tid) = lease
+                        .spawn_blocking(|connection| {
+                            diesel::sql_query("UPDATE temp.fixed_worker_probe SET value=value+1")
+                                .execute(connection)?;
+                            let row = diesel::sql_query(
+                                "SELECT marker,value FROM temp.fixed_worker_probe",
+                            )
+                            .get_result::<Marker>(connection)?;
+                            Ok((row, thread::current().id()))
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!((&row.marker, row.value), (&*expected, value));
+                    threads.insert(tid);
+                    assert_eq!(
+                        threads.len(),
+                        1,
+                        "same TEMP owner must keep exactly one query ThreadId"
+                    );
+                }
+            }
+            drop(releases);
+            for blocker in blockers {
+                blocker.await.unwrap();
+            }
+            drop(leases);
+            settled(&database).await;
+            drop(database); // Idle C close preserves its original synchronous contract.
+            directory.close().unwrap();
+            drop(workers);
+            for _ in 0..capacity {
+                stopped_recv.recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn declared_fifo_survives_a_cancelled_queued_caller() {
+        let mut runtime = SqliteRuntime::new(Duration::from_secs(15));
+        let worker = runtime.worker.as_ref().unwrap().clone();
+        let (stopped_send, stopped_recv) = std::sync::mpsc::channel();
+        worker.test_on_stopped(stopped_send);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let first_order = order.clone();
+        let (started_send, started_recv) = oneshot::channel();
+        let (release_send, release_recv) = std::sync::mpsc::channel::<()>();
+        let first = runtime.spawn_blocking(move || {
+            first_order.lock().unwrap().push(1);
+            started_send.send(()).unwrap();
+            let _ = release_recv.recv();
+        });
+        let second_order = order.clone();
+        let cancelled = runtime.spawn_blocking(move || second_order.lock().unwrap().push(2));
+        let third_order = order.clone();
+        let third = runtime.spawn_blocking(move || third_order.lock().unwrap().push(3));
+        drop(cancelled); // Admitted detached work is not silently aborted or replayed.
+        tokio::time::timeout(Duration::from_secs(3), started_recv)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*order.lock().unwrap(), [1]);
+        release_send.send(()).unwrap();
+        first.await.unwrap();
+        third.await.unwrap();
+        assert_eq!(*order.lock().unwrap(), [1, 2, 3]);
+        drop(runtime);
+        drop(worker);
+        stopped_recv.recv_timeout(Duration::from_secs(3)).unwrap();
+    }
+
+    #[test]
+    fn queued_sql_survives_runtime_teardown_and_holds_admission_until_owner_destruction() {
+        let (directory, database) = database(1);
+        let url = directory.path().join("query-worker.sqlite");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (dummy_release_send, dummy_release_recv) = std::sync::mpsc::channel::<()>();
+        let (sql_release_send, sql_release_recv) = std::sync::mpsc::channel::<()>();
+        let (sql_started_send, sql_started_recv) = std::sync::mpsc::channel();
+        let (released_send, released_recv) = std::sync::mpsc::channel();
+        let (stopped_send, stopped_recv) = std::sync::mpsc::channel();
+        let (lease, worker, sql, dummy) = runtime.block_on(async {
+            migrate(&database).await;
+            let mut lease = database
+                .checkout(Duration::from_secs(3), None)
+                .await
+                .unwrap();
+            let worker = lease.connection.as_ref().unwrap().worker.clone();
+            worker.test_on_release(released_send);
+            worker.test_on_stopped(stopped_send);
+            let (dummy_started_send, dummy_started_recv) = oneshot::channel();
+            let dummy = worker.prepare(move || {
+                dummy_started_send.send(()).unwrap();
+                let _ = dummy_release_recv.recv();
+            });
+            let dummy = tokio::spawn(dummy.run());
+            tokio::time::timeout(Duration::from_secs(3), dummy_started_recv)
+                .await
+                .unwrap()
+                .unwrap();
+            let (queued_send, queued_recv) = oneshot::channel();
+            worker.test_on_queued(queued_send);
+            let sql: BoxFuture<'static, QueryResult<()>> =
+                lease.spawn_blocking(move |connection| {
+                    <SqliteConnection as Connection>::TransactionManager::begin_transaction(
+                        connection,
+                    )?;
+                    diesel::sql_query("INSERT INTO native_lifecycle_probe(value) VALUES(77)")
+                        .execute(connection)?;
+                    sql_started_send.send(()).unwrap();
+                    // Leave the real write transaction open when returning. Once
+                    // the last opaque connection Arc is destroyed, it must roll back.
+                    let _ = sql_release_recv.recv();
+                    Ok(())
+                });
+            tokio::time::timeout(Duration::from_secs(3), queued_recv)
+                .await
+                .unwrap()
+                .unwrap();
+            // The actual mailbox insertion point fired while its native worker
+            // is still gated in dummy. This is truly queued, not only registered.
+            assert!(matches!(
+                sql_started_recv.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            (lease, worker, sql, dummy)
+        });
+        drop(sql);
+        drop(dummy);
+        {
+            let _entered = runtime.enter();
+            drop(lease); // Queues its real cleanup, but this runtime is not driven again.
+        }
+        drop(runtime);
+        let state = database.state();
+        assert_eq!((state.connections, state.idle_connections), (0, 0));
+        assert_eq!(
+            state.admitted_operations, 1,
+            "queued real SQL must keep its acquisition"
+        );
+        assert!(matches!(
+            released_recv.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        dummy_release_send.send(()).unwrap();
+        sql_started_recv
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        assert_eq!(
+            database.state().admitted_operations,
+            1,
+            "running real SQL still owns admission after runtime teardown"
+        );
+        let mut peer = SqliteConnection::establish(url.to_str().unwrap()).unwrap();
+        peer.batch_execute("PRAGMA busy_timeout=0;").unwrap();
+        let locked = peer
+            .batch_execute("BEGIN IMMEDIATE; ROLLBACK;")
+            .expect_err("positive control: the real queued SQL now holds a writer lock");
+        assert!(locked.to_string().contains("locked"), "{locked}");
+        sql_release_send.send(()).unwrap();
+        // Actual release callback completion, after opaque closure destruction;
+        // no new runtime/checkout/timer or SQL retry can hide an idle writer.
+        released_recv.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(database.state().admitted_operations, 0);
+        peer.batch_execute("BEGIN IMMEDIATE; ROLLBACK;").unwrap();
+        let rows = diesel::sql_query("SELECT COUNT(*) AS count FROM native_lifecycle_probe")
+            .get_result::<Count>(&mut peer)
+            .unwrap();
+        assert_eq!(rows.count, 0, "abandoned write must roll back");
+        drop(peer);
+        drop(database);
+        directory.close().unwrap();
+        drop(worker);
+        stopped_recv.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(matches!(
+            released_recv.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
     }
 }
