@@ -88,6 +88,16 @@ A full-featured, open-source office suite built entirely in Rust. Contrix Office
 | PNG      | —      | —    | —      | Export     |
 | SVG      | —      | —    | —      | Export     |
 
+### PDF support
+
+- Upload a PDF and open it directly from Files. The local viewer supports page navigation, zoom, selectable text and search, including password-protected reading.
+- Add text (including Chinese), highlight areas, rotate, reorder or delete pages, undo changes and save a new version. Saves require the current ETag and editor permission; the original remains downloadable. To rewrite existing body text, convert the PDF to a separate private Writer document.
+- Text-layer PDFs convert natively. Scanned and mixed PDFs use bundled English/Chinese OCR in the browser, with progress and cancellation. Review recognized text, especially formulas and tables; conversion does not reproduce the PDF's fixed page layout or embedded illustrations.
+- Writer, Calc, Slides and Whiteboard export real PDFs with embedded images, Chinese fonts and page layout. Server printing requires an installed Chrome, Chromium or Edge; set `CONTRIX_PDF_BROWSER` to an executable when automatic discovery is insufficient. Browser sandboxing stays enabled. The Docker image includes Chromium and runs as a non-root user.
+- Build browser assets with Node 22.13 or newer. PDF.js, PDF-LIB, OCR workers/languages and an OFL CJK font are bundled by `scripts/build-frontend.ps1`; runtime viewing and OCR do not use an external document service or CDN. Processing limits are 32 MiB and 500 pages per source, with at most 50 scanned pages in one OCR conversion.
+
+The authenticated PDF API is `GET/PUT /api/v1/files/{id}/pdf` (use `If-Match` for saves), `POST .../pdf/convert` (`expected_etag`, optional `ocr_pages`) and `POST .../pdf/restore` (`expected_etag`, `version_number`). `GET .../pdf?version=0` returns the original. Existing `/documents/{id}/export/pdf` and `/convert` jobs support PDF output; text-layer PDF sources also support conversion jobs to DOCX, HTML, Markdown, text or native JSON.
+
 ### Search
 
 - Search document names and stored content

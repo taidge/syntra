@@ -159,6 +159,13 @@ fn file_routes() -> Router {
                 .delete(handlers::files::delete_file)
                 .push(Router::with_path("move").post(handlers::files::move_file))
                 .push(Router::with_path("download").get(handlers::files::download_file))
+                .push(
+                    Router::with_path("pdf")
+                        .get(handlers::pdf::get_pdf)
+                        .put(handlers::pdf::save_pdf)
+                        .push(Router::with_path("restore").post(handlers::pdf::restore_pdf))
+                        .push(Router::with_path("convert").post(handlers::pdf::convert_pdf)),
+                )
                 .push(Router::with_path("order").put(handlers::files::set_file_order))
                 .push(Router::with_path("tags").get(handlers::tags::list_file_tags))
                 .push(

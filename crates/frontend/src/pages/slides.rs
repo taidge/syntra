@@ -516,20 +516,57 @@ fn slide_text_svg(
     rotation: f64,
     width: f64,
     height: f64,
+    layout: &Value,
 ) -> String {
-    let mut result = format!(
-        "<text x=\"{x}\" y=\"{y}\" transform=\"rotate({rotation} {} {})\" xml:space=\"preserve\">",
-        x + width / 2.,
-        y + height / 2.
+    // DrawingML fonts and paragraph spacing use points; slide bounds use
+    // 96-dpi pixels. HTML inside the SVG lets the browser measure actual fonts
+    // and wrap mixed styled runs instead of guessing character widths.
+    const POINT: f64 = 96. / 72.;
+    let number =
+        |value: &Value, fallback: f64| value.as_f64().filter(|n| n.is_finite()).unwrap_or(fallback);
+    let inset = |name| number(&layout[name], 0.).max(0.);
+    let (left, right, top, bottom) = (
+        inset("inset_left"),
+        inset("inset_right"),
+        inset("inset_top"),
+        inset("inset_bottom"),
     );
-    let mut first = true;
+    let wrap = if layout["wrap"].as_bool() == Some(false) {
+        "pre"
+    } else {
+        "pre-wrap"
+    };
+    let vertical = match layout["vertical_alignment"].as_str() {
+        Some("center") => "center",
+        Some("bottom") => "flex-end",
+        _ => "flex-start",
+    };
+    let mut paragraphs: Vec<(Value, String)> = Vec::new();
+    let mut paragraph_index = None;
     for run in runs {
+        if run["paragraph_break"].as_bool() == Some(true) {
+            continue;
+        }
+        let index = run["paragraph"]["index"].as_u64();
+        if paragraphs.is_empty() || (index.is_some() && index != paragraph_index) {
+            paragraphs.push((run["paragraph"].clone(), String::new()));
+        }
+        paragraph_index = index;
         let size = run["font_size"]
             .as_f64()
             .filter(|n| n.is_finite() && *n > 0.)
-            .unwrap_or(28.);
+            .unwrap_or(28.)
+            * POINT;
         let color = svg_escape(run["color"].as_str().unwrap_or("#111827"));
         let font = svg_escape(run["font_family"].as_str().unwrap_or("Arial,sans-serif"));
+        let css_font = svg_escape(
+            &run["font_family"]
+                .as_str()
+                .unwrap_or("Arial,sans-serif")
+                .replace('\\', "\\\\")
+                .replace('\'', "\\27 ")
+                .replace(['\r', '\n'], " "),
+        );
         let bold = if run["bold"].as_bool() == Some(true) {
             "bold"
         } else {
@@ -555,19 +592,38 @@ fn slide_text_svg(
             .split('\n')
             .enumerate()
         {
-            let position = if first || line > 0 {
-                format!(
-                    " x=\"{x}\" dy=\"{}\"",
-                    if first { size } else { size * 1.3 }
-                )
-            } else {
-                String::new()
-            };
-            result.push_str(&format!("<tspan{position} font-family=\"{font}\" font-size=\"{size}\" font-weight=\"{bold}\" font-style=\"{italic}\" text-decoration=\"{decorations}\" fill=\"{color}\">{}</tspan>",svg_escape(text)));
-            first = false;
+            if line > 0 {
+                if index.is_some() {
+                    paragraphs.last_mut().unwrap().1.push_str("<br/>");
+                } else {
+                    paragraphs.push((Value::Null, String::new()));
+                }
+            }
+            paragraphs.last_mut().unwrap().1.push_str(&format!("<span font-family=\"{font}\" font-weight=\"{bold}\" text-decoration=\"{decorations}\" style=\"font-family:'{css_font}',sans-serif;font-size:{size}px;font-weight:{bold};font-style:{italic};text-decoration:{decorations};color:{color}\">{}</span>", svg_escape(text)));
         }
     }
-    result.push_str("</text>");
+    let mut result = format!(
+        "<foreignObject x=\"{x}\" y=\"{y}\" width=\"{width}\" height=\"{height}\" transform=\"rotate({rotation} {} {})\" overflow=\"visible\"><div xmlns=\"http://www.w3.org/1999/xhtml\" style=\"box-sizing:border-box;width:100%;height:100%;padding:{top}px {right}px {bottom}px {left}px;display:flex;flex-direction:column;justify-content:{vertical};white-space:{wrap};overflow-wrap:break-word;overflow:visible\">",
+        x + width / 2.,
+        y + height / 2.
+    );
+    for (style, text) in paragraphs {
+        let alignment = match style["alignment"].as_str() {
+            Some("center") => "center",
+            Some("right") => "right",
+            Some("justify") => "justify",
+            _ => "left",
+        };
+        let line_height = style["line_height_points"]
+            .as_f64()
+            .filter(|n| n.is_finite() && *n > 0.)
+            .map(|n| format!("{}px", n * POINT))
+            .unwrap_or_else(|| number(&style["line_height"], 1.2).max(0.1).to_string());
+        let before = number(&style["space_before_points"], 0.).max(0.) * POINT;
+        let after = number(&style["space_after_points"], 0.).max(0.) * POINT;
+        result.push_str(&format!("<div style=\"flex:0 0 auto;min-width:0;text-align:{alignment};line-height:{line_height};margin:{before}px 0 {after}px 0\">{}</div>", if text.is_empty() { "<br/>" } else { &text }));
+    }
+    result.push_str("</div></foreignObject>");
     result
 }
 fn slide_chart_svg(element: &Value, x: f64, y: f64, width: f64, height: f64) -> String {
@@ -856,11 +912,12 @@ fn slide_svg(content: &Value, index: usize) -> String {
                 if let Some(runs) = element[if text_box { "content" } else { "text" }].as_array() {
                     svg.push_str(&slide_text_svg(
                         runs,
-                        x + num("padding", 0.),
+                        x,
                         y,
                         rotation,
                         width,
                         height,
+                        &element["text_layout"].as_object().map(|_| element["text_layout"].clone()).unwrap_or_else(|| json!({"inset_left":num("padding",0.),"inset_right":num("padding",0.),"inset_top":num("padding",0.),"inset_bottom":num("padding",0.)})),
                     ));
                 }
             }
@@ -1414,6 +1471,34 @@ mod external_render_tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+    #[test]
+    fn text_layout_wraps_styled_runs_at_the_box_width_and_preserves_paragraph_styles() {
+        let runs = json!([
+            {"text":"Wrapped & styled text", "font_size":20,"paragraph":{"index":0,"alignment":"right","line_height":1.25,"space_after_points":12}},
+            {"text":"\n", "paragraph_break":true,"paragraph":{"index":1}},
+            {"text":"Second paragraph", "font_size":20,"paragraph":{"index":1,"alignment":"center"}}
+        ]);
+        let svg = slide_text_svg(
+            runs.as_array().unwrap(),
+            30.,
+            40.,
+            15.,
+            300.,
+            240.,
+            &json!({"wrap":true,"vertical_alignment":"center","inset_left":2,"inset_right":3,"inset_top":4,"inset_bottom":5}),
+        );
+        assert!(svg.contains("<foreignObject x=\"30\" y=\"40\" width=\"300\" height=\"240\""));
+        assert!(svg.contains("white-space:pre-wrap") && svg.contains("overflow-wrap:break-word"));
+        assert!(svg.contains("justify-content:center") && svg.contains("padding:4px 3px 5px 2px"));
+        assert!(svg.contains("text-align:right;line-height:1.25;margin:0px 0 16px 0"));
+        assert!(svg.contains("text-align:center") && svg.contains("font-size:26.666"));
+        assert!(svg.contains("Wrapped &amp; styled text"));
+        assert_eq!(
+            svg.matches("<span").count(),
+            2,
+            "the plain-text separator must not create an extra rendered line"
+        );
     }
     #[test]
     fn imported_canvas_runs_geometry_and_crop_are_visible_in_svg() {

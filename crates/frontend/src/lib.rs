@@ -22,6 +22,7 @@ pub enum Route {
     Calc { id: String },
     Slides { id: String },
     Whiteboard { id: String },
+    Pdf { id: String },
     Admin {},
     Profile {},
     NotFound {},
@@ -53,6 +54,7 @@ impl Route {
                         "/calc" => Self::Calc { id },
                         "/slides" => Self::Slides { id },
                         "/whiteboard" => Self::Whiteboard { id },
+                        "/pdf" => Self::Pdf { id },
                         _ => Self::NotFound {},
                     }
                 }
@@ -75,6 +77,7 @@ impl Route {
             Self::Calc { id } => format!("/calc/{id}"),
             Self::Slides { id } => format!("/slides/{id}"),
             Self::Whiteboard { id } => format!("/whiteboard/{id}"),
+            Self::Pdf { id } => format!("/pdf/{id}"),
             Self::NotFound {} => "/404".into(),
         }
     }
@@ -110,6 +113,7 @@ pub fn app(route: Route, initial_auth: state::AuthState) -> impl Widget {
             Route::Calc { id } => Box::new(pages::Calc(scope.clone(), auth, id)),
             Route::Slides { id } => Box::new(pages::Slides(scope.clone(), auth, id)),
             Route::Whiteboard { id } => Box::new(pages::Whiteboard(scope.clone(), auth, id)),
+            Route::Pdf { id } => Box::new(pages::Pdf(scope.clone(), auth, id)),
             Route::NotFound {} => Box::new(col().class("not-found").fill((
                 text().content("Page not found"),
                 link().target("/").label("Contrix Office"),
@@ -161,7 +165,7 @@ mod tests {
     #[test]
     fn routes_keep_document_links_and_reject_malformed_ids() {
         let id = "a90545b8-2dce-47ab-8ca2-a8c15d5dbdb4";
-        for kind in ["documents", "writer", "calc", "slides", "whiteboard"] {
+        for kind in ["documents", "writer", "calc", "slides", "whiteboard", "pdf"] {
             let url = format!("/{kind}/{id}");
             assert_eq!(Route::parse(&url).url(), url);
         }

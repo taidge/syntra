@@ -103,6 +103,10 @@ pub(super) async fn export_content(
 
         // Perform the export based on doc type and format.
         match (&doc_type, &export_format) {
+            (_, ExportFormat::Pdf) => {
+                let printable = contrix_export::pdf::document_to_print_html(&content, &doc_type_str)?;
+                crate::services::pdf_renderer::render(&printable.html)
+            }
             (DocumentType::Writer, ExportFormat::Html) => {
                 match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
                     Ok(doc) => {
@@ -120,6 +124,11 @@ pub(super) async fn export_content(
                     }
                     Err(e) => Err(format!("Failed to parse writer document: {e}")),
                 }
+            }
+            (DocumentType::Writer, ExportFormat::PlainText) => {
+                serde_json::from_value::<contrix_doc_engine::WriterDocument>(content)
+                    .map(|document| document.to_plain_text().into_bytes())
+                    .map_err(|error| format!("Failed to parse writer document: {error}"))
             }
             (DocumentType::Calc, ExportFormat::Csv) => {
                 match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
@@ -255,6 +264,52 @@ mod conversion_worker_tests {
     }
 }
 
+/// PDFs are files rather than native editor documents. Convert their text layer
+/// without requiring a documents row, and retain an exact PDF-to-PDF copy.
+async fn export_pdf_source(
+    conn: &crate::state::DbPool,
+    storage: &StorageBackend,
+    source_file_id: &str,
+    user: &str,
+    format: ExportFormat,
+    target: &str,
+) -> Result<Vec<u8>, String> {
+    let file = load_accessible_file(&mut conn.clone(), source_file_id, user, "viewer")
+        .await
+        .map_err(|error| error.to_string())?
+        .filter(|file| !file.is_trashed && !file.is_folder)
+        .ok_or("Source file is missing or inaccessible")?;
+    if !file.name.to_ascii_lowercase().ends_with(".pdf")
+        && file.mime_type.as_deref() != Some("application/pdf")
+    {
+        return Err("No editable document found for this source file".into());
+    }
+    if !(0..=32 * 1024 * 1024).contains(&file.size) {
+        return Err("PDF source exceeds the 32 MiB conversion limit".into());
+    }
+    let bytes = storage
+        .read_file(&file.path)
+        .await
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > 32 * 1024 * 1024 {
+        return Err("PDF source exceeds the 32 MiB conversion limit".into());
+    }
+    let title = file.name.trim_end_matches(".pdf").to_owned();
+    if format == ExportFormat::Pdf {
+        return run_export_worker(&EXPORT_WORKERS, move || {
+            contrix_export::pdf_import::validate_pdf(&bytes)?;
+            Ok(bytes)
+        })
+        .await?;
+    }
+    let imported = run_export_worker(&EXPORT_WORKERS, move || {
+        contrix_export::pdf_import::pdf_to_writer(&bytes, &title)
+    })
+    .await??;
+    let content = serde_json::to_string(&imported.document).map_err(|error| error.to_string())?;
+    export_content(content, "writer".into(), format, target.into()).await
+}
+
 /// Attempt to convert a document and update the conversion job record.
 async fn perform_conversion(
     conn: &mut crate::state::DbPool,
@@ -268,9 +323,12 @@ async fn perform_conversion(
         .select(cj::user_id)
         .first::<String>(conn)
         .await;
-    let permitted = match author {
-        Ok(author) => require_source_access(conn, source_file_id, &author).await,
-        Err(error) => Err(AppError::Database(error.to_string())),
+    let (permitted, source_user) = match author {
+        Ok(author) => (
+            require_source_access(conn, source_file_id, &author).await,
+            author,
+        ),
+        Err(error) => (Err(AppError::Database(error.to_string())), String::new()),
     };
     if let Err(error) = permitted {
         let _ = diesel::update(cj::conversion_jobs.filter(cj::id.eq(job_id)))
@@ -307,47 +365,50 @@ async fn perform_conversion(
         async move {
             d::documents
                 .filter(d::file_id.eq(source_file_id))
-                .select((d::doc_type, d::content))
-                .first::<(String, Option<String>)>(&mut conn)
+                .select((d::doc_type, d::content, d::version))
+                .first::<(String, Option<String>, i32)>(&mut conn)
                 .await
         }
     })
     .await
     .optional();
 
-    let (doc_type_str, content_opt) = match doc_row {
-        Ok(Some(r)) => r,
+    let exported = match doc_row {
+        Ok(Some((kind, content, version))) => {
+            let prepared = if export_format == ExportFormat::Pdf {
+                crate::services::pdf_resources::prepare_document(
+                    conn,
+                    storage,
+                    &source_user,
+                    source_file_id,
+                    version,
+                    &kind,
+                    content.unwrap_or_default(),
+                )
+                .await
+            } else {
+                Ok(content.unwrap_or_default())
+            };
+            match prepared {
+                Ok(content) => {
+                    export_content(content, kind, export_format, target_format.to_owned()).await
+                }
+                Err(error) => Err(error),
+            }
+        }
         Ok(None) => {
-            let _ = diesel::update(cj::conversion_jobs.filter(cj::id.eq(job_id)))
-                .set((
-                    cj::status.eq("failed"),
-                    cj::error_message.eq(Some("No document found for source file".to_string())),
-                    cj::completed_at.eq(Some(Utc::now().to_rfc3339())),
-                ))
-                .execute(conn)
-                .await;
-            return;
+            export_pdf_source(
+                conn,
+                storage,
+                source_file_id,
+                &source_user,
+                export_format,
+                target_format,
+            )
+            .await
         }
-        Err(e) => {
-            let _ = diesel::update(cj::conversion_jobs.filter(cj::id.eq(job_id)))
-                .set((
-                    cj::status.eq("failed"),
-                    cj::error_message.eq(Some(format!("Database error: {e}"))),
-                    cj::completed_at.eq(Some(Utc::now().to_rfc3339())),
-                ))
-                .execute(conn)
-                .await;
-            return;
-        }
+        Err(error) => Err(format!("Database error: {error}")),
     };
-
-    let exported = export_content(
-        content_opt.unwrap_or_default(),
-        doc_type_str,
-        export_format,
-        target_format.to_owned(),
-    )
-    .await;
 
     match exported {
         Ok(data) => {

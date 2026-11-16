@@ -6,6 +6,7 @@ data
 *.db-wal
 *.db-shm
 e2e/node_modules
+crates/frontend/node_modules
 e2e/test-results
 e2e/playwright-report
 .codex

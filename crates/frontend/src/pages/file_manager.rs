@@ -590,12 +590,18 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                             // Make the icon, name and card padding one native navigation
                             // target. Keep rename/delete outside it so actions cannot open
                             // the document as a side effect.
-                            let open: Box<dyn Widget> = if let Some(id) =
-                                item.get().document_id.filter(|_| !item.get().is_folder)
-                            {
+                            let file = item.get();
+                            let destination = if !file.is_folder && is_pdf(&file) {
+                                Some(format!("/pdf/{}", file.id))
+                            } else {
+                                file.document_id
+                                    .filter(|_| !file.is_folder)
+                                    .map(|id| format!("/documents/{id}"))
+                            };
+                            let open: Box<dyn Widget> = if let Some(destination) = destination {
                                 Box::new(
                                     link()
-                                        .target(format!("/documents/{id}"))
+                                        .target(destination)
                                         .class("file-card-body")
                                         .fill(body),
                                 )
@@ -707,7 +713,9 @@ fn file_kind(file: &FileResponse) -> &'static str {
         return "folder";
     }
     let mime = file.mime_type.as_deref().unwrap_or_default();
-    if mime.contains("writer") || file.name.ends_with(".docx") {
+    if is_pdf(file) {
+        "pdf"
+    } else if mime.contains("writer") || file.name.ends_with(".docx") {
         "writer"
     } else if mime.contains("calc") || file.name.ends_with(".xlsx") {
         "calc"
@@ -719,6 +727,15 @@ fn file_kind(file: &FileResponse) -> &'static str {
         "generic"
     }
 }
+fn is_pdf(file: &FileResponse) -> bool {
+    file.mime_type.as_deref().is_some_and(|mime| {
+        mime.split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case("application/pdf")
+    }) || file.name.to_ascii_lowercase().ends_with(".pdf")
+}
 fn file_icon(file: &FileResponse) -> Icon {
     Icon::document(file_kind(file))
 }
@@ -728,6 +745,7 @@ fn file_icon_class(file: &FileResponse) -> &'static str {
         "writer" => "file-icon writer",
         "calc" => "file-icon calc",
         "slides" => "file-icon slides",
+        "pdf" => "file-icon pdf",
         "whiteboard" => "file-icon whiteboard",
         _ => "file-icon generic",
     }

@@ -11,6 +11,8 @@ pub mod error;
 pub mod format;
 pub mod html;
 pub mod markdown;
+pub mod pdf;
+pub mod pdf_import;
 mod native_package;
 mod ooxml;
 mod ooxml_import;

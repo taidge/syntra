@@ -33,6 +33,9 @@ Run from this directory so config/, migrations/ and static/ are available.
 For production set CONTRIX_ENV=production and JWT_SECRET to a random secret
 of at least 32 bytes; configure writable database and storage paths in config/.
 Start ./contrix-server (contrix-server.exe on Windows), then open its bind address.
+PDF export needs an installed Chrome, Chromium or Edge browser. If it is not
+discovered automatically, set CONTRIX_PDF_BROWSER to the browser executable.
+Keep browser sandboxing available. PDF reading and OCR assets are bundled in static/.
 '@ | Set-Content -LiteralPath (Join-Path $staging 'RUNNING.txt') -Encoding utf8
     $archive = Join-Path $distribution "contrix-office-$Target.zip"
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $archive -Force

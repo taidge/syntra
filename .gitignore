@@ -8,6 +8,7 @@
 
 # E2E
 /e2e/node_modules
+/crates/frontend/node_modules
 /e2e/test-results
 /e2e/playwright-report
 /e2e/report

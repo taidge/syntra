@@ -88,6 +88,16 @@
 | PNG      | —      | —    | —      | 导出       |
 | SVG      | —      | —    | —      | 导出       |
 
+### PDF 支持
+
+- 上传 PDF 后可直接在文件列表打开，支持翻页、缩放、文字选择与查找。加密 PDF 可输入密码阅读，保持只读。
+- 支持新增中文文字、高亮、旋转、调整页序、删除页面和撤销/重做。保存会创建新版本并保留原件，通过 ETag 检测并发修改；修改已有正文时，可转换成独立的私有 Writer 文档。
+- 带文字层的 PDF 使用原生文字提取；扫描件和混合文档由浏览器中打包的中文/英文 OCR 识别，显示进度并可取消。识别结果需要校对，尤其是公式和表格；转换不保证还原 PDF 固定版式或内嵌插图，原件保持不变。
+- Writer、Calc、Slides、Whiteboard 均可导出真正的 PDF，包含中文字体、图片和分页。服务端需安装 Chrome、Chromium 或 Edge；自动查找不足时可用 `CONTRIX_PDF_BROWSER` 指向可执行文件，浏览器沙箱保持启用。Docker 镜像包含 Chromium 并使用非 root 用户运行。
+- 构建浏览器资源需 Node 22.13 以上。`scripts/build-frontend.ps1` 会打包 PDF.js、PDF-LIB、OCR worker/语言数据和 OFL 中文字体，运行时预览与识别不调用外部文档服务或 CDN。单个源文件上限 32 MiB、500 页，一次 OCR 最多识别 50 个扫描页。
+
+已鉴权 API：`GET/PUT /api/v1/files/{id}/pdf`（保存须提供 `If-Match`）、`POST .../pdf/convert`（`expected_etag`，可选 `ocr_pages`）和 `POST .../pdf/restore`（`expected_etag`、`version_number`）。`GET .../pdf?version=0` 下载原件。现有 `/documents/{id}/export/pdf` 和 `/convert` 任务支持 PDF 输出；文字层 PDF 还可通过转换任务生成 DOCX、HTML、Markdown、纯文本或原生 JSON。
+
 ### 搜索
 
 - 搜索文档名称和已保存正文

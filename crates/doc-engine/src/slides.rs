@@ -30,6 +30,9 @@ pub struct PresentationMetadata {
     /// Fidelity limitations of a non-native import; the uploaded original remains available.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub import_warnings: Vec<String>,
+    /// Revision of the external PPTX importer used to create this document.
+    #[serde(default)]
+    pub pptx_import_revision: u32,
 }
 
 impl Default for PresentationMetadata {
@@ -42,6 +45,7 @@ impl Default for PresentationMetadata {
             slide_width: 1920.0,
             slide_height: 1080.0,
             import_warnings: Vec::new(),
+            pptx_import_revision: 0,
         }
     }
 }
@@ -195,6 +199,7 @@ impl Slide {
             background_color: None,
             border: None,
             padding: 8.0,
+            text_layout: None,
         }));
         id
     }
@@ -271,6 +276,30 @@ pub struct TextBox {
     pub background_color: Option<String>,
     pub border: Option<SlideBorder>,
     pub padding: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_layout: Option<SlideTextLayout>,
+}
+
+/// Text-body properties that cannot be represented by styled runs alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlideTextLayout {
+    pub wrap: bool,
+    pub vertical_alignment: String,
+    pub inset_left: f32,
+    pub inset_right: f32,
+    pub inset_top: f32,
+    pub inset_bottom: f32,
+}
+
+/// DrawingML paragraph properties; point sizes retain the same unit as fonts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlideParagraphStyle {
+    pub index: u32,
+    pub alignment: String,
+    pub line_height: Option<f32>,
+    pub line_height_points: Option<f32>,
+    pub space_before_points: Option<f32>,
+    pub space_after_points: Option<f32>,
 }
 
 /// An image placed on a slide.
@@ -395,6 +424,11 @@ pub struct SlideTextRun {
     pub font_size: Option<f32>,
     pub color: Option<String>,
     pub link: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paragraph: Option<SlideParagraphStyle>,
+    /// A separator retained in plain text but replaced by a paragraph in layout.
+    #[serde(default)]
+    pub paragraph_break: bool,
 }
 
 impl SlideTextRun {

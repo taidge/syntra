@@ -411,6 +411,15 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
                     content,
                 )
                 .await
+            } else if doc_type == DocumentType::Slides {
+                crate::services::legacy_slides_layout::for_response(
+                    &state.db,
+                    &state.storage,
+                    &file_id_val,
+                    version_val,
+                    content,
+                )
+                .await
             } else {
                 content
             };
@@ -833,12 +842,12 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let row = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(&resolved_doc_id))
-        .select((d::doc_type, d::content, f::name))
-        .first::<(String, Option<String>, String)>(&mut conn)
+        .select((d::doc_type, d::content, f::name, d::file_id, d::version))
+        .first::<(String, Option<String>, String, String, i32)>(&mut conn)
         .await
         .optional();
 
-    let (doc_type_str, content_opt, file_name) = match row {
+    let (doc_type_str, content_opt, file_name, source_file_id, source_version) = match row {
         Ok(Some(r)) => r,
         Ok(None) => {
             res.status_code(StatusCode::NOT_FOUND);
@@ -853,13 +862,26 @@ pub async fn export_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         }
     };
 
-    let exported = super::convert::export_content(
-        content_opt.unwrap_or_default(),
-        doc_type_str,
-        export_format,
-        format_str,
-    )
-    .await;
+    let prepared = if export_format == ExportFormat::Pdf {
+        crate::services::pdf_resources::prepare_document(
+            &state.db,
+            &state.storage,
+            &uid,
+            &source_file_id,
+            source_version,
+            &doc_type_str,
+            content_opt.unwrap_or_default(),
+        )
+        .await
+    } else {
+        Ok(content_opt.unwrap_or_default())
+    };
+    let exported = match prepared {
+        Ok(content) => {
+            super::convert::export_content(content, doc_type_str, export_format, format_str).await
+        }
+        Err(error) => Err(error),
+    };
 
     match exported {
         Ok(data) => {

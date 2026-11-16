@@ -33,6 +33,15 @@ try {
     Copy-Item -Path crates/frontend/assets/* -Destination $assets -Recurse -Force
     $sapid = $metadata.packages | Where-Object name -eq 'contrix-frontend' | ForEach-Object { $_.dependencies | Where-Object name -eq 'sapid' }
     Copy-Item -LiteralPath (Join-Path $sapid.path 'styles/sapid.css') -Destination (Join-Path $assets 'sapid.css')
+    $npmExecutable = if ($IsWindows) {
+        (Get-Command npm.cmd -CommandType Application -ErrorAction Stop).Source
+    } else {
+        (Get-Command npm -CommandType Application -ErrorAction Stop).Source
+    }
+    & $npmExecutable ci --prefix crates/frontend --ignore-scripts --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) { throw 'PDF browser dependency installation failed' }
+    & node crates/frontend/build-pdf-assets.mjs $assets
+    if ($LASTEXITCODE -ne 0) { throw 'PDF browser asset packaging failed' }
     Write-Host "Browser assets: $OutputDirectory"
 }
 finally { Pop-Location }

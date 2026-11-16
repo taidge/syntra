@@ -2,14 +2,21 @@
 use crate::ooxml_import::{self as xml, Archive, Node, Relationship, warn};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use contrix_doc_engine::slides::*;
+use image::{GenericImageView, ImageFormat, ImageReader, imageops::FilterType};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
 use uuid::Uuid;
 const EMU: f64 = 9525.0;
+#[cfg(test)]
+#[path = "pptx_media_tests.rs"]
+mod media_tests;
 #[derive(Clone, Default)]
 struct Theme {
     colors: BTreeMap<String, String>,
     major: String,
     minor: String,
+    fills: Vec<Node>,
+    background_fills: Vec<Node>,
 }
 fn theme(root: Option<&Node>) -> Theme {
     let mut result = Theme {
@@ -18,6 +25,14 @@ fn theme(root: Option<&Node>) -> Theme {
         ..Default::default()
     };
     if let Some(root) = root {
+        result.fills = root
+            .desc("fillStyleLst")
+            .map(|n| n.children.clone())
+            .unwrap_or_default();
+        result.background_fills = root
+            .desc("bgFillStyleLst")
+            .map(|n| n.children.clone())
+            .unwrap_or_default();
         if let Some(scheme) = root.desc("clrScheme") {
             for entry in &scheme.children {
                 if let Some(value) = entry
@@ -55,6 +70,63 @@ fn theme(root: Option<&Node>) -> Theme {
         }
     }
     result
+}
+fn apply_color_map(theme: &mut Theme, mapping: Option<&Node>) {
+    let Some(mapping) = mapping else { return };
+    let colors = theme.colors.clone();
+    for (alias, name) in &mapping.attrs {
+        if let Some(value) = colors.get(name) {
+            theme.colors.insert(alias.clone(), value.clone());
+        }
+    }
+}
+
+/// Resolve bgRef through the theme style matrix before reading its fill.
+/// The reference colour substitutes phClr inside the selected style.
+fn theme_background(background: &Node, theme: &Theme) -> Option<(Node, Theme)> {
+    let reference = background.child("bgRef")?;
+    let index = reference.num("idx")? as usize;
+    if matches!(index, 0 | 1000) {
+        return Some((
+            Node {
+                name: "bgPr".into(),
+                children: vec![Node {
+                    name: "noFill".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            theme.clone(),
+        ));
+    }
+    let fill = match index {
+        1..=999 => theme.fills.get(index - 1),
+        1001.. => theme.background_fills.get(index - 1001),
+        _ => None,
+    };
+    let mut theme = theme.clone();
+    if let Some(value) = reference.children.iter().find_map(|n| color(n, &theme)) {
+        theme.colors.insert("phClr".into(), value);
+    }
+    let fill = fill.cloned().or_else(|| {
+        theme.colors.get("phClr").map(|value| Node {
+            name: "solidFill".into(),
+            children: vec![Node {
+                name: "srgbClr".into(),
+                attrs: [("val".into(), value.trim_start_matches('#').into())].into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    })?;
+    Some((
+        Node {
+            name: "bgPr".into(),
+            children: vec![fill],
+            ..Default::default()
+        },
+        theme,
+    ))
 }
 fn color(node: &Node, theme: &Theme) -> Option<String> {
     let value = match node.name.as_str() {
@@ -332,18 +404,13 @@ fn runs(
     for (pi, paragraph) in body.children.iter().filter(|n| n.name == "p").enumerate() {
         let mut default = SlideTextRun::plain("");
         default.font_family = Some(theme.minor.clone());
+        default.paragraph = Some(paragraph_style(paragraph, pi));
         if let Some(props) = inherited {
             apply_run(&mut default, props, theme, rels);
         }
         if let Some(props) = paragraph.child("pPr") {
             if let Some(run) = props.child("defRPr") {
                 apply_run(&mut default, run, theme, rels);
-            }
-            if props.attr("algn").is_some() || props.child("lnSpc").is_some() {
-                warn(
-                    warnings,
-                    "Paragraph alignment and spacing are not fully represented by slide text runs; the original retains exact typography.",
-                );
             }
             if let Some(bullet) = props.child("buChar").and_then(|n| n.attr("char")) {
                 let mut run = default.clone();
@@ -354,6 +421,7 @@ fn runs(
         if pi > 0 {
             let mut run = default.clone();
             run.text = "\n".into();
+            run.paragraph_break = true;
             result.push(run);
         }
         for child in &paragraph.children {
@@ -366,12 +434,72 @@ fn runs(
                     run.text = child.child("t").map(Node::all_text).unwrap_or_default();
                     result.push(run);
                 }
-                "br" => result.push(SlideTextRun::plain("\n")),
+                "br" => {
+                    let mut run = default.clone();
+                    run.text = "\n".into();
+                    result.push(run);
+                }
                 _ => {}
             }
         }
     }
     result
+}
+
+fn paragraph_style(paragraph: &Node, index: usize) -> SlideParagraphStyle {
+    let props = paragraph.child("pPr");
+    let spacing = |name: &str, child: &str, divisor: f64| {
+        props
+            .and_then(|n| n.child(name))
+            .and_then(|n| n.child(child))
+            .and_then(|n| n.num("val"))
+            .map(|n| (n / divisor) as f32)
+    };
+    SlideParagraphStyle {
+        index: index as u32,
+        alignment: match props.and_then(|n| n.attr("algn")) {
+            Some("ctr") => "center",
+            Some("r") => "right",
+            Some("just" | "dist" | "thaiDist") => "justify",
+            _ => "left",
+        }
+        .into(),
+        line_height: spacing("lnSpc", "spcPct", 100000.0),
+        line_height_points: spacing("lnSpc", "spcPts", 100.0),
+        space_before_points: spacing("spcBef", "spcPts", 100.0),
+        space_after_points: spacing("spcAft", "spcPts", 100.0),
+    }
+}
+
+fn text_layout(node: &Node, fallback: Option<&Node>) -> Option<SlideTextLayout> {
+    let body = node.child("txBody").and_then(|n| n.child("bodyPr"));
+    let inherited = fallback
+        .and_then(|n| n.child("txBody"))
+        .and_then(|n| n.child("bodyPr"));
+    let attr = |name| {
+        body.and_then(|n| n.attr(name))
+            .or_else(|| inherited.and_then(|n| n.attr(name)))
+    };
+    let inset = |name, default: f32| {
+        attr(name)
+            .and_then(|n| n.parse::<f64>().ok())
+            .filter(|n| n.is_finite())
+            .map(|n| (n / EMU) as f32)
+            .unwrap_or(default)
+    };
+    Some(SlideTextLayout {
+        wrap: attr("wrap") != Some("none"),
+        vertical_alignment: match attr("anchor") {
+            Some("ctr") => "center",
+            Some("b") => "bottom",
+            _ => "top",
+        }
+        .into(),
+        inset_left: inset("lIns", 9.6),
+        inset_right: inset("rIns", 9.6),
+        inset_top: inset("tIns", 4.8),
+        inset_bottom: inset("bIns", 4.8),
+    })
 }
 fn shape_type(name: &str) -> Option<ShapeType> {
     Some(match name {
@@ -389,11 +517,180 @@ fn shape_type(name: &str) -> Option<ShapeType> {
         _ => return None,
     })
 }
+const MAX_SOURCE_MEDIA_BYTES: usize = 32 * 1024 * 1024;
+const MAX_INLINE_MEDIA_BYTES: usize = 2 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION: u32 = 16_384;
+const MAX_IMAGE_PIXELS: u64 = 32 * 1024 * 1024;
+const OPTIMIZE_IMAGE_BYTES: usize = 256 * 1024;
+
+/// Source bytes, decoded pixels and serialized data URLs have separate budgets.
+/// A reused picture is decoded once, but each inline occurrence consumes JSON space.
+struct MediaImporter {
+    cache: BTreeMap<String, Result<String, String>>,
+    source_remaining: usize,
+    pixels_remaining: u64,
+    inline_remaining: usize,
+    max_side: u32,
+}
+impl MediaImporter {
+    fn new(slide_width: f32, slide_height: f32) -> Self {
+        Self {
+            cache: BTreeMap::new(),
+            source_remaining: contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 4,
+            pixels_remaining: MAX_IMAGE_PIXELS * 4,
+            // Leave room for editable objects; model_budget checks the complete JSON.
+            inline_remaining: contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 3 / 5,
+            max_side: slide_width.max(slide_height).ceil().clamp(1024.0, 2048.0) as u32,
+        }
+    }
+
+    fn load(
+        &mut self,
+        archive: &mut Archive<'_>,
+        relation: &Relationship,
+    ) -> Result<String, String> {
+        let extension = relation
+            .target
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mut mime = match extension.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "svg" => "image/svg+xml",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "mp4" | "m4v" => "video/mp4",
+            "webm" => "video/webm",
+            "ogg" | "ogv" => "video/ogg",
+            _ => return Err(format!("Unsupported embedded media format .{extension}")),
+        };
+        let source_size = archive
+            .by_name(&relation.target)
+            .map_err(|_| "Embedded media part is missing or unreadable".to_string())?
+            .size();
+        if source_size > MAX_SOURCE_MEDIA_BYTES as u64 {
+            return Err("Embedded media exceeds the bounded source size".into());
+        }
+        if source_size > self.source_remaining as u64 {
+            return Err("Embedded media exceeds the total source-media budget".into());
+        }
+        let bytes = xml::bytes_limit(
+            archive,
+            &relation.target,
+            MAX_SOURCE_MEDIA_BYTES.min(self.source_remaining),
+        )
+        .map_err(|_| {
+            "Embedded media could not be read within the bounded source size".to_string()
+        })?;
+        self.source_remaining -= bytes.len();
+        let bytes = if matches!(extension.as_str(), "png" | "jpg" | "jpeg") {
+            let (optimized_mime, optimized_bytes) = self.raster(bytes)?;
+            mime = optimized_mime;
+            optimized_bytes
+        } else {
+            // Preserve animation and formats that are displayed directly by the browser.
+            bytes
+        };
+        if bytes.len() > MAX_INLINE_MEDIA_BYTES {
+            return Err(
+                "Embedded media exceeds the per-object editing budget after optimization".into(),
+            );
+        }
+        Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+    }
+
+    fn raster(&mut self, bytes: Vec<u8>) -> Result<(&'static str, Vec<u8>), String> {
+        let format = image::guess_format(&bytes)
+            .map_err(|_| "Embedded image format could not be decoded".to_string())?;
+        let mime = match format {
+            ImageFormat::Png => "image/png",
+            ImageFormat::Jpeg => "image/jpeg",
+            _ => {
+                return Err(
+                    "Embedded image data does not match a supported PNG/JPEG format".into(),
+                );
+            }
+        };
+        let (width, height) = ImageReader::with_format(Cursor::new(&bytes), format)
+            .into_dimensions()
+            .map_err(|_| "Embedded image dimensions could not be decoded".to_string())?;
+        let pixels = u64::from(width) * u64::from(height);
+        if width == 0
+            || height == 0
+            || width > MAX_IMAGE_DIMENSION
+            || height > MAX_IMAGE_DIMENSION
+            || pixels > MAX_IMAGE_PIXELS
+        {
+            return Err("Embedded image exceeds safe decoding dimensions".into());
+        }
+        if bytes.len() <= OPTIMIZE_IMAGE_BYTES && width.max(height) <= self.max_side {
+            return Ok((mime, bytes));
+        }
+        if pixels > self.pixels_remaining {
+            return Err("Embedded images exceed the total decoding-pixel budget".into());
+        }
+        self.pixels_remaining -= pixels;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+        limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+        limits.max_alloc = Some(256 * 1024 * 1024);
+        let mut reader = ImageReader::with_format(Cursor::new(&bytes), format);
+        reader.limits(limits);
+        let decoded = reader.decode().map_err(|_| {
+            "Embedded image could not be decoded within safe memory limits".to_string()
+        })?;
+        let mut decoded = if width.max(height) > self.max_side {
+            decoded.resize(self.max_side, self.max_side, FilterType::Lanczos3)
+        } else {
+            decoded
+        };
+        let transparent = decoded.color().has_alpha()
+            && decoded.pixels().any(|(_, _, pixel)| pixel[3] != u8::MAX);
+        loop {
+            let mut output = Cursor::new(Vec::new());
+            let mut output_mime = "image/png";
+            if transparent || format == ImageFormat::Png {
+                decoded
+                    .write_to(&mut output, ImageFormat::Png)
+                    .map_err(|_| "Embedded image could not be optimized as PNG".to_string())?;
+            }
+            // Keep diagrams and screenshots lossless when the resized PNG is compact.
+            if !transparent
+                && (format != ImageFormat::Png || output.get_ref().len() > OPTIMIZE_IMAGE_BYTES)
+            {
+                output = Cursor::new(Vec::new());
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 90)
+                    .encode_image(&image::DynamicImage::ImageRgb8(decoded.to_rgb8()))
+                    .map_err(|_| "Embedded image could not be optimized as JPEG".to_string())?;
+                output_mime = "image/jpeg";
+            }
+            let output = output.into_inner();
+            if output.len() <= MAX_INLINE_MEDIA_BYTES {
+                // Keep small lossless originals when recompression would only enlarge them.
+                if width.max(height) <= self.max_side && bytes.len() <= output.len() {
+                    return Ok((mime, bytes));
+                }
+                return Ok((output_mime, output));
+            }
+            let next_side = decoded.width().max(decoded.height()) * 3 / 4;
+            if next_side < 256 {
+                return Err(
+                    "Embedded image exceeds the editing budget after bounded resizing".into(),
+                );
+            }
+            decoded = decoded.resize(next_side, next_side, FilterType::Lanczos3);
+        }
+    }
+}
+
 fn media(
     archive: &mut Archive<'_>,
     relation: &Relationship,
     warnings: &mut Vec<String>,
-    media_remaining: &mut usize,
+    media_remaining: &mut MediaImporter,
 ) -> Option<String> {
     if relation.external {
         warn(
@@ -402,46 +699,26 @@ fn media(
         );
         return None;
     }
-    let extension = relation
-        .target
-        .rsplit('.')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let mime = match extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        "mp4" | "m4v" => "video/mp4",
-        "webm" => "video/webm",
-        "ogg" | "ogv" => "video/ogg",
-        _ => {
+    if !media_remaining.cache.contains_key(&relation.target) {
+        let result = media_remaining.load(archive, relation);
+        media_remaining
+            .cache
+            .insert(relation.target.clone(), result);
+    }
+    match &media_remaining.cache[&relation.target] {
+        Ok(url) if url.len() <= media_remaining.inline_remaining => {
+            media_remaining.inline_remaining -= url.len();
+            Some(url.clone())
+        }
+        Ok(_) => {
             warn(
                 warnings,
-                format!(
-                    "Unsupported embedded media format .{extension}; download the original to retain it."
-                ),
+                "Embedded media exceeds the serialized editing-content budget; the original retains it.",
             );
-            return None;
+            None
         }
-    };
-    match xml::bytes_limit(
-        archive,
-        &relation.target,
-        (*media_remaining).min(2 * 1024 * 1024),
-    ) {
-        Ok(bytes) => {
-            *media_remaining -= bytes.len();
-            Some(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
-        }
-        _ => {
-            warn(
-                warnings,
-                "Embedded media could not be read within the import budget; the original retains it.",
-            );
+        Err(reason) => {
+            warn(warnings, format!("{reason}; the original retains it."));
             None
         }
     }
@@ -603,7 +880,7 @@ struct Context<'a, 'b> {
     master: Option<Node>,
     warnings: &'a mut Vec<String>,
     ids: BTreeMap<String, Uuid>,
-    media_remaining: &'a mut usize,
+    media_remaining: &'a mut MediaImporter,
     points_remaining: &'a mut usize,
 }
 impl Context<'_, '_> {
@@ -688,16 +965,14 @@ impl Context<'_, '_> {
                 .and_then(|n| n.attr("r:embed").or_else(|| n.attr("r:link")))
                 .and_then(|id| self.rels.get(id))
                 .cloned();
-            let url = relation
-                .as_ref()
-                .and_then(|r| media(self.archive, r, self.warnings, self.media_remaining));
-            let Some(url) = url else {
+            let Some(relation) = relation else {
                 warn(
                     self.warnings,
-                    "An image is unsupported or missing its relationship data; download the original to retain the full object.",
+                    "An image relationship is missing; the original retains the image.",
                 );
                 return None;
             };
+            let url = media(self.archive, &relation, self.warnings, self.media_remaining)?;
             let crop = node.desc("srcRect").map(|n| Crop {
                 left: (n.num("l").unwrap_or(0.0) / 100000.0) as f32,
                 top: (n.num("t").unwrap_or(0.0) / 100000.0) as f32,
@@ -775,6 +1050,7 @@ impl Context<'_, '_> {
                             background_color: cell.child("tcPr").and_then(|n| fill(n, &self.theme)),
                             border: None,
                             padding: 4.0,
+                            text_layout: text_layout(cell, None),
                         }));
                         x += width;
                     }
@@ -835,6 +1111,7 @@ impl Context<'_, '_> {
                     .and_then(|n| n.num("lIns"))
                     .map(|n| (n / EMU) as f32)
                     .unwrap_or(8.0),
+                text_layout: text_layout(node, fallback.as_ref()),
             }));
         }
         let adjustment = match preset {
@@ -1007,7 +1284,9 @@ pub(super) fn import(
         return Err("Unsupported presentation page dimensions".into());
     }
     let mut used_themes = BTreeSet::new();
-    let mut media_remaining = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2 / 5;
+    result.metadata.pptx_import_revision = 2;
+    let mut media_remaining =
+        MediaImporter::new(result.metadata.slide_width, result.metadata.slide_height);
     let mut points_remaining = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
     for path in paths {
         let root = xml::part(archive, path)?;
@@ -1050,9 +1329,15 @@ pub(super) fn import(
             .map(|p| xml::optional(archive, p))
             .transpose()?
             .flatten();
-        let theme = theme(theme_node.as_ref());
-        if let Some(path) = theme_part {
-            used_themes.insert(path);
+        let mut theme = theme(theme_node.as_ref());
+        apply_color_map(&mut theme, master.as_ref().and_then(|n| n.child("clrMap")));
+        apply_color_map(
+            &mut theme,
+            layout.as_ref().and_then(|n| n.desc("overrideClrMapping")),
+        );
+        apply_color_map(&mut theme, root.desc("overrideClrMapping"));
+        if let Some(path) = &theme_part {
+            used_themes.insert(path.clone());
         }
         result.theme.heading_font = theme.major.clone();
         result.theme.body_font = theme.minor.clone();
@@ -1081,6 +1366,29 @@ pub(super) fn import(
             } else {
                 (master.as_ref().and_then(|n| n.desc("bg")), &master_rels)
             };
+        let themed_background = background.and_then(|n| theme_background(n, &theme));
+        let background_theme = themed_background
+            .as_ref()
+            .map(|(_, theme)| theme)
+            .unwrap_or(&theme);
+        let background = themed_background
+            .as_ref()
+            .map(|(node, _)| node)
+            .or(background);
+        let theme_background_rels = if themed_background.is_some() {
+            theme_part
+                .as_deref()
+                .map(|part| xml::relationships(archive, part))
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+        let background_rels = if themed_background.is_some() {
+            &theme_background_rels
+        } else {
+            background_rels
+        };
         if let Some(background) = background {
             if let Some(blip) = background.desc("blip") {
                 if let Some(relation) = blip
@@ -1109,23 +1417,16 @@ pub(super) fn import(
                     );
                 }
             }
-            if let Some(reference) = background
-                .child("bgRef")
-                .and_then(|n| n.children.iter().find_map(|c| color(c, &theme)))
+            if let Some(value) = background
+                .desc("solidFill")
+                .and_then(|n| color(n, background_theme))
             {
-                slide.background = Background::Solid(reference);
-                warn(
-                    &mut result.metadata.import_warnings,
-                    "Theme background fill references are flattened to their resolved color; original retains theme fill effects.",
-                );
-            }
-            if let Some(value) = background.desc("solidFill").and_then(|n| color(n, &theme)) {
                 slide.background = Background::Solid(value);
             } else if let Some(gradient) = background.desc("gradFill") {
                 let stops: Vec<_> = gradient
                     .descendants("gs")
                     .iter()
-                    .filter_map(|n| n.children.iter().find_map(|c| color(c, &theme)))
+                    .filter_map(|n| n.children.iter().find_map(|c| color(c, background_theme)))
                     .collect();
                 if let (Some(first), Some(last)) = (stops.first(), stops.last()) {
                     slide.background = Background::Gradient(
@@ -1279,3 +1580,7 @@ pub(super) fn import(
     xml::model_budget(&result)?;
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "pptx_text_background_tests.rs"]
+mod text_background_tests;

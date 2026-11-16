@@ -46,6 +46,7 @@ pub mod notification_prefs;
 pub mod notifications;
 pub mod operability;
 pub mod password_policy;
+pub mod pdf;
 pub mod presence;
 pub mod quota;
 pub mod recent;
