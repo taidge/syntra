@@ -1342,24 +1342,87 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (arrived, barrier) = tokio::sync::oneshot::channel();
-        let (release, wait) = tokio::sync::oneshot::channel();
-        let endpoint = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+        async fn read_delete(socket: &mut tokio::net::TcpStream, path: &str) {
             let mut request = Vec::new();
             while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
                 let mut chunk = [0; 1024];
                 let size = socket.read(&mut chunk).await.unwrap();
                 assert!(size > 0);
                 request.extend_from_slice(&chunk[..size]);
+                assert!(request.len() <= 16 * 1024);
             }
-            assert!(request.starts_with(b"DELETE "));
-            let _ = arrived.send(());
-            let _ = wait.await;
+            assert!(request.starts_with(format!("DELETE /bucket/{path} HTTP/1.1\r\n").as_bytes()));
+        }
+        async fn active_claim(db: &DbPool, path: &str) -> String {
+            #[derive(QueryableByName)]
+            struct Claim {
+                #[diesel(sql_type = Text)]
+                token: String,
+                #[diesel(sql_type = Text)]
+                state: String,
+                #[diesel(sql_type = BigInt)]
+                claim_until: i64,
+            }
+            let path = path.to_owned();
+            let claim = db
+                .run(move |conn| {
+                    diesel::sql_query(
+                        "SELECT g.claim_token AS token,b.state,g.claim_until \
+                         FROM storage_gc g JOIN blob_inventory b ON b.path=g.path \
+                         WHERE g.path=? AND g.claim_token IS NOT NULL",
+                    )
+                    .bind::<Text, _>(path)
+                    .get_result::<Claim>(conn)
+                })
+                .await
+                .unwrap();
+            assert_eq!(claim.state, "deleting");
+            assert!(claim.claim_until > chrono::Utc::now().timestamp());
+            claim.token
+        }
+        let (arrived, barrier) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let (endpoint_db, endpoint_path) = (db.clone(), path.clone());
+        let endpoint = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_delete(&mut socket, &endpoint_path).await;
+            let first_claim = active_claim(&endpoint_db, &endpoint_path).await;
+            arrived.send(first_claim.clone()).unwrap();
+            tokio::select! {
+                unexpected = listener.accept() => {
+                    unexpected.unwrap();
+                    panic!("another DELETE arrived while the original claim was held");
+                }
+                released = wait => released.unwrap(),
+            }
             socket
                 .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
                 .await
                 .unwrap();
+            drop(socket);
+            // A failed metadata commit owns detached candidate cleanup. Its
+            // enqueue may happen after finalization removed the first outbox
+            // row. A later DELETE is legitimate only under a fresh SQL claim;
+            // the mock must stay alive for the whole drain, not one request.
+            let mut claims = std::collections::HashSet::from([first_claim]);
+            tokio::pin!(stopped);
+            loop {
+                tokio::select! {
+                    done = &mut stopped => {
+                        done.unwrap();
+                        break;
+                    }
+                    incoming = listener.accept() => {
+                        let (mut socket, _) = incoming.unwrap();
+                        read_delete(&mut socket, &endpoint_path).await;
+                        assert!(claims.insert(active_claim(&endpoint_db, &endpoint_path).await),
+                            "a repeated DELETE must have a new persistent claim");
+                        socket.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await.unwrap();
+                    }
+                }
+            }
+            claims
         });
         let remote = Arc::new(StorageBackend::S3(
             super::super::s3_storage::S3Storage::new(
@@ -1368,14 +1431,15 @@ mod tests {
                 "test",
                 "secret",
                 &format!("http://{address}"),
-            ),
+            )
+            .without_proxy_for_tests(),
         ));
         remote.attach_database(db.clone()).unwrap();
         let (worker_db, worker_storage) = (db.clone(), remote.clone());
         let worker = tokio::spawn(async move {
             persistence::drain_storage_gc(&worker_db, &worker_storage).await
         });
-        tokio::time::timeout(std::time::Duration::from_secs(5), barrier)
+        let first_claim = tokio::time::timeout(std::time::Duration::from_secs(5), barrier)
             .await
             .unwrap()
             .unwrap();
@@ -1383,6 +1447,7 @@ mod tests {
         persistence::drain_storage_gc(&second, &remote)
             .await
             .unwrap();
+        assert_eq!(active_claim(&second, &path).await, first_claim);
         let target = path.clone();
         let file = file_id.clone();
         assert!(
@@ -1397,7 +1462,7 @@ mod tests {
                 .is_err()
         );
         let target = path.clone();
-        let file = file_id;
+        let file = file_id.clone();
         let committed = persistence::commit_blob(&second, path.clone(), move |conn| {
             diesel::sql_query("UPDATE files SET path=? WHERE id=?")
                 .bind::<Text, _>(target)
@@ -1408,9 +1473,29 @@ mod tests {
         .await;
         assert!(matches!(committed, Err(AppError::Conflict(_))));
         release.send(()).unwrap();
-        endpoint.await.unwrap();
         worker.await.unwrap().unwrap();
+        stop.send(()).unwrap();
+        let claims = endpoint.await.unwrap();
+        assert!(claims.contains(&first_claim));
+        // This fixture has one original outbox row and one failed commit's
+        // candidate cleanup, so a fresh claim is legitimate at most once.
+        assert!(
+            claims.len() <= 2,
+            "unexpected DELETE claims: {}",
+            claims.len()
+        );
+        eprintln!("observed {} distinct DELETE claims", claims.len());
         assert_eq!(count(&db,format!("SELECT COUNT(*) AS value FROM blob_inventory WHERE path='{path}' AND state='deleted'")).await,1);
+        assert_eq!(
+            count(
+                &db,
+                format!(
+                    "SELECT COUNT(*) AS value FROM files WHERE id='{file_id}' AND path='{old}'"
+                )
+            )
+            .await,
+            1
+        );
         assert!(begin_write(&second, &path).await.is_err());
         assert_eq!(local.read_file(&old).await.unwrap(), b"current object");
     }

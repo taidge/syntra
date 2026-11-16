@@ -93,6 +93,96 @@ pub struct WopiSession {
     expires_at: DateTime<Utc>,
 }
 
+impl WopiSession {
+    /// Retain the originating session and the derived capability's own expiry
+    /// while a request reads its body or writes a replacement storage object.
+    pub fn credential(&self) -> crate::middleware::auth::AuthenticatedCredential {
+        crate::middleware::auth::AuthenticatedCredential {
+            user_id: self.user_id.clone(),
+            token_hash: self.source_token_hash.clone(),
+            api_key_id: None,
+            expires_at: Some(self.expires_at),
+        }
+    }
+
+    /// A relative save may write another file, so revalidate the capability's
+    /// bound source as well as the destination in the final write transaction.
+    pub fn validate_write_in_transaction(
+        &self,
+        conn: &mut diesel::SqliteConnection,
+    ) -> Result<(), AppError> {
+        self.authorized_source_in_transaction(conn).map(|_| ())
+    }
+
+    fn authorized_source_in_transaction(
+        &self,
+        conn: &mut diesel::SqliteConnection,
+    ) -> Result<contrix_core::models::File, AppError> {
+        crate::middleware::auth::validate_credential_in_transaction(
+            conn,
+            &self.credential(),
+            &salvo::http::Method::POST,
+            &format!("/api/v1/wopi/files/{}", self.file_id),
+        )?;
+        let source = diesel::RunQueryDsl::first::<contrix_core::models::File>(
+            contrix_core::schema::files::table.find(&self.file_id),
+            conn,
+        )?;
+        crate::services::persistence::authorize(conn, &source, &self.user_id, "editor")?;
+        Ok(source)
+    }
+
+    /// Bind a save to the source namespace and lock checked before its body
+    /// was read. A relative overwrite also keeps its target's separate fence.
+    pub fn write_authorization(
+        &self,
+        source: &contrix_core::models::File,
+        lock_token: Option<&str>,
+    ) -> Result<WopiWriteAuthorization, AppError> {
+        if source.id != self.file_id {
+            return Err(AppError::Forbidden("WOPI source binding mismatch".into()));
+        }
+        Ok(WopiWriteAuthorization {
+            session: self.clone(),
+            source_parent: source.parent_id.clone(),
+            source_room: source.room_id.clone(),
+            source_lock: lock_token.map(str::to_owned),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct WopiWriteAuthorization {
+    session: WopiSession,
+    source_parent: Option<String>,
+    source_room: Option<String>,
+    source_lock: Option<String>,
+}
+
+impl WopiWriteAuthorization {
+    pub fn credential(&self) -> crate::middleware::auth::AuthenticatedCredential {
+        self.session.credential()
+    }
+
+    pub fn validate_in_transaction(
+        &self,
+        conn: &mut diesel::SqliteConnection,
+    ) -> Result<(), AppError> {
+        let source = self.session.authorized_source_in_transaction(conn)?;
+        if source.parent_id != self.source_parent || source.room_id != self.source_room {
+            return Err(AppError::Conflict(
+                "File moved; reload before saving".into(),
+            ));
+        }
+        crate::services::persistence::check_file_lock(
+            conn,
+            &source.id,
+            &self.session.user_id,
+            self.source_lock.as_deref(),
+        )
+    }
+}
+
 /// In-memory short-lived WOPI session token store.
 pub struct WopiSessionStore {
     sessions: Mutex<HashMap<String, WopiSession>>,
@@ -199,5 +289,37 @@ mod tests {
         source.expires_at = Utc::now() - Duration::seconds(1);
         let token = store.create(&source, "file-1", Duration::minutes(15));
         assert!(store.validate(&token, "file-1").is_none());
+    }
+
+    #[test]
+    fn retained_write_credential_preserves_both_capability_and_source_expiry() {
+        let store = WopiSessionStore::new();
+        let source = source_session();
+        let token = store.create(&source, "file-1", Duration::minutes(15));
+        let source_limited = store.validate(&token, "file-1").unwrap();
+        let credential = source_limited.credential();
+        assert_eq!(credential.user_id, source.user_id);
+        assert_eq!(credential.token_hash, source.token_hash);
+        assert_eq!(credential.expires_at, Some(source.expires_at));
+        assert!(credential.api_key_id.is_none());
+
+        let before = Utc::now();
+        let token = store.create(&source, "file-1", Duration::seconds(10));
+        let after = Utc::now();
+        let mut capability_limited = store.validate(&token, "file-1").unwrap();
+        let expiry = capability_limited.credential().expires_at.unwrap();
+        assert!(expiry >= before + Duration::seconds(10));
+        assert!(expiry <= after + Duration::seconds(10));
+        assert!(expiry < source.expires_at);
+
+        // A request retains this clone after initial validation. At the final
+        // transaction boundary its own capability expiry must still reject it,
+        // even before any lookup of the otherwise active source session.
+        capability_limited.expires_at = Utc::now() - Duration::seconds(1);
+        let mut conn = diesel::SqliteConnection::establish(":memory:").unwrap();
+        assert!(matches!(
+            capability_limited.validate_write_in_transaction(&mut conn),
+            Err(AppError::Auth(_))
+        ));
     }
 }

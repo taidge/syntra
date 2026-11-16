@@ -166,6 +166,14 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     let grid_view = scope.cage(true);
     let folder_name = scope.cage(String::new());
     let folder_open = scope.cage(false);
+    let rename_target = scope.cage(None::<Uuid>);
+    let rename_name = scope.cage(String::new());
+    let rename_open = scope.cage(false);
+    let rename_feedback = scope.cage(String::new());
+    let delete_target = scope.cage(None::<FileResponse>);
+    let delete_open = scope.cage(false);
+    let delete_feedback = scope.cage(String::new());
+    let file_action_busy = scope.cage(false);
     let controller = scope.cage(None::<sapid::FileController>);
     let crumbs = scope.cage(vec![Breadcrumb {
         id: None,
@@ -264,6 +272,127 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                     }),
                 )),
                 status(feedback),
+            ))
+        },
+    );
+    let rename_weak = scope.downgrade();
+    let rename_dialog = crate::components::modal::Modal(
+        "rename-file".into(),
+        crate::i18n::t("file_mgr.rename_file"),
+        rename_open,
+        move || {
+            let weak = rename_weak.clone();
+            sapid::form("rename-file-form")
+                .theme(theme())
+                .unstyled()
+                .class("modal-form")
+                .enabled(file_action_busy.map(|busy| !*busy))
+                .on_submit(move |_| {
+                    if file_action_busy.get() {
+                        return;
+                    }
+                    let name = rename_name.get().trim().to_owned();
+                    if name.is_empty() {
+                        set(
+                            rename_feedback,
+                            crate::i18n::t("file_mgr.file_name_required"),
+                        );
+                        return;
+                    }
+                    let (Some(id), Some(scope)) = (rename_target.get(), weak.upgrade()) else {
+                        return;
+                    };
+                    let token = token(auth);
+                    let weak = scope.downgrade();
+                    set(file_action_busy, true);
+                    set(rename_feedback, String::new());
+                    let _ = scope.spawn(async move {
+                        match state::api_put::<serde_json::Value, _>(
+                            &format!("/files/{id}"),
+                            &serde_json::json!({"name": name}),
+                            &token,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                set(rename_open, false);
+                                if let Some(scope) = weak.upgrade() {
+                                    refresh(&scope, auth, parent, files, feedback);
+                                }
+                            }
+                            Err(error) => set(rename_feedback, error),
+                        }
+                        set(file_action_busy, false);
+                    });
+                })
+                .fill((
+                    field(
+                        crate::i18n::t("file_mgr.file_name"),
+                        rename_name,
+                        Purpose::Text,
+                    ),
+                    status(rename_feedback),
+                    row().class("modal-actions").fill((
+                        action(crate::i18n::t("common.cancel"), move || {
+                            set(rename_open, false)
+                        })
+                        .variant(sapid::ButtonVariant::Secondary),
+                        sapid::submit_button()
+                            .theme(theme())
+                            .label(crate::i18n::t("common.rename"))
+                            .enabled(rename_name.map(|name| !name.trim().is_empty())),
+                    )),
+                ))
+        },
+    );
+    let delete_weak = scope.downgrade();
+    let delete_dialog = crate::components::modal::Modal(
+        "delete-file".into(),
+        crate::i18n::t("file_mgr.delete_file"),
+        delete_open,
+        move || {
+            let weak = delete_weak.clone();
+            col().class("modal-form").fill((
+                text().content(crate::i18n::t("file_mgr.delete_confirm")),
+                text().content(delete_target.map(|file| {
+                    file.as_ref()
+                        .map(|file| file.name.clone())
+                        .unwrap_or_default()
+                })),
+                status(delete_feedback),
+                row().class("modal-actions").fill((
+                    action(crate::i18n::t("common.cancel"), move || {
+                        set(delete_open, false)
+                    })
+                    .variant(sapid::ButtonVariant::Secondary)
+                    .enabled(file_action_busy.map(|busy| !*busy)),
+                    action(crate::i18n::t("common.delete"), move || {
+                        if file_action_busy.get() {
+                            return;
+                        }
+                        let (Some(file), Some(scope)) = (delete_target.get(), weak.upgrade())
+                        else {
+                            return;
+                        };
+                        let token = token(auth);
+                        let weak = scope.downgrade();
+                        set(file_action_busy, true);
+                        set(delete_feedback, String::new());
+                        let _ = scope.spawn(async move {
+                            match state::api_delete(&format!("/files/{}", file.id), &token).await {
+                                Ok(_) => {
+                                    set(delete_open, false);
+                                    if let Some(scope) = weak.upgrade() {
+                                        refresh(&scope, auth, parent, files, feedback);
+                                    }
+                                }
+                                Err(error) => set(delete_feedback, error),
+                            }
+                            set(file_action_busy, false);
+                        });
+                    })
+                    .loading(file_action_busy),
+                )),
             ))
         },
     );
@@ -429,8 +558,6 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                         let item = item_row.value;
                         widget(move |row_scope| {
                             let open_weak = row_scope.downgrade();
-                            let rename_weak = row_scope.downgrade();
-                            let delete_weak = row_scope.downgrade();
                             let filename = row_scope.bond(move || item.get().name);
                             let metadata = row_scope.bond(move || {
                                 let file = item.get();
@@ -446,31 +573,40 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                     .display(Display::Flex)
                                     .flex_direction(direction)
                             };
-                            view()
-                                .class(grid_view.map(|grid| {
-                                    if *grid {
-                                        "file-card".to_string()
-                                    } else {
-                                        "file-card file-row".to_string()
-                                    }
-                                }))
-                                .style_fn(card_style)
-                                .fill((
-                                    col().class("file-card-body").fill((
-                                        view()
-                                            .class(row_scope.bond(move || {
-                                                file_icon_class(&item.get()).to_owned()
-                                            }))
-                                            .fill(icon_sized(Icon::Document, 20.).drawing(
-                                                row_scope.bond(move || {
-                                                    icon_drawing(file_icon(&item.get()))
-                                                }),
-                                            )),
+                            let body = (
+                                view()
+                                    .class(
+                                        row_scope
+                                            .bond(move || file_icon_class(&item.get()).to_owned()),
+                                    )
+                                    .fill(
+                                        icon_sized(Icon::Document, 20.)
+                                            .drawing(row_scope.bond(move || {
+                                                icon_drawing(file_icon(&item.get()))
+                                            })),
+                                    ),
+                                text().class("file-name").content(filename),
+                            );
+                            // Make the icon, name and card padding one native navigation
+                            // target. Keep rename/delete outside it so actions cannot open
+                            // the document as a side effect.
+                            let open: Box<dyn Widget> = if let Some(id) =
+                                item.get().document_id.filter(|_| !item.get().is_folder)
+                            {
+                                Box::new(
+                                    link()
+                                        .target(format!("/documents/{id}"))
+                                        .class("file-card-body")
+                                        .fill(body),
+                                )
+                            } else {
+                                Box::new(
+                                    view().class("file-card-body").fill(body).fill(
                                         sapid::button()
                                             .theme(theme())
-                                            .variant(sapid::ButtonVariant::Secondary)
-                                            .class("file-name")
-                                            .label(filename)
+                                            .unstyled()
+                                            .name(filename)
+                                            .class("file-open")
                                             .on_press(move || {
                                                 let open_file = item.get();
                                                 if open_file.is_folder {
@@ -486,8 +622,6 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                                             &scope, auth, parent, files, feedback,
                                                         );
                                                     }
-                                                } else if let Some(id) = open_file.document_id {
-                                                    go(&format!("/documents/{id}"));
                                                 } else {
                                                     set(
                                                         feedback,
@@ -495,7 +629,20 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                                     );
                                                 }
                                             }),
-                                    )),
+                                    ),
+                                )
+                            };
+                            view()
+                                .class(grid_view.map(|grid| {
+                                    if *grid {
+                                        "file-card".to_string()
+                                    } else {
+                                        "file-card file-row".to_string()
+                                    }
+                                }))
+                                .style_fn(card_style)
+                                .fill((
+                                    open,
                                     text().class("file-size").content(metadata),
                                     text().class("file-modified").content(row_scope.bond(
                                         move || {
@@ -507,82 +654,31 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
                                         },
                                     )),
                                     row().class("file-actions").fill((
-                                        icon_button("Rename", Icon::Pencil, move || {
-                                            let rename_file = item.get();
-                                            let Some(window) = web_sys::window() else {
-                                                return;
-                                            };
-                                            let Ok(Some(name)) = window
-                                                .prompt_with_message_and_default(
-                                                    "File name",
-                                                    &rename_file.name,
-                                                )
-                                            else {
-                                                return;
-                                            };
-                                            if name.trim().is_empty() {
-                                                return;
-                                            }
-                                            let Some(scope) = rename_weak.upgrade() else {
-                                                return;
-                                            };
-                                            let token = token(auth);
-                                            let path = format!("/files/{}", rename_file.id);
-                                            let weak = scope.downgrade();
-                                            let _ = scope.spawn(async move {
-                                                match state::api_put::<serde_json::Value, _>(
-                                                    &path,
-                                                    &serde_json::json!({"name":name.trim()}),
-                                                    &token,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(_) => {
-                                                        if let Some(scope) = weak.upgrade() {
-                                                            refresh(
-                                                                &scope, auth, parent, files,
-                                                                feedback,
-                                                            );
-                                                        }
-                                                    }
-                                                    Err(error) => set(feedback, error),
-                                                }
-                                            });
-                                        })
+                                        icon_button(
+                                            crate::i18n::t("common.rename"),
+                                            Icon::Pencil,
+                                            move || {
+                                                let rename_file = item.get();
+                                                set(rename_target, Some(rename_file.id));
+                                                set(rename_name, rename_file.name);
+                                                set(rename_feedback, String::new());
+                                                set(rename_open, true);
+                                            },
+                                        )
                                         .variant(sapid::ButtonVariant::Secondary)
+                                        .enabled(file_action_busy.map(|busy| !*busy))
                                         .class("file-rename icon-button"),
-                                        icon_button("Delete", Icon::Trash, move || {
-                                            let delete_file = item.get();
-                                            if !web_sys::window().is_some_and(|window| {
-                                                window
-                                                    .confirm_with_message(
-                                                        "Move this file to trash?",
-                                                    )
-                                                    .unwrap_or(false)
-                                            }) {
-                                                return;
-                                            }
-                                            let Some(scope) = delete_weak.upgrade() else {
-                                                return;
-                                            };
-                                            let token = token(auth);
-                                            let path = format!("/files/{}", delete_file.id);
-                                            let weak = scope.downgrade();
-                                            let _ = scope.spawn(async move {
-                                                match state::api_delete(&path, &token).await {
-                                                    Ok(_) => {
-                                                        if let Some(scope) = weak.upgrade() {
-                                                            refresh(
-                                                                &scope, auth, parent, files,
-                                                                feedback,
-                                                            );
-                                                        }
-                                                    }
-                                                    Err(error) => set(feedback, error),
-                                                }
-                                            });
-                                        })
+                                        icon_button(
+                                            crate::i18n::t("common.delete"),
+                                            Icon::Trash,
+                                            move || {
+                                                set(delete_target, Some(item.get()));
+                                                set(delete_feedback, String::new());
+                                                set(delete_open, true);
+                                            },
+                                        )
                                         .variant(sapid::ButtonVariant::Secondary)
+                                        .enabled(file_action_busy.map(|busy| !*busy))
                                         .class("file-delete icon-button"),
                                     )),
                                 ))
@@ -592,6 +688,8 @@ pub fn FileManager(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
             )),
         )),
         folder_dialog,
+        rename_dialog,
+        delete_dialog,
     ))
 }
 

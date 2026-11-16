@@ -118,7 +118,11 @@ pub fn validate_credential_in_transaction(
         if row.0 == "disabled" || row.2.as_deref().is_some_and(expired) {
             return Err(AppError::Auth("API key expired or account disabled".into()));
         }
-        if !api_key_allows_request(&row.1, method, path) {
+        // Mutation handlers retain the original URI. Match the initial HTTP
+        // authentication's decoded, non-empty route segments on every recheck.
+        let path =
+            authorization_path(path).map_err(|message| AppError::Validation(message.into()))?;
+        if !api_key_allows_request(&row.1, method, &path) {
             return Err(AppError::Forbidden(
                 "API key does not permit this operation".into(),
             ));

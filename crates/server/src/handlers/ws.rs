@@ -1,4 +1,4 @@
-use crate::middleware::auth::{AuthenticatedCredential, get_credential, validate_credential};
+use crate::middleware::auth::{AuthenticatedCredential, get_credential};
 use crate::middleware::request_observability::{observe_ws_operation, with_database_stage};
 use crate::services::collaboration::{self, Snapshot};
 use crate::state::AppState;
@@ -67,17 +67,43 @@ async fn authorized_once(
     credential: &AuthenticatedCredential,
     id: Uuid,
 ) -> Result<(), AppError> {
-    validate_credential(state, credential, &format!("/api/v1/ws/collab/{id}")).await?;
-    let mut db = state.db.clone();
-    crate::handlers::access::load_accessible_document(
-        &mut db,
-        &id.to_string(),
-        &credential.user_id,
-        "editor",
-    )
-    .await?
-    .ok_or_else(|| AppError::NotFound("Document not found".into()))?;
-    Ok(())
+    use contrix_core::models::File;
+    use contrix_core::schema::{documents::dsl as d, files::dsl as f};
+    use diesel::prelude::*;
+
+    let credential = credential.clone();
+    let path = format!("/api/v1/ws/collab/{id}");
+    let id = id.to_string();
+    state
+        .db
+        .run(move |conn| {
+            // One lease and one read snapshot cover this authorization attempt;
+            // no credential or ACL decision survives into the next attempt.
+            conn.transaction::<_, AppError, _>(|conn| {
+                crate::middleware::auth::validate_credential_in_transaction(
+                    conn,
+                    &credential,
+                    &salvo::http::Method::GET,
+                    &path,
+                )?;
+                let file = d::documents
+                    .inner_join(f::files.on(d::file_id.eq(f::id)))
+                    .filter(d::id.eq(&id))
+                    .select(File::as_select())
+                    .first::<File>(conn)
+                    .optional()?
+                    .ok_or_else(|| AppError::NotFound("Document not found".into()))?;
+                // The prior async ACL did not exclude trashed files. Current
+                // room membership remains required even for a file's owner.
+                crate::services::persistence::authorize_including_trashed(
+                    conn,
+                    &file,
+                    &credential.user_id,
+                    "editor",
+                )
+            })
+        })
+        .await
 }
 #[handler]
 pub async fn collab_ws(req: &mut Request, depot: &mut Depot, res: &mut Response) {

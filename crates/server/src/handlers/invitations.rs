@@ -36,6 +36,77 @@ fn generate_token() -> String {
     Uuid::new_v4().to_string().replace('-', "")
 }
 
+/// Call inside the account mutation's IMMEDIATE transaction. Both new and
+/// existing users consume the same current, unexpired invitation exactly once.
+fn consume_invitation(
+    conn: &mut SqliteConnection,
+    expected: &Invitation,
+    existing_user: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    use contrix_core::schema::users::dsl as u;
+
+    let current = diesel::OptionalExtension::optional(diesel::RunQueryDsl::first::<Invitation>(
+        inv::invitations
+            .find(&expected.id)
+            .filter(inv::token.eq(&expected.token)),
+        conn,
+    ))?
+    .ok_or_else(|| AppError::Conflict("Invitation is no longer available".into()))?;
+    let now = Utc::now();
+    let expires = chrono::DateTime::parse_from_rfc3339(&current.expires_at)
+        .map_err(|_| AppError::Validation("Invitation has invalid expiry".into()))?;
+    if current.is_accepted || expires <= now {
+        return Err(AppError::Conflict(
+            "Invitation was already accepted or expired".into(),
+        ));
+    }
+    if current.email != expected.email
+        || current.invited_by != expected.invited_by
+        || current.role != expected.role
+    {
+        return Err(AppError::Conflict(
+            "Invitation changed during acceptance".into(),
+        ));
+    }
+    let tenant = crate::services::tenancy::user_tenant(conn, &current.invited_by)?;
+    let issuer_role = diesel::RunQueryDsl::first::<String>(
+        u::users.find(&current.invited_by).select(u::role),
+        conn,
+    )?;
+    if issuer_role != "admin" {
+        return Err(AppError::Forbidden(
+            "Invitation issuer no longer has administrator access".into(),
+        ));
+    }
+    if let Some(user) = existing_user {
+        let email =
+            diesel::RunQueryDsl::first::<String>(u::users.find(user).select(u::email), conn)?;
+        if email != current.email {
+            return Err(AppError::Conflict(
+                "Invited account changed during acceptance".into(),
+            ));
+        }
+        crate::services::tenancy::ensure_same_tenant(conn, &current.invited_by, user)?;
+    }
+    let claimed = diesel::RunQueryDsl::execute(
+        diesel::update(
+            inv::invitations
+                .find(&current.id)
+                .filter(inv::token.eq(&current.token))
+                .filter(inv::is_accepted.eq(false)),
+        )
+        .set((
+            inv::is_accepted.eq(true),
+            inv::accepted_at.eq(Some(now.to_rfc3339())),
+        )),
+        conn,
+    )?;
+    if claimed != 1 {
+        return Err(AppError::Conflict("Invitation was already accepted".into()));
+    }
+    Ok(tenant)
+}
+
 // ---------------------------------------------------------------------------
 // POST /invitations
 // ---------------------------------------------------------------------------
@@ -507,15 +578,25 @@ pub async fn accept_invitation_with_depot(
             res.render(Json(ApiResponse::<()>::err(error.to_response())));
             return;
         }
-        // User already exists - just mark invitation as accepted.
-        let now = Utc::now();
-        let _ = diesel::update(inv::invitations.filter(inv::id.eq(&invitation.id)))
-            .set((
-                inv::is_accepted.eq(true),
-                inv::accepted_at.eq(Some(now.to_rfc3339())),
-            ))
-            .execute(&mut conn)
+        // Existing accounts retain their role, password and namespace. Only
+        // the invitation is consumed, with the same atomic checks as signup.
+        let accepted = state
+            .db
+            .run(move |conn| {
+                conn.immediate_transaction::<_, AppError, _>(|conn| {
+                    consume_invitation(conn, &invitation, Some(&existing_user))?;
+                    Ok(())
+                })
+            })
             .await;
+        if let Err(error) = accepted {
+            res.status_code(
+                StatusCode::from_u16(error.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            );
+            res.render(Json(ApiResponse::<()>::err(error.to_response())));
+            return;
+        }
 
         res.status_code(StatusCode::OK);
         res.render(Json(ApiResponse::ok(serde_json::json!({
@@ -581,36 +662,7 @@ pub async fn accept_invitation_with_depot(
         .db
         .run(move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
-                let tenant = crate::services::tenancy::user_tenant(conn, &invitation.invited_by)?;
-                let issuer_role = diesel::RunQueryDsl::first::<String>(
-                    u_dsl::users
-                        .find(&invitation.invited_by)
-                        .select(u_dsl::role),
-                    conn,
-                )?;
-                if issuer_role != "admin" {
-                    return Err(AppError::Forbidden(
-                        "Invitation issuer no longer has administrator access".into(),
-                    ));
-                }
-                let claimed = diesel::RunQueryDsl::execute(
-                    diesel::update(
-                        inv::invitations
-                            .filter(inv::id.eq(&invitation.id))
-                            .filter(inv::is_accepted.eq(false))
-                            .filter(inv::expires_at.gt(now.to_rfc3339())),
-                    )
-                    .set((
-                        inv::is_accepted.eq(true),
-                        inv::accepted_at.eq(Some(now.to_rfc3339())),
-                    )),
-                    conn,
-                )?;
-                if claimed != 1 {
-                    return Err(AppError::Conflict(
-                        "Invitation was already accepted or expired".into(),
-                    ));
-                }
+                let tenant = consume_invitation(conn, &invitation, None)?;
                 diesel::RunQueryDsl::execute(
                     diesel::insert_into(u_dsl::users).values(&new_user),
                     conn,

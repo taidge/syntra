@@ -510,6 +510,11 @@
   "file_mgr.folder_name": "Folder Name",
   "file_mgr.folder_name_placeholder": "Enter folder name",
   "file_mgr.folder_name_required": "Folder name cannot be empty.",
+  "file_mgr.rename_file": "Rename file",
+  "file_mgr.file_name": "File name",
+  "file_mgr.file_name_required": "File name cannot be empty.",
+  "file_mgr.delete_file": "Delete file",
+  "file_mgr.delete_confirm": "Move this file to trash?",
 
   "file_list.view_grid": "Grid",
   "file_list.view_list": "List",

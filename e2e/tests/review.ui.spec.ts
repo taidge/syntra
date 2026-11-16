@@ -26,6 +26,10 @@ test.describe('Review browser regressions @ui', () => {
       ['A1', '1', '1'], ['A2', '2', '2'], ['A3', '=SUM(A1:A2)', '3'],
       ['B1', 'quoted, "text"', 'quoted, "text"'], ['B2', '=B1', 'quoted, "text"'],
       ['B3', '=A3*2', '6'], ['C1', '=1/0', '#ERR: #DIV/0!'], ['C2', '=C1', '#ERR: #DIV/0!'],
+      ['D1', '=SUM(C1:C2)', '#ERR: #DIV/0!'], ['D2', '=AVERAGE(C1:C2)', '#ERR: #DIV/0!'],
+      ['D3', '=MIN(C1:C2)', '#ERR: #DIV/0!'], ['E1', '=MAX(C1:C2)', '#ERR: #DIV/0!'],
+      ['E2', '=IF(C1,1,2)', '#ERR: #DIV/0!'], ['E3', '=IF(1,7,C1)', '7'],
+      ['D4', '=IF(TRUE,42,D4)', '42'], ['E4', '=D4+1', '43'],
     ];
     for (const [address, input, displayed] of cells) {
       await page.getByRole('button', { name: address, exact: true }).click();
@@ -52,7 +56,7 @@ test.describe('Review browser regressions @ui', () => {
     expect(exported.request().headers().authorization).toBe(headers.Authorization);
     const path = await (await download).path();
     expect(path).not.toBeNull();
-    expect(await readFile(path!, 'utf8')).toBe('1,"quoted, ""text""",#DIV/0!\r\n2,"quoted, ""text""",#DIV/0!\r\n3,6,\r\n');
+    expect(await readFile(path!, 'utf8')).toBe('1,"quoted, ""text""",#DIV/0!,#DIV/0!,#DIV/0!\r\n2,"quoted, ""text""",#DIV/0!,#DIV/0!,#DIV/0!\r\n3,6,,#DIV/0!,7\r\n,,,42,43\r\n');
   });
 
   test('two browser sessions keep local dirty edits until a persistent snapshot conflict is resolved', async ({browser, request}) => {
@@ -132,7 +136,7 @@ test.describe('Review browser regressions @ui', () => {
     const originalPath = await original.path();
     expect(originalPath).not.toBeNull();
     expect(await readFile(originalPath!)).toEqual(await readFile(resolve(__dirname, '../../crates/export/tests/fixtures/external-rich-reordered.pptx')));
-    await page.getByRole('button',{name:'external-rich-reordered.pptx',exact:true}).click();
+    await page.getByRole('link',{name:'external-rich-reordered.pptx',exact:true}).click();
     await expect(page).toHaveURL(/\/slides\//);
     await expect(page.locator('.slide-thumbnail')).toHaveCount(2);
     const leadingText = page.locator('.slide-canvas img[alt="TextBox"]').first();

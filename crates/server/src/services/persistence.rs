@@ -703,8 +703,43 @@ pub async fn commit_document_with_credential(
             credential: credential.clone(),
             method: salvo::http::Method::PUT,
             path: format!("/api/v1/documents/{document_id}"),
+            wopi_authorization: None,
         }),
         Some(committed),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn restore_document_with_credential(
+    db: &DbPool,
+    storage: &StorageBackend,
+    document_id: &str,
+    version_id: &str,
+    user: &str,
+    expected_version: i32,
+    content: String,
+    credential: &crate::middleware::auth::AuthenticatedCredential,
+) -> Result<i32, AppError> {
+    commit_document_inner(
+        db,
+        storage,
+        document_id,
+        user,
+        expected_version,
+        content,
+        Some("Before restore".into()),
+        None,
+        None,
+        None,
+        None,
+        Some(CommitCredential {
+            credential: credential.clone(),
+            method: salvo::http::Method::POST,
+            path: format!("/api/v1/documents/{document_id}/restore/{version_id}"),
+            wopi_authorization: None,
+        }),
+        None,
     )
     .await
 }
@@ -714,6 +749,22 @@ struct CommitCredential {
     credential: crate::middleware::auth::AuthenticatedCredential,
     method: salvo::http::Method,
     path: String,
+    wopi_authorization: Option<super::wopi_sessions::WopiWriteAuthorization>,
+}
+
+impl CommitCredential {
+    fn validate(&self, conn: &mut SqliteConnection) -> Result<(), AppError> {
+        if let Some(authorization) = &self.wopi_authorization {
+            authorization.validate_in_transaction(conn)
+        } else {
+            crate::middleware::auth::validate_credential_in_transaction(
+                conn,
+                &self.credential,
+                &self.method,
+                &self.path,
+            )
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -740,6 +791,41 @@ pub async fn commit_document_with_lock(
         None,
         None,
         None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_document_with_wopi_authorization(
+    db: &DbPool,
+    storage: &StorageBackend,
+    document_id: &str,
+    user: &str,
+    expected_version: i32,
+    content: String,
+    label: Option<String>,
+    token: Option<String>,
+    authorization: &super::wopi_sessions::WopiWriteAuthorization,
+) -> Result<i32, AppError> {
+    commit_document_inner(
+        db,
+        storage,
+        document_id,
+        user,
+        expected_version,
+        content,
+        label,
+        token,
+        None,
+        None,
+        None,
+        Some(CommitCredential {
+            credential: authorization.credential(),
+            method: salvo::http::Method::POST,
+            path: String::new(),
+            wopi_authorization: Some(authorization.clone()),
+        }),
         None,
     )
     .await
@@ -947,6 +1033,7 @@ pub async fn commit_document_operation_with_effects_and_credential(
             credential: credential.clone(),
             method: salvo::http::Method::GET,
             path: format!("/api/v1/ws/collab/{document}"),
+            wopi_authorization: None,
         }),
         None,
     )
@@ -1010,12 +1097,7 @@ async fn commit_document_inner(
     let preflight = db.run(move |conn| {
         conn.transaction::<_, AppError, _>(|conn| {
             if let Some(credential) = &read_credential {
-                crate::middleware::auth::validate_credential_in_transaction(
-                    conn,
-                    &credential.credential,
-                    &credential.method,
-                    &credential.path,
-                )?;
+                credential.validate(conn)?;
             }
             let (version, file) = d::documents
                 .inner_join(f::files.on(d::file_id.eq(f::id)))
@@ -1060,12 +1142,7 @@ async fn commit_document_inner(
             TransactionStage::DocumentMetadata,
             |conn| {
                 if let Some(credential) = &credential {
-                    crate::middleware::auth::validate_credential_in_transaction(
-                        conn,
-                        &credential.credential,
-                        &credential.method,
-                        &credential.path,
-                    )?;
+                    credential.validate(conn)?;
                 }
                 let current = d::documents.find(&id).first::<Document>(conn)?;
                 let file = f::files.find(&current.file_id).first::<File>(conn)?;
@@ -1262,12 +1339,51 @@ pub async fn purge_trashed(
     owner: Option<&str>,
     cutoff: Option<&str>,
 ) -> Result<usize, AppError> {
+    purge_trashed_inner(db, file_id, owner, cutoff, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn purge_trashed_with_credential(
+    db: &DbPool,
+    file_id: &str,
+    owner: Option<&str>,
+    cutoff: Option<&str>,
+    credential: &crate::middleware::auth::AuthenticatedCredential,
+    method: &salvo::http::Method,
+    path: &str,
+) -> Result<usize, AppError> {
+    if owner != Some(credential.user_id.as_str()) {
+        return Err(AppError::Forbidden("Credential owner mismatch".into()));
+    }
+    purge_trashed_inner(
+        db,
+        file_id,
+        owner,
+        cutoff,
+        Some(CommitCredential {
+            credential: credential.clone(),
+            method: method.clone(),
+            path: path.to_owned(),
+            wopi_authorization: None,
+        }),
+    )
+    .await
+}
+
+async fn purge_trashed_inner(
+    db: &DbPool,
+    file_id: &str,
+    owner: Option<&str>,
+    cutoff: Option<&str>,
+    credential: Option<CommitCredential>,
+) -> Result<usize, AppError> {
     let (id, owner, cutoff) = (
         file_id.to_owned(),
         owner.map(str::to_owned),
         cutoff.map(str::to_owned),
     );
     db.run(move |conn| conn.immediate_transaction::<_, AppError, _>(|conn| {
+        if let Some(credential) = &credential { credential.validate(conn)?; }
         let file = f::files.find(&id).first::<File>(conn).optional()?.ok_or_else(|| AppError::NotFound("Trashed file not found".into()))?;
         if let Some(user) = &owner { authorize_including_trashed(conn, &file, user, "admin")?; }
         if !file.is_trashed || cutoff.as_ref().is_some_and(|cutoff| file.trashed_at.as_ref().is_none_or(|date| date >= cutoff)) {
@@ -1301,6 +1417,7 @@ pub async fn purge_trashed(
                 "DELETE FROM file_tags WHERE file_id = ?", "DELETE FROM favorites WHERE file_id = ?",
                 "DELETE FROM recent_files WHERE file_id = ?", "DELETE FROM conversion_jobs WHERE source_file_id = ?",
                 "DELETE FROM upload_results WHERE file_id = ?",
+                "DELETE FROM trash_batch_members WHERE file_id = ?",
             ] { diesel::sql_query(statement).bind::<Text, _>(&row.id).execute(conn)?; }
         }
         // Break parent references within the selected subtree before deleting.

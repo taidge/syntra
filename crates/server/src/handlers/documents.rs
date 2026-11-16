@@ -125,6 +125,10 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
 
     let body: CreateDocumentRequest = match req.parse_json().await {
         Ok(b) => b,
@@ -234,6 +238,12 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
     let result =
         crate::services::persistence::commit_blob(&state.db, path_val.clone(), move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
+                crate::middleware::auth::validate_credential_in_transaction(
+                    conn,
+                    &credential,
+                    &salvo::http::Method::POST,
+                    "/api/v1/documents",
+                )?;
                 if let Some(parent_id) = &new_file.parent_id {
                     use contrix_core::models::File;
                     let parent =
@@ -392,6 +402,18 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
                 .as_deref()
                 .and_then(|v| serde_json::from_str(v).ok())
                 .unwrap_or_default();
+            let content = if doc_type == DocumentType::Writer {
+                crate::services::legacy_writer_layout::for_response(
+                    &state.db,
+                    &state.storage,
+                    &file_id_val,
+                    version_val,
+                    content,
+                )
+                .await
+            } else {
+                content
+            };
             let resp = DocumentResponse {
                 id: id_val.parse().unwrap_or_default(),
                 file_id: file_id_val.parse().unwrap_or_default(),
@@ -979,6 +1001,10 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
         render_error(res, AppError::Auth("Not authenticated".into()));
         return;
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
     let id: String = req.param("id").unwrap_or_default();
     let version_id: String = req.param("version_id").unwrap_or_default();
     #[derive(serde::Deserialize)]
@@ -1009,7 +1035,7 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
     let content = match v::versions
-        .filter(v::id.eq(version_id))
+        .filter(v::id.eq(&version_id))
         .filter(v::document_id.eq(&id))
         .select(v::content)
         .first::<Option<String>>(&mut conn)
@@ -1036,14 +1062,15 @@ pub async fn restore_version(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
     };
-    match crate::services::persistence::commit_document(
+    match crate::services::persistence::restore_document_with_credential(
         &state.db,
         &state.storage,
         &id,
+        &version_id,
         &uid,
         expected,
         content,
-        Some("Before restore".into()),
+        &credential,
     )
     .await
     {

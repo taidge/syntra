@@ -32,6 +32,7 @@ pub const MIGRATION_FILES: &[&str] = &[
     "025_atomic_persistence.sql",
     "026_storage_maintenance.sql",
     "027_operation_history_retention.sql",
+    "028_trash_deletion_batches.sql",
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -313,6 +314,56 @@ mod tests {
             count(
                 &mut conn,
                 "SELECT COUNT(*) AS total FROM pragma_table_info('users') WHERE name='tenant_id'"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn trash_batches_upgrade_legacy_databases_without_guessing_membership() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        for name in MIGRATION_FILES
+            .iter()
+            .filter(|name| **name != "028_trash_deletion_batches.sql")
+        {
+            let sql = std::fs::read_to_string(directory.join(name)).unwrap();
+            run_migration_file(&mut conn, name, &sql).unwrap();
+        }
+        conn.batch_execute("INSERT INTO users(id,username,email,password_hash) VALUES ('legacy','legacy','legacy@example.test','hash');
+            INSERT INTO files(id,name,path,owner_id,is_folder,is_trashed,trashed_at) VALUES ('root','root','','legacy',1,1,'2026-01-01T00:00:00Z');
+            INSERT INTO files(id,name,path,owner_id,parent_id,is_trashed,trashed_at) VALUES ('child','child','','legacy','root',1,'2026-01-01T00:00:00Z');").unwrap();
+        run_directory(&mut conn, &directory).unwrap();
+        assert_eq!(
+            count(
+                &mut conn,
+                "SELECT COUNT(*) AS total FROM trash_batch_members"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &mut conn,
+                "SELECT COUNT(*) AS total FROM files WHERE is_trashed=1 AND trashed_at='2026-01-01T00:00:00Z'"
+            ),
+            2
+        );
+        conn.batch_execute(
+            "INSERT INTO trash_batch_members(file_id,batch_id) VALUES ('root','persisted-batch')",
+        )
+        .unwrap();
+        run_directory(&mut conn, &directory).unwrap();
+        assert_eq!(
+            count(
+                &mut conn,
+                "SELECT COUNT(*) AS total FROM trash_batch_members WHERE file_id='root' AND batch_id='persisted-batch'"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &mut conn,
+                "SELECT COUNT(*) AS total FROM files WHERE id='child' AND parent_id='root' AND is_trashed=1"
             ),
             1
         );

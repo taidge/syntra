@@ -510,6 +510,11 @@
   "file_mgr.folder_name": "文件夹名称",
   "file_mgr.folder_name_placeholder": "输入文件夹名称",
   "file_mgr.folder_name_required": "文件夹名称不能为空。",
+  "file_mgr.rename_file": "重命名文件",
+  "file_mgr.file_name": "文件名称",
+  "file_mgr.file_name_required": "文件名称不能为空。",
+  "file_mgr.delete_file": "删除文件",
+  "file_mgr.delete_confirm": "将此文件移到回收站？",
 
   "file_list.view_grid": "网格",
   "file_list.view_list": "列表",

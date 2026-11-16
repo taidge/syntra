@@ -53,10 +53,22 @@
 /* Writer: a fixed-width paper on the scrolling grey canvas, beside navigation. */
 .writer-main > .sidebar { flex: 0 0 var(--sidebar-width); height: auto; align-self: stretch; overflow-y: auto; }
 .writer-main .writer-canvas { min-width: 0; min-height: 0; flex: 1 1 0; padding: 32px; align-items: center; justify-content: flex-start; gap: 24px; overflow: auto; background: #e5e7eb; }
-.writer-page { flex: 0 0 auto; width: 816px; min-width: 816px; min-height: 1056px; max-width: none; margin: 0 auto; padding: 0; background: var(--bg-white); box-shadow: var(--shadow-lg); }
+.writer-page { flex: 0 0 auto; width: var(--writer-page-width, 210mm); min-width: var(--writer-page-width, 210mm); min-height: var(--writer-page-height, 297mm); max-width: none; margin: 0 auto; padding: var(--writer-margin-top, 25.4mm) var(--writer-margin-right, 25.4mm) var(--writer-margin-bottom, 25.4mm) var(--writer-margin-left, 25.4mm); background: #fff; color: #000; color-scheme: light; box-shadow: var(--shadow-lg); gap: 0; }
 .writer-page .sapid-rich-editor-shell { flex: 1; gap: 0 !important; width: 100%; }
-.writer-page .writer-body { margin: 0; padding: 96px 72px !important; min-height: 1056px !important; width: 100%; max-width: none; border: 0 !important; border-radius: 0 !important; background: transparent !important; color: var(--text) !important; font: 16px/1.8 var(--font-sans) !important; overflow: visible; }
-.writer-page .writer-body p { min-height: 1.8em; }
+.writer-page .writer-body { display: block; margin: 0; padding: 0; min-height: calc(var(--writer-page-height, 297mm) - var(--writer-margin-top, 25.4mm) - var(--writer-margin-bottom, 25.4mm)); width: 100%; max-width: none; border: 0; border-radius: 0; background: transparent; color: #000; font: 12pt/1.15 "宋体", "SimSun", "Times New Roman", serif; font-weight: 400; overflow: visible; outline: none; white-space: pre-wrap; caret-color: #000; }
+.writer-page .writer-body :is(p, h1, h2, h3, h4, h5, h6) { min-height: 1em; white-space: pre-wrap; overflow-wrap: anywhere; }
+.writer-page .writer-body :is(ul, ol) { white-space: normal; }
+.writer-page .writer-body li { white-space: pre-wrap; }
+.writer-page .writer-body ul { list-style: disc outside; margin: 0 0 8pt; padding-inline-start: 24pt; }
+.writer-page .writer-body ol { list-style: decimal outside; margin: 0 0 8pt; padding-inline-start: 24pt; }
+.writer-page .writer-body :is(ul, ol) :is(ul, ol) { margin-bottom: 0; }
+.writer-page .writer-body figure { margin: 0 0 8pt; }
+.writer-page .writer-body pre { white-space: pre-wrap; font-family: monospace; }
+.writer-page .writer-body .writer-page-break { min-height: 24px; break-after: page; }
+.writer-page .writer-body table { border-collapse: collapse; max-width: 100%; }
+.writer-page .writer-body :is(td, th) { border: 1px solid #aaa; padding: 4px 6px; vertical-align: top; }
+.writer-page .writer-body img { max-width: 100%; object-fit: contain; }
+.writer-page .writer-body a { color: #0563c1; }
 .writer-page textarea[aria-label="Document body (large document)"] { min-height: 1056px; border: 0 !important; padding: 72px !important; font: 16px/1.8 var(--font-sans) !important; }
 .writer-native-block { padding: 20px 72px; gap: 10px; border-top: 1px solid var(--border); }
 .writer-native-block > div { gap: 8px; flex-wrap: wrap; }
@@ -153,8 +165,6 @@
     .editor-shell .editor-toolbar, .editor-shell .toolbar { padding: 4px 8px; }
     .writer-main > .sidebar { display: none; }
     .writer-main .writer-canvas { padding: 16px; }
-    .writer-page { min-width: 600px; width: 600px; }
-    .writer-page .writer-body { padding: 44px !important; }
     .writer-settings { position: absolute; top: 160px; right: 0; bottom: 26px; z-index: 40; box-shadow: -3px 0 12px #0002; }
     .slides-app .slides-workspace { flex-direction: row !important; }
     .slides-app .slide-list { flex-direction: column !important; flex: 0 0 80px; width: 80px; padding: 6px; }

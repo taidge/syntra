@@ -1155,6 +1155,14 @@ async fn revoked_jwt_and_api_key_connections_cannot_write_or_receive_later_commi
 
 #[tokio::test]
 async fn removed_room_member_connections_cannot_write_or_receive_new_body() {
+    // Keep transient database failures attributable without changing the load,
+    // admission limits, expected response or retrying the operation.
+    let _diagnostics = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::WARN)
+            .finish(),
+    );
     let server = TestServer::new().await;
     let (owner, _) = server
         .register("roomleader", "roomleader@test.com", "password123")

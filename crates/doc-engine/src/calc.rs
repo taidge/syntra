@@ -1424,15 +1424,17 @@ impl Sheet {
             }
         }
 
-        // Also evaluate formula cells that were not in the topo order
-        // (e.g. part of a cycle – mark them as errors).
+        // Static references include unselected IF branches. A topological
+        // cycle therefore need not be an evaluation cycle: resolve these
+        // cells lazily, using the same visiting set as direct evaluation.
         let ordered_set: HashSet<(u32, u32)> = order.into_iter().collect();
         for (cr, _formula) in &formula_cells {
             let key = (cr.row, cr.col);
-            if !ordered_set.contains(&key)
-                && let Some(cell_mut) = self.cells.get_mut(cr)
-            {
-                cell_mut.value = CellValue::Error("Circular reference detected".into());
+            if !ordered_set.contains(&key) {
+                let value = self.resolve_cell(cr);
+                if let Some(cell_mut) = self.cells.get_mut(cr) {
+                    cell_mut.value = value;
+                }
             }
         }
         EVALUATION.with(|slot| slot.borrow().as_ref().map(|p| p.stats).unwrap_or_default())
@@ -2076,13 +2078,36 @@ impl Sheet {
         vals
     }
 
+    /// Numeric aggregates propagate errors instead of silently dropping them.
+    /// COUNT retains its separate collection semantics.
+    fn collect_numbers_or_error(&self, args: &[Expr]) -> Result<Vec<f64>, CellValue> {
+        let mut numbers = Vec::new();
+        for value in self.collect_values(args) {
+            if matches!(value, CellValue::Error(_)) {
+                return Err(value);
+            }
+            if !matches!(value, CellValue::Empty)
+                && let Some(number) = value.as_number()
+            {
+                numbers.push(number);
+            }
+        }
+        Ok(numbers)
+    }
+
     fn fn_sum(&self, args: &[Expr]) -> CellValue {
-        let nums = self.collect_numbers(args);
+        let nums = match self.collect_numbers_or_error(args) {
+            Ok(numbers) => numbers,
+            Err(error) => return error,
+        };
         CellValue::Number(nums.iter().sum())
     }
 
     fn fn_average(&self, args: &[Expr]) -> CellValue {
-        let nums = self.collect_numbers(args);
+        let nums = match self.collect_numbers_or_error(args) {
+            Ok(numbers) => numbers,
+            Err(error) => return error,
+        };
         if nums.is_empty() {
             CellValue::Error("#DIV/0!".into())
         } else {
@@ -2106,7 +2131,10 @@ impl Sheet {
     }
 
     fn fn_min(&self, args: &[Expr]) -> CellValue {
-        let nums = self.collect_numbers(args);
+        let nums = match self.collect_numbers_or_error(args) {
+            Ok(numbers) => numbers,
+            Err(error) => return error,
+        };
         match nums.iter().cloned().reduce(f64::min) {
             Some(n) => CellValue::Number(n),
             None => CellValue::Number(0.0),
@@ -2114,7 +2142,10 @@ impl Sheet {
     }
 
     fn fn_max(&self, args: &[Expr]) -> CellValue {
-        let nums = self.collect_numbers(args);
+        let nums = match self.collect_numbers_or_error(args) {
+            Ok(numbers) => numbers,
+            Err(error) => return error,
+        };
         match nums.iter().cloned().reduce(f64::max) {
             Some(n) => CellValue::Number(n),
             None => CellValue::Number(0.0),
@@ -2126,6 +2157,9 @@ impl Sheet {
             return CellValue::Error("IF requires 1 to 3 arguments".into());
         }
         let cond = self.eval_expr(&args[0]);
+        if matches!(cond, CellValue::Error(_)) {
+            return cond;
+        }
         if cond.is_truthy() {
             if args.len() >= 2 {
                 self.eval_expr(&args[1])
@@ -2291,6 +2325,9 @@ impl Sheet {
             return CellValue::Error("VLOOKUP requires 3 or 4 arguments".into());
         }
         let search = self.eval_expr(&args[0]);
+        if matches!(search, CellValue::Error(_)) {
+            return search;
+        }
         let (range_start, range_end) = match &args[1] {
             Expr::Range(s, e) => (s.clone(), e.clone()),
             _ => return CellValue::Error("VLOOKUP 2nd argument must be a range".into()),
@@ -2332,17 +2369,9 @@ impl Sheet {
         };
 
         for r in r_min..=r_max {
-            let first_val = self
-                .cells
-                .get(&CellRef::new(r, c_min))
-                .map(|c| &c.value)
-                .unwrap_or(&CellValue::Empty);
-            if cell_values_equal(first_val, &search) {
-                return self
-                    .cells
-                    .get(&CellRef::new(r, target_col))
-                    .map(|c| c.value.clone())
-                    .unwrap_or(CellValue::Empty);
+            let first_val = self.resolve_cell(&CellRef::new(r, c_min));
+            if cell_values_equal(&first_val, &search) {
+                return self.resolve_cell(&CellRef::new(r, target_col));
             }
         }
 
@@ -2359,6 +2388,9 @@ impl Sheet {
             _ => return CellValue::Error("COUNTIF 1st argument must be a range".into()),
         };
         let criteria = self.eval_expr(&args[1]);
+        if matches!(criteria, CellValue::Error(_)) {
+            return criteria;
+        }
         let values = self.range_cell_values(&start, &end);
 
         let count = values
@@ -2378,6 +2410,9 @@ impl Sheet {
             _ => return CellValue::Error("SUMIF 1st argument must be a range".into()),
         };
         let criteria = self.eval_expr(&args[1]);
+        if matches!(criteria, CellValue::Error(_)) {
+            return criteria;
+        }
 
         let (sum_start, sum_end) = if args.len() == 3 {
             match &args[2] {
@@ -2393,17 +2428,17 @@ impl Sheet {
 
         let mut total = 0.0;
         for (i, cr) in crit_refs.iter().enumerate() {
-            let val = self
-                .cells
-                .get(cr)
-                .map(|c| c.value.clone())
-                .unwrap_or(CellValue::Empty);
+            let val = self.resolve_cell(cr);
             if match_criteria(&val, &criteria)
                 && let Some(scr) = sum_refs.get(i)
-                && let Some(cell) = self.cells.get(scr)
-                && let Some(n) = cell.value.as_number()
             {
-                total += n;
+                let sum = self.resolve_cell(scr);
+                if matches!(sum, CellValue::Error(_)) {
+                    return sum;
+                }
+                if let Some(n) = sum.as_number() {
+                    total += n;
+                }
             }
         }
         CellValue::Number(total)
@@ -2833,6 +2868,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_formula_error_aggregates_propagate_scalar_reference_and_range_errors() {
+        let mut sheet = Sheet::new("T".into());
+        sheet.set_formula(0, 0, "=1/0".into());
+        sheet.set_cell(1, 0, CellValue::Number(1.0));
+        sheet.set_cell(0, 1, CellValue::Error("#REF!".into()));
+        for function in ["SUM", "AVERAGE", "MIN", "MAX"] {
+            for (argument, expected) in [
+                ("1/0", "#DIV/0!"),
+                ("A1", "#DIV/0!"),
+                ("A1:A2", "#DIV/0!"),
+                ("B1", "#REF!"),
+            ] {
+                let formula = format!("={function}({argument})");
+                let value = sheet.evaluate_formula(&formula);
+                assert!(
+                    matches!(&value, CellValue::Error(error) if error == expected),
+                    "{formula}: {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_formula_error_aggregates_keep_nonerror_and_count_semantics() {
+        let mut sheet = Sheet::new("T".into());
+        sheet.set_cell(0, 0, CellValue::Number(2.0));
+        sheet.set_cell(1, 0, CellValue::Text("ignored".into()));
+        sheet.set_cell(2, 0, CellValue::Empty);
+        sheet.set_cell(3, 0, CellValue::Number(4.0));
+        for (function, expected) in [("SUM", 6.0), ("AVERAGE", 3.0), ("MIN", 2.0), ("MAX", 4.0)] {
+            let formula = format!("={function}(A1:A4)");
+            let value = sheet.evaluate_formula(&formula);
+            assert!(
+                matches!(value, CellValue::Number(n) if n == expected),
+                "{formula}: {value:?}"
+            );
+        }
+        sheet.set_cell(1, 0, CellValue::Error("#N/A".into()));
+        assert!(matches!(
+            sheet.evaluate_formula("=COUNT(A1:A4)"),
+            CellValue::Number(2.0)
+        ));
+        assert!(matches!(
+            sheet.evaluate_formula("=SUM(B1:B2)"),
+            CellValue::Number(0.0)
+        ));
+        assert!(matches!(
+            sheet.evaluate_formula("=MIN(B1:B2)"),
+            CellValue::Number(0.0)
+        ));
+        assert!(matches!(
+            sheet.evaluate_formula("=MAX(B1:B2)"),
+            CellValue::Number(0.0)
+        ));
+        assert!(
+            matches!(sheet.evaluate_formula("=AVERAGE(B1:B2)"), CellValue::Error(error) if error == "#DIV/0!")
+        );
+    }
+
+    #[test]
+    fn test_formula_error_if_propagates_condition_errors() {
+        let mut sheet = Sheet::new("T".into());
+        sheet.set_formula(0, 0, "=1/0".into());
+        sheet.set_cell(1, 0, CellValue::Error("#N/A".into()));
+        for (condition, expected) in [("1/0", "#DIV/0!"), ("A1", "#DIV/0!"), ("A2", "#N/A")] {
+            let formula = format!("=IF({condition},123,456)");
+            let value = sheet.evaluate_formula(&formula);
+            assert!(
+                matches!(&value, CellValue::Error(error) if error == expected),
+                "{formula}: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_formula_error_if_keeps_unselected_branches_lazy() {
+        let sheet = Sheet::new("T".into());
+        assert!(matches!(
+            sheet.evaluate_formula("=IF(TRUE,42,1/0)"),
+            CellValue::Number(42.0)
+        ));
+        assert!(matches!(
+            sheet.evaluate_formula("=IF(FALSE,1/0,42)"),
+            CellValue::Number(42.0)
+        ));
+    }
+
     // -----------------------------------------------------------------------
     // Concatenation & comparison
     // -----------------------------------------------------------------------
@@ -3101,6 +3224,82 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn test_formula_error_criteria_functions_propagate_criteria_errors() {
+        let mut sheet = Sheet::new("T".into());
+        sheet.set_cell(0, 0, CellValue::Number(1.0));
+        sheet.set_cell(1, 0, CellValue::Number(2.0));
+        sheet.set_cell(0, 1, CellValue::Number(3.0));
+        sheet.set_cell(1, 1, CellValue::Number(4.0));
+        sheet.set_cell(0, 2, CellValue::Error("#REF!".into()));
+        for (criteria, expected) in [("1/0", "#DIV/0!"), ("C1", "#REF!")] {
+            for formula in [
+                format!("=COUNTIF(A1:A2,{criteria})"),
+                format!("=SUMIF(A1:A2,{criteria},B1:B2)"),
+            ] {
+                let value = sheet.evaluate_formula(&formula);
+                assert!(
+                    matches!(&value, CellValue::Error(error) if error == expected),
+                    "{formula}: {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_formula_error_sumif_propagates_only_matching_sum_errors() {
+        let mut sheet = Sheet::new("T".into());
+        sheet.set_cell(0, 0, CellValue::Text("match".into()));
+        sheet.set_cell(1, 0, CellValue::Text("other".into()));
+        sheet.set_cell(0, 1, CellValue::Error("#REF!".into()));
+        sheet.set_cell(1, 1, CellValue::Number(5.0));
+        assert!(matches!(
+            sheet.evaluate_formula("=SUMIF(A1:A2,\"other\",B1:B2)"),
+            CellValue::Number(5.0)
+        ));
+        assert!(
+            matches!(sheet.evaluate_formula("=SUMIF(A1:A2,\"match\",B1:B2)"), CellValue::Error(error) if error == "#REF!")
+        );
+        sheet.set_cell(0, 1, CellValue::Number(7.0));
+        sheet.set_cell(1, 1, CellValue::Error("#DIV/0!".into()));
+        sheet.set_cell(2, 0, CellValue::Text("match".into()));
+        sheet.set_cell(2, 1, CellValue::Text("ignored".into()));
+        sheet.set_cell(3, 0, CellValue::Text("match".into()));
+        sheet.set_cell(3, 1, CellValue::Empty);
+        assert!(matches!(
+            sheet.evaluate_formula("=SUMIF(A1:A4,\"match\",B1:B4)"),
+            CellValue::Number(7.0)
+        ));
+        assert!(
+            matches!(sheet.evaluate_formula("=SUMIF(A1:A4,\"other\",B1:B4)"), CellValue::Error(error) if error == "#DIV/0!")
+        );
+    }
+
+    #[test]
+    fn test_formula_error_vlookup_preserves_search_errors_and_missing_keys() {
+        let mut sheet = Sheet::new("T".into());
+        sheet.set_cell(0, 0, CellValue::Number(1.0));
+        sheet.set_cell(1, 0, CellValue::Number(2.0));
+        sheet.set_cell(0, 1, CellValue::Number(10.0));
+        sheet.set_cell(1, 1, CellValue::Number(20.0));
+        sheet.set_cell(0, 2, CellValue::Error("#REF!".into()));
+        for (search, expected) in [("1/0", "#DIV/0!"), ("C1", "#REF!")] {
+            let formula = format!("=VLOOKUP({search},A1:B2,2,FALSE)");
+            let value = sheet.evaluate_formula(&formula);
+            assert!(
+                matches!(&value, CellValue::Error(error) if error == expected),
+                "{formula}: {value:?}"
+            );
+        }
+        assert!(matches!(
+            sheet.evaluate_formula("=VLOOKUP(2,A1:B2,2,FALSE)"),
+            CellValue::Number(20.0)
+        ));
+        assert!(
+            matches!(sheet.evaluate_formula("=VLOOKUP(99,A1:B2,2,FALSE)"), CellValue::Error(error) if error == "#N/A")
+        );
+    }
+
+    #[test]
     fn test_countif() {
         let sheet = make_test_sheet();
         match sheet.evaluate_formula("=COUNTIF(A1:A3, \">1\")") {
@@ -3137,6 +3336,85 @@ mod tests {
             ),
             other => panic!("Expected error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn functional_lazy_if_recalculation_ignores_unselected_cycles() {
+        let mut sheet = Sheet::new("Lazy conditions".into());
+        sheet.set_formula(0, 0, "=IF(TRUE,42,A1)".into());
+        sheet.set_formula(0, 1, "=IF(FALSE,B1,A1+1)".into());
+        sheet.set_formula(0, 2, "=IF(TRUE,7,D1)".into());
+        sheet.set_formula(0, 3, "=C1+1".into());
+        assert!(matches!(
+            sheet.evaluate_formula("=A1"),
+            CellValue::Number(42.0)
+        ));
+        sheet.recalculate();
+        for (col, expected) in [(0, 42.0), (1, 43.0), (2, 7.0), (3, 8.0)] {
+            assert!(
+                matches!(sheet.get_cell(0, col).unwrap().value, CellValue::Number(value) if value == expected),
+                "column {col}: {:?}",
+                sheet.get_cell(0, col).unwrap().value
+            );
+        }
+
+        sheet.set_formula(1, 0, "=IF(TRUE,A2,0)".into());
+        sheet.set_formula(1, 1, "=C2+1".into());
+        sheet.set_formula(1, 2, "=B2+1".into());
+        sheet.recalculate();
+        for col in 0..3 {
+            assert!(
+                matches!(&sheet.get_cell(1, col).unwrap().value, CellValue::Error(error) if error.contains("ircular")),
+                "selected cycles must still fail: column {col}"
+            );
+        }
+        assert!(matches!(
+            sheet.get_cell(0, 0).unwrap().value,
+            CellValue::Number(42.0)
+        ));
+    }
+
+    #[test]
+    fn functional_sumif_resolves_formula_cells_without_cached_results() {
+        let mut sheet = Sheet::new("SUMIF dependencies".into());
+        sheet.set_cell(0, 2, CellValue::Number(3.0));
+        sheet.set_formula(0, 0, "=C1".into());
+        sheet.set_formula(0, 1, "=C1*2".into());
+        sheet.set_cell(1, 0, CellValue::Number(99.0));
+        sheet.set_formula(1, 1, "=1/0".into());
+        assert!(matches!(
+            sheet.evaluate_formula("=SUMIF(A1:A2,3,B1:B2)"),
+            CellValue::Number(6.0)
+        ));
+        sheet.set_cell(0, 2, CellValue::Number(4.0));
+        assert!(matches!(
+            sheet.evaluate_formula("=SUMIF(A1:A2,4,B1:B2)"),
+            CellValue::Number(8.0)
+        ));
+        assert!(
+            matches!(sheet.evaluate_formula("=SUMIF(A1:A2,99,B1:B2)"), CellValue::Error(error) if error == "#DIV/0!")
+        );
+    }
+
+    #[test]
+    fn functional_vlookup_resolves_formula_keys_and_results_without_cached_values() {
+        let mut sheet = Sheet::new("VLOOKUP dependencies".into());
+        sheet.set_cell(0, 2, CellValue::Number(3.0));
+        sheet.set_formula(0, 0, "=C1".into());
+        sheet.set_formula(0, 1, "=C1*2".into());
+        assert!(matches!(
+            sheet.evaluate_formula("=VLOOKUP(3,A1:B1,2,FALSE)"),
+            CellValue::Number(6.0)
+        ));
+        sheet.set_cell(0, 2, CellValue::Number(4.0));
+        assert!(matches!(
+            sheet.evaluate_formula("=VLOOKUP(4,A1:B1,2,FALSE)"),
+            CellValue::Number(8.0)
+        ));
+        sheet.set_formula(0, 1, "=1/0".into());
+        assert!(
+            matches!(sheet.evaluate_formula("=VLOOKUP(4,A1:B1,2,FALSE)"), CellValue::Error(error) if error == "#DIV/0!")
+        );
     }
 
     // -----------------------------------------------------------------------

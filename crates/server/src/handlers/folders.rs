@@ -48,25 +48,52 @@ pub async fn trash_file_tree(
     db: &crate::state::DbPool,
     file_id: &str,
     user: &str,
+    credential: &crate::middleware::auth::AuthenticatedCredential,
+    method: &salvo::http::Method,
+    request_path: &str,
 ) -> Result<usize, AppError> {
     let (file_id, user) = (file_id.to_owned(), user.to_owned());
+    let (credential, method, request_path) =
+        (credential.clone(), method.clone(), request_path.to_owned());
     db.run(move |conn| {
         conn.immediate_transaction::<_, AppError, _>(|conn| {
+            crate::middleware::auth::validate_credential_in_transaction(
+                conn,
+                &credential,
+                &method,
+                &request_path,
+            )?;
             let root = load_existing_file(conn, &file_id)?;
             crate::services::persistence::authorize(conn, &root, &user, "editor")?;
             let ids = descendant_ids(conn, &file_id)?;
+            let mut active_ids = Vec::new();
             for id in &ids {
                 let file = load_existing_file(conn, id)?;
                 crate::services::persistence::authorize_including_trashed(
                     conn, &file, &user, "editor",
                 )?;
                 crate::services::persistence::check_file_lock(conn, id, &user, None)?;
+                if !file.is_trashed {
+                    active_ids.push(file.id);
+                }
+            }
+            let batch = Uuid::new_v4().to_string();
+            for id in &active_ids {
+                diesel::RunQueryDsl::execute(
+                    diesel::sql_query(
+                        "INSERT INTO trash_batch_members(file_id,batch_id) VALUES (?,?) \
+                         ON CONFLICT(file_id) DO UPDATE SET batch_id=excluded.batch_id",
+                    )
+                    .bind::<diesel::sql_types::Text, _>(id)
+                    .bind::<diesel::sql_types::Text, _>(&batch),
+                    conn,
+                )?;
             }
             let now = Utc::now().to_rfc3339();
             Ok(diesel::RunQueryDsl::execute(
                 diesel::update(
                     f::files
-                        .filter(f::id.eq_any(ids))
+                        .filter(f::id.eq_any(active_ids))
                         .filter(f::is_trashed.eq(false)),
                 )
                 .set((
@@ -86,10 +113,21 @@ pub async fn move_file_tree(
     file_id: &str,
     target_id: &str,
     user: &str,
+    credential: &crate::middleware::auth::AuthenticatedCredential,
+    method: &salvo::http::Method,
+    request_path: &str,
 ) -> Result<usize, AppError> {
     let (file_id, target_id, user) = (file_id.to_owned(), target_id.to_owned(), user.to_owned());
+    let (credential, method, request_path) =
+        (credential.clone(), method.clone(), request_path.to_owned());
     db.run(move |conn| {
         conn.immediate_transaction::<_, AppError, _>(|conn| {
+            crate::middleware::auth::validate_credential_in_transaction(
+                conn,
+                &credential,
+                &method,
+                &request_path,
+            )?;
             let source = load_existing_file(conn, &file_id)?;
             let target = load_existing_file(conn, &target_id)?;
             if !target.is_folder || target.is_trashed {
@@ -229,6 +267,23 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     let folder_id = Uuid::new_v4();
     let now = Utc::now();
@@ -310,6 +365,12 @@ pub async fn create_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .db
         .run(move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
+                crate::middleware::auth::validate_credential_in_transaction(
+                    conn,
+                    &credential,
+                    &method,
+                    &request_path,
+                )?;
                 // Revalidate the target under the same write lock as insertion.
                 if let Some(parent) = &new_file.parent_id {
                     let parent = diesel::RunQueryDsl::first::<File>(f::files.find(parent), conn)?;
@@ -579,6 +640,23 @@ pub async fn update_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     let now = Utc::now();
 
@@ -614,6 +692,12 @@ pub async fn update_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .db
         .run(move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
+                crate::middleware::auth::validate_credential_in_transaction(
+                    conn,
+                    &credential,
+                    &method,
+                    &request_path,
+                )?;
                 let current = diesel::RunQueryDsl::first::<File>(f::files.find(&folder.id), conn)?;
                 crate::services::persistence::authorize(conn, &current, &actor, "editor")?;
                 ensure_available_name(
@@ -666,6 +750,23 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     let folder_id_param: String = req.param("id").unwrap_or_default();
 
@@ -696,7 +797,16 @@ pub async fn delete_folder(req: &mut Request, depot: &mut Depot, res: &mut Respo
         }
     };
 
-    match trash_file_tree(&state.db, &folder.id, &uid).await {
+    match trash_file_tree(
+        &state.db,
+        &folder.id,
+        &uid,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
         Ok(_) => {
             res.status_code(StatusCode::OK);
             res.render(Json(ApiResponse::ok(

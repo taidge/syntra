@@ -84,7 +84,7 @@ test.describe('Glory application flows @ui', () => {
     );
     await page.goto('/files');
     expect((await filesResponse).ok()).toBe(true);
-    await expect(page.getByRole('button', { name: created.data.name, exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: created.data.name, exact: true })).toBeVisible();
 
     const profileResponse = page.waitForResponse(response =>
       response.request().method() === 'GET' &&
@@ -117,6 +117,9 @@ test.describe('Glory application flows @ui', () => {
     page.on('pageerror', error => errors.push(error.message));
     const user = await registerUser(request, uniqueUsername(), uniqueEmail(), 'GloryTest@12345');
     await page.addInitScript(auth => {
+      // Embedded browsers can suppress native dialogs. File actions must still work.
+      window.prompt = () => null;
+      window.confirm = () => false;
       localStorage.setItem('contrix.auth', JSON.stringify({
         token: auth.token,
         user: {
@@ -164,18 +167,51 @@ test.describe('Glory application flows @ui', () => {
     const originalCard = page.locator('.file-card').filter({
       has: page.getByRole('button', { name: filename, exact: true }),
     });
-    page.once('dialog', async dialog => {
-      expect(dialog.type()).toBe('prompt');
-      await dialog.accept(renamed);
+    const mutationMethods: string[] = [];
+    page.on('request', outgoing => {
+      if (new URL(outgoing.url()).pathname === `/api/v1/files/${uploaded.id}` &&
+          ['PUT', 'DELETE'].includes(outgoing.method())) {
+        mutationMethods.push(outgoing.method());
+      }
     });
+    const renameDialog = page.getByRole('dialog', { name: 'Rename file', exact: true });
+    await originalCard.getByRole('button', { name: 'Rename', exact: true }).click();
+    await expect(renameDialog).toBeVisible();
+    await expect(renameDialog.getByRole('textbox', { name: 'File name', exact: true })).toHaveValue(filename);
+    await page.screenshot({ path: testInfo.outputPath('rename-file-dialog.png') });
+    await renameDialog.getByRole('textbox', { name: 'File name', exact: true }).fill('Cancelled rename.txt');
+    await renameDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(renameDialog).toBeHidden();
+    await expect(page.getByRole('button', { name: filename, exact: true })).toBeVisible();
+    const cancelledRenameResponse = await request.get('/api/v1/files', { headers });
+    expect(cancelledRenameResponse.ok()).toBe(true);
+    const cancelledRenameFiles = await cancelledRenameResponse.json();
+    expect(cancelledRenameFiles.data.find((file: { id: string }) => file.id === uploaded.id).name).toBe(filename);
+    expect(mutationMethods).toEqual([]);
+
+    await page.getByRole('button', { name: 'List', exact: true }).click();
+    await expect(originalCard).toHaveClass(/file-row/);
+    await originalCard.getByRole('button', { name: 'Rename', exact: true }).click();
+    await expect(renameDialog).toBeVisible();
+    const renameInput = renameDialog.getByRole('textbox', { name: 'File name', exact: true });
+    await expect(renameInput).toHaveValue(filename);
+    await renameInput.fill('   ');
+    await expect(renameDialog.getByRole('button', { name: 'Rename', exact: true })).toBeDisabled();
+    await renameInput.press('Enter');
+    await expect(renameDialog).toBeVisible();
+    expect(mutationMethods).toEqual([]);
+
+    await renameInput.fill(renamed);
     const rename = page.waitForResponse(response =>
       response.request().method() === 'PUT' &&
       new URL(response.url()).pathname === `/api/v1/files/${uploaded.id}`,
     );
-    await originalCard.getByRole('button', { name: 'Rename', exact: true }).click();
+    await renameInput.press('Enter');
     expect((await rename).ok()).toBe(true);
+    await expect(renameDialog).toBeHidden();
     await expect(page.getByRole('button', { name: filename, exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: renamed, exact: true })).toBeVisible();
+    expect(mutationMethods).toEqual(['PUT']);
 
     const renamedResponse = await request.get('/api/v1/files', { headers });
     expect(renamedResponse.ok()).toBe(true);
@@ -187,17 +223,30 @@ test.describe('Glory application flows @ui', () => {
     const renamedCard = page.locator('.file-card').filter({
       has: page.getByRole('button', { name: renamed, exact: true }),
     });
-    page.once('dialog', async dialog => {
-      expect(dialog.type()).toBe('confirm');
-      await dialog.accept();
-    });
+    const deleteDialog = page.getByRole('dialog', { name: 'Delete file', exact: true });
+    await renamedCard.getByRole('button', { name: 'Delete', exact: true }).click();
+    await expect(deleteDialog).toBeVisible();
+    await expect(deleteDialog).toContainText('Move this file to trash?');
+    await deleteDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(deleteDialog).toBeHidden();
+    await expect(page.getByRole('button', { name: renamed, exact: true })).toBeVisible();
+    const cancelledDeleteResponse = await request.get('/api/v1/files', { headers });
+    expect(cancelledDeleteResponse.ok()).toBe(true);
+    const cancelledDeleteFiles = await cancelledDeleteResponse.json();
+    expect(cancelledDeleteFiles.data.some((file: { id: string }) => file.id === uploaded.id)).toBe(true);
+    expect(mutationMethods).toEqual(['PUT']);
+
+    await renamedCard.getByRole('button', { name: 'Delete', exact: true }).click();
+    await expect(deleteDialog).toBeVisible();
     const deletion = page.waitForResponse(response =>
       response.request().method() === 'DELETE' &&
       new URL(response.url()).pathname === `/api/v1/files/${uploaded.id}`,
     );
-    await renamedCard.getByRole('button', { name: 'Delete', exact: true }).click();
+    await deleteDialog.getByRole('button', { name: 'Delete', exact: true }).click();
     expect((await deletion).ok()).toBe(true);
+    await expect(deleteDialog).toBeHidden();
     await expect(page.getByRole('button', { name: renamed, exact: true })).toHaveCount(0);
+    expect(mutationMethods).toEqual(['PUT', 'DELETE']);
     const afterResponse = await request.get('/api/v1/files', { headers });
     expect(afterResponse.ok()).toBe(true);
     const after = await afterResponse.json();

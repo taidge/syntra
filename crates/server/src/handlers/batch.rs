@@ -121,6 +121,23 @@ pub async fn batch_delete(req: &mut Request, depot: &mut Depot, res: &mut Respon
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     if body.file_ids.is_empty() {
         res.status_code(StatusCode::BAD_REQUEST);
@@ -133,9 +150,31 @@ pub async fn batch_delete(req: &mut Request, depot: &mut Depot, res: &mut Respon
     let mut deleted_count: usize = 0;
 
     for file_id in &body.file_ids {
-        match crate::handlers::folders::trash_file_tree(&state.db, file_id, &uid).await {
+        match crate::handlers::folders::trash_file_tree(
+            &state.db,
+            file_id,
+            &uid,
+            &credential,
+            &method,
+            &request_path,
+        )
+        .await
+        {
             Ok(n) => deleted_count += n,
-            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => continue,
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+                if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+                    &state,
+                    &credential,
+                    &method,
+                    &request_path,
+                )
+                .await
+                {
+                    render_error(res, error);
+                    return;
+                }
+                continue;
+            }
             Err(error) => {
                 render_error(res, error);
                 return;
@@ -178,6 +217,23 @@ pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     if body.file_ids.is_empty() {
         res.status_code(StatusCode::BAD_REQUEST);
@@ -224,11 +280,32 @@ pub async fn batch_move(req: &mut Request, depot: &mut Depot, res: &mut Response
     let mut moved_count: usize = 0;
 
     for file_id in &body.file_ids {
-        match crate::handlers::folders::move_file_tree(&state.db, file_id, &target_folder.id, &uid)
-            .await
+        match crate::handlers::folders::move_file_tree(
+            &state.db,
+            file_id,
+            &target_folder.id,
+            &uid,
+            &credential,
+            &method,
+            &request_path,
+        )
+        .await
         {
             Ok(n) => moved_count += n,
-            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => continue,
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+                if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+                    &state,
+                    &credential,
+                    &method,
+                    &request_path,
+                )
+                .await
+                {
+                    render_error(res, error);
+                    return;
+                }
+                continue;
+            }
             Err(error) => {
                 render_error(res, error);
                 return;
@@ -271,6 +348,23 @@ pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response)
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     if body.file_ids.is_empty() {
         res.status_code(StatusCode::BAD_REQUEST);
@@ -321,28 +415,79 @@ pub async fn batch_tag(req: &mut Request, depot: &mut Depot, res: &mut Response)
     let mut tagged_count: usize = 0;
 
     for file_id in &body.file_ids {
-        // Skip files the user cannot edit.
-        match load_accessible_file(&mut conn, file_id, &uid, "editor").await {
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => continue,
-        }
-
-        let new_file_tag = NewFileTag {
-            id: Uuid::new_v4().to_string(),
-            file_id: file_id.clone(),
-            tag_id: body.tag_id.clone(),
-            created_at: now.to_rfc3339(),
-        };
-
-        match diesel::insert_into(ft::file_tags)
-            .values(&new_file_tag)
-            .execute(&mut conn)
-            .await
-        {
+        let (file_id, tag_id, actor, write_credential, write_method, write_path) = (
+            file_id.clone(),
+            body.tag_id.clone(),
+            uid.clone(),
+            credential.clone(),
+            method.clone(),
+            request_path.clone(),
+        );
+        let now = now.to_rfc3339();
+        let tagged = state
+            .db
+            .run(move |conn| {
+                conn.immediate_transaction::<_, AppError, _>(|conn| {
+                    crate::middleware::auth::validate_credential_in_transaction(
+                        conn,
+                        &write_credential,
+                        &write_method,
+                        &write_path,
+                    )?;
+                    let file =
+                        diesel::OptionalExtension::optional(diesel::RunQueryDsl::first::<File>(
+                            f::files.find(&file_id),
+                            conn,
+                        ))?
+                        .ok_or_else(|| AppError::NotFound("File not found".into()))?;
+                    crate::services::persistence::authorize_including_trashed(
+                        conn, &file, &actor, "editor",
+                    )?;
+                    let tag_exists =
+                        diesel::OptionalExtension::optional(diesel::RunQueryDsl::first::<String>(
+                            t::tags
+                                .filter(t::id.eq(&tag_id))
+                                .filter(t::owner_id.eq(&actor))
+                                .select(t::id),
+                            conn,
+                        ))?;
+                    if tag_exists.is_none() {
+                        return Err(AppError::NotFound("Tag not found".into()));
+                    }
+                    Ok(diesel::RunQueryDsl::execute(
+                        diesel::insert_into(ft::file_tags)
+                            .values(NewFileTag {
+                                id: Uuid::new_v4().to_string(),
+                                file_id,
+                                tag_id,
+                                created_at: now,
+                            })
+                            .on_conflict((ft::file_id, ft::tag_id))
+                            .do_nothing(),
+                        conn,
+                    )?)
+                })
+            })
+            .await;
+        match tagged {
             Ok(n) => tagged_count += n,
-            Err(_) => {
-                // Ignore duplicate tag assignments (UNIQUE constraint).
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+                if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+                    &state,
+                    &credential,
+                    &method,
+                    &request_path,
+                )
+                .await
+                {
+                    render_error(res, error);
+                    return;
+                }
                 continue;
+            }
+            Err(error) => {
+                render_error(res, error);
+                return;
             }
         }
     }
@@ -487,6 +632,23 @@ pub async fn batch_mark_read(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     if body.file_ids.is_empty() {
         res.status_code(StatusCode::BAD_REQUEST);
@@ -496,67 +658,68 @@ pub async fn batch_mark_read(req: &mut Request, depot: &mut Depot, res: &mut Res
         return;
     }
 
-    let mut conn = match state.db.get() {
-        Ok(c) => c,
-        Err(e) => {
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Json(ApiResponse::<()>::err(
-                AppError::Database(e.to_string()).to_response(),
-            )));
-            return;
-        }
-    };
-
     let now = Utc::now();
     let mut marked_count: usize = 0;
 
     for file_id in &body.file_ids {
-        match load_accessible_file(&mut conn, file_id, &uid, "viewer").await {
-            Ok(Some(row)) if !row.is_trashed => {}
-            Ok(_) | Err(AppError::Forbidden(_) | AppError::NotFound(_)) => continue,
+        let (file_id, actor, write_credential, write_method, write_path) = (
+            file_id.clone(),
+            uid.clone(),
+            credential.clone(),
+            method.clone(),
+            request_path.clone(),
+        );
+        let now = now.to_rfc3339();
+        let marked =
+            state
+                .db
+                .run(move |conn| {
+                    conn.immediate_transaction::<_, AppError, _>(|conn| {
+                        crate::middleware::auth::validate_credential_in_transaction(
+                            conn,
+                            &write_credential,
+                            &write_method,
+                            &write_path,
+                        )?;
+                        let file = diesel::OptionalExtension::optional(
+                            diesel::RunQueryDsl::first::<File>(f::files.find(&file_id), conn),
+                        )?
+                        .ok_or_else(|| AppError::NotFound("File not found".into()))?;
+                        crate::services::persistence::authorize(conn, &file, &actor, "viewer")?;
+                        Ok(diesel::RunQueryDsl::execute(
+                            diesel::insert_into(frs::file_read_status)
+                                .values(NewFileReadStatus {
+                                    id: Uuid::new_v4().to_string(),
+                                    user_id: actor,
+                                    file_id,
+                                    read_at: now.clone(),
+                                })
+                                .on_conflict((frs::user_id, frs::file_id))
+                                .do_update()
+                                .set(frs::read_at.eq(now)),
+                            conn,
+                        )?)
+                    })
+                })
+                .await;
+        match marked {
+            Ok(n) => marked_count += n,
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+                if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+                    &state,
+                    &credential,
+                    &method,
+                    &request_path,
+                )
+                .await
+                {
+                    render_error(res, error);
+                    return;
+                }
+                continue;
+            }
             Err(error) => {
                 render_error(res, error);
-                return;
-            }
-        }
-        // Try to update existing read status first (upsert).
-        let updated = diesel::update(
-            frs::file_read_status
-                .filter(frs::user_id.eq(&uid))
-                .filter(frs::file_id.eq(file_id)),
-        )
-        .set(frs::read_at.eq(now.to_rfc3339()))
-        .execute(&mut conn)
-        .await;
-
-        match updated {
-            Ok(0) => {
-                // Insert new read status.
-                let new_status = NewFileReadStatus {
-                    id: Uuid::new_v4().to_string(),
-                    user_id: uid.clone(),
-                    file_id: file_id.clone(),
-                    read_at: now.to_rfc3339(),
-                };
-
-                match diesel::insert_into(frs::file_read_status)
-                    .values(&new_status)
-                    .execute(&mut conn)
-                    .await
-                {
-                    Ok(n) => marked_count += n,
-                    Err(_) => {
-                        // Ignore duplicate (UNIQUE constraint).
-                        continue;
-                    }
-                }
-            }
-            Ok(n) => marked_count += n,
-            Err(e) => {
-                res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-                res.render(Json(ApiResponse::<()>::err(
-                    AppError::Database(e.to_string()).to_response(),
-                )));
                 return;
             }
         }
@@ -597,6 +760,23 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     if body.file_ids.is_empty() {
         res.status_code(StatusCode::BAD_REQUEST);
@@ -675,9 +855,17 @@ pub async fn batch_duplicate(req: &mut Request, depot: &mut Depot, res: &mut Res
             sort_order: 0,
         };
         let actor = uid.clone();
+        let (credential, method, request_path) =
+            (credential.clone(), method.clone(), request_path.clone());
         let insertion =
             crate::services::persistence::commit_blob(&state.db, storage_path, move |conn| {
                 conn.immediate_transaction::<_, AppError, _>(|conn| {
+                    crate::middleware::auth::validate_credential_in_transaction(
+                        conn,
+                        &credential,
+                        &method,
+                        &request_path,
+                    )?;
                     let current =
                         diesel::RunQueryDsl::first::<File>(f::files.find(&original.id), conn)?;
                     crate::services::persistence::authorize(conn, &current, &actor, "editor")?;

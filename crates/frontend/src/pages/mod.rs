@@ -10,6 +10,7 @@ pub mod register;
 pub mod slides;
 pub mod whiteboard;
 pub mod writer;
+mod writer_surface;
 
 pub use admin::Admin;
 pub use calc::Calc;

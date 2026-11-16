@@ -3,6 +3,7 @@
 //! Typed call-site intent identifies only observed IMMEDIATE transactions.
 //! No SQL formatting, extra SQL, business IDs or allocation payloads are read.
 //! SQL callbacks copy into bounded slots; only the pool monitor emits logs.
+use super::memory;
 use contrix_core::error::AppError;
 use std::sync::atomic::{
     AtomicBool, AtomicU64,
@@ -112,7 +113,7 @@ impl TransactionSnapshot {
     }
 }
 
-fn micros(duration: Duration) -> u64 {
+pub(super) fn micros(duration: Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
 }
 
@@ -139,6 +140,9 @@ pub(crate) struct ConnectionTransactionObservation {
     reported_any: bool,
     pending: Option<TransactionReport>,
     pending_failures: u64,
+    pub(super) memory: Option<memory::Sample>,
+    pub(super) memory_pending: bool,
+    instrumentation_disposed: bool,
 }
 
 impl ConnectionTransactionObservation {
@@ -274,6 +278,7 @@ pub(crate) struct DatabaseTelemetry {
     sequence: AtomicU64,
     started: AtomicBool,
     dropped_observations: AtomicU64,
+    memory: memory::Diagnostics,
 }
 
 /// Values only: a blocked subscriber cannot retain the pool or state slots.
@@ -282,11 +287,12 @@ struct TelemetryReports {
     gc: Option<GcReport>,
     gc_reports: u64,
     dropped: u64,
+    memory: Option<memory::Report>,
 }
 
 impl TelemetryReports {
     fn is_empty(&self) -> bool {
-        self.transactions.is_empty() && self.gc.is_none()
+        self.transactions.is_empty() && self.gc.is_none() && self.memory.is_none()
     }
     fn emit(self) {
         for transaction in self.transactions {
@@ -294,6 +300,9 @@ impl TelemetryReports {
         }
         if let Some(gc) = self.gc {
             gc.warn(self.gc_reports, self.dropped);
+        }
+        if let Some(memory) = self.memory {
+            memory.emit();
         }
     }
 }
@@ -307,7 +316,24 @@ impl DatabaseTelemetry {
             sequence: AtomicU64::new(0),
             started: AtomicBool::new(false),
             dropped_observations: AtomicU64::new(0),
+            memory: memory::Diagnostics::new(memory::enabled_from_environment()),
         })
+    }
+
+    pub(super) fn memory_epoch(&self) -> u64 {
+        self.memory.epoch()
+    }
+
+    pub(super) fn memory_observation_disposed(
+        &self,
+        observation: &Mutex<ConnectionTransactionObservation>,
+    ) {
+        if self.memory.epoch() != 0 {
+            let mut observation = observation.lock().unwrap();
+            observation.instrumentation_disposed = true;
+            observation.memory_pending = true;
+            self.memory.observation_disposed();
+        }
     }
 
     pub(crate) fn connection(&self) -> Arc<Mutex<ConnectionTransactionObservation>> {
@@ -318,10 +344,16 @@ impl DatabaseTelemetry {
             reported_any: false,
             pending: None,
             pending_failures: 0,
+            memory: None,
+            memory_pending: false,
+            instrumentation_disposed: false,
         }));
         let mut entries = self.connections.lock().unwrap();
         entries.retain(|entry| {
-            Arc::strong_count(entry) > 1 || entry.lock().unwrap().pending.is_some()
+            Arc::strong_count(entry) > 1 || {
+                let observation = entry.lock().unwrap();
+                observation.pending.is_some() || observation.memory_pending
+            }
         });
         if entries.len() == self.capacity
             && let Some(index) = entries
@@ -397,10 +429,22 @@ impl DatabaseTelemetry {
     }
 
     fn collect_reports(&self) -> TelemetryReports {
+        let epoch = self.memory.epoch();
+        // The current epoch remains requested while copying rows. Untouched idle
+        // connections remain stale/unknown; no checkout or extra job samples them.
+        let mut memory = (epoch != 0).then(|| memory::Report::new(epoch, epoch, self.capacity));
         let entries = self.connections.lock().unwrap().clone();
         let mut transactions = Vec::new();
         for entry in entries {
             let mut observation = entry.lock().unwrap();
+            if let Some(memory) = &mut memory {
+                memory.rows.push(memory::Row {
+                    sequence: observation.connection_sequence,
+                    disposed: observation.instrumentation_disposed,
+                    sample: observation.memory,
+                });
+                observation.memory_pending = false;
+            }
             if let Some(mut report) = observation.pending.take() {
                 report.coalesced_failures = std::mem::take(&mut observation.pending_failures);
                 transactions.push(report);
@@ -415,7 +459,10 @@ impl DatabaseTelemetry {
             }
         }
         self.connections.lock().unwrap().retain(|entry| {
-            Arc::strong_count(entry) > 1 || entry.lock().unwrap().pending.is_some()
+            Arc::strong_count(entry) > 1 || {
+                let observation = entry.lock().unwrap();
+                observation.pending.is_some() || observation.memory_pending
+            }
         });
         let entries = self.gc.lock().unwrap().clone();
         let mut gc_report = None;
@@ -463,11 +510,20 @@ impl DatabaseTelemetry {
             Arc::strong_count(entry) > 1 || !entry.lock().unwrap().retirement_reported
         });
         let dropped = self.dropped_observations.load(Relaxed);
+        if let Some(memory) = &mut memory {
+            memory.registrations = self.sequence.load(Relaxed);
+            memory.disposal_events = self.memory.disposal_events();
+            // Existing omissions can include transaction and GC observations.
+            // They are not an exact count of missing physical connections.
+            memory.omitted_observations = dropped;
+            memory.next_epoch = self.memory.advance();
+        }
         TelemetryReports {
             transactions,
             gc: gc_report,
             gc_reports,
             dropped,
+            memory,
         }
     }
 
@@ -746,6 +802,150 @@ mod tests {
             state.admitted_operations == 0 && state.connections == state.idle_connections
         })
         .await;
+    }
+
+    #[test]
+    fn memory_diagnostics_disabled_is_silent_and_overflow_never_claims_full_coverage() {
+        let logs = LogCapture::default();
+        let _subscriber = tracing::subscriber::set_default(logs.subscriber());
+        let telemetry = DatabaseTelemetry::new(1);
+        telemetry.memory.set_enabled_for_test(false);
+        let reports = telemetry.collect_reports();
+        assert!(reports.memory.is_none());
+        reports.emit();
+        assert!(logs.text().is_empty());
+
+        telemetry.memory.set_enabled_for_test(true);
+        // Live observation slots can exceed the configured pool size during
+        // retirement. Hold them all, so registry omission cannot be concealed.
+        let slots: Vec<_> = (0..5).map(|_| telemetry.connection()).collect();
+        let report = telemetry.collect_reports().memory.unwrap();
+        assert_eq!(report.registrations, 5);
+        assert_eq!(report.rows.len(), 4);
+        assert_eq!(report.omitted_observations, 1);
+        assert!(
+            report
+                .rows
+                .iter()
+                .all(|row| report.row_state(row) == "never_sampled")
+        );
+        report.emit();
+        assert!(logs.text().contains("complete_pool_census=false"));
+        drop(slots);
+        // One report can copy the retiring value rows before reclaiming slots.
+        let _ = telemetry.collect_reports();
+        assert!(telemetry.connections.lock().unwrap().is_empty());
+        assert!(telemetry.collect_reports().memory.unwrap().rows.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn memory_diagnostics_preserve_canceled_transaction_retirement_and_mark_stale_slots() {
+        use diesel::connection::TransactionManager;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::with_timeouts(
+            directory.path().join("memory.sqlite").to_str().unwrap(),
+            1,
+            Duration::from_secs(3),
+            Duration::from_secs(15),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let telemetry = database.telemetry();
+        telemetry.memory.set_enabled_for_test(true);
+        database
+            .run_startup_migrations(|connection| {
+                use diesel::connection::SimpleConnection;
+                connection
+                    .batch_execute("CREATE TABLE memory_retirement(id INTEGER PRIMARY KEY)")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        settled(&database).await;
+        let first = telemetry.collect_reports().memory.unwrap();
+        assert_eq!(first.rows.len(), 1);
+        // The real monitor can advance an epoch between cleanup and this read.
+        // Freshness is reported, never manufactured by an extra checkout.
+        assert!(first.rows[0].sample.unwrap().values[0].bytes.unwrap() > 0);
+
+        let (entered, started) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let caller = tokio::spawn({
+            let database = database.clone();
+            async move {
+                database.run(move |connection| {
+                    <diesel::SqliteConnection as diesel::Connection>::TransactionManager::begin_transaction(connection)?;
+                    let _ = entered.send(());
+                    released.recv().unwrap();
+                    Ok::<_, diesel::result::Error>(())
+                }).await
+            }
+        });
+        started.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(database.state().admitted_operations > 0);
+        let while_running = telemetry.collect_reports().memory.unwrap();
+        assert_eq!(while_running.row_state(&while_running.rows[0]), "stale");
+        // A numeric report must not hold a lease or keep the opaque worker alive.
+        let _ = release.send(());
+        wait_for(|| database.state().connections == 0 && database.state().admitted_operations == 0)
+            .await;
+        wait_for(|| telemetry.memory.disposal_events() == 1).await;
+        // This only counted instrumentation disposal, not sqlite3_close success.
+        let retired = telemetry.collect_reports().memory.unwrap();
+        assert!(retired.rows.iter().all(|row| row.disposed));
+        let inner = Arc::downgrade(&database.0);
+        drop(database);
+        wait_for(|| inner.upgrade().is_none()).await;
+        drop((first, while_running, retired));
+    }
+
+    #[test]
+    fn memory_sample_ages_include_time_waiting_to_emit() {
+        let logs = LogCapture::default();
+        let mut report = memory::Report::new(1, 2, 4);
+        // A connection can finish sampling after global collection has begun.
+        let captured = Instant::now();
+        report.rows.push(memory::Row {
+            sequence: 0,
+            disposed: false,
+            sample: Some(memory::Sample {
+                epoch: 1,
+                began: captured,
+                ended: captured,
+                values: [memory::Value {
+                    rc: 0,
+                    bytes: Some(1),
+                }; 4],
+            }),
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        tracing::subscriber::with_default(logs.subscriber(), || report.emit());
+        let text = logs.text();
+        for (event, field) in [
+            ("SQLite memory diagnostic summary", "global_sample_age_us="),
+            ("SQLite connection memory diagnostic", "sample_age_us="),
+        ] {
+            let line = text.lines().find(|line| line.contains(event)).unwrap();
+            let value = line
+                .split_once(field)
+                .unwrap()
+                .1
+                .split_whitespace()
+                .next()
+                .unwrap();
+            let age: u64 = value
+                .trim_start_matches("Some(")
+                .trim_end_matches(')')
+                .parse()
+                .unwrap();
+            assert!(
+                age >= 20_000,
+                "capture-time ages must not hide queued output"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

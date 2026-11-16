@@ -17,7 +17,9 @@ use contrix_core::schema::users::dsl as u;
 
 use crate::handlers::access::{authorize_file_access, load_accessible_file};
 use crate::services::StorageBackend;
-use crate::services::wopi_sessions::{validate_active_jwt_session, validate_session_hash};
+use crate::services::wopi_sessions::{
+    WopiSession, validate_active_jwt_session, validate_session_hash,
+};
 use crate::state::AppState;
 
 const WOPI_LOCK_TTL_MINUTES: i64 = 30;
@@ -45,13 +47,21 @@ async fn validate_wopi_token(
     state: &AppState,
     file_id: &str,
 ) -> Result<String, AppError> {
+    Ok(validate_wopi_session(req, state, file_id).await?.user_id)
+}
+
+async fn validate_wopi_session(
+    req: &mut Request,
+    state: &AppState,
+    file_id: &str,
+) -> Result<WopiSession, AppError> {
     let token = extract_wopi_token(req).await?;
     let session = state
         .wopi_sessions
         .validate(&token, file_id)
         .ok_or_else(|| AppError::Auth("Invalid or expired WOPI session token".into()))?;
-    let active = validate_session_hash(state, &session.user_id, &session.source_token_hash).await?;
-    Ok(active.user_id)
+    validate_session_hash(state, &session.user_id, &session.source_token_hash).await?;
+    Ok(session)
 }
 
 fn file_id_from_wopi_src(wopi_src: &str) -> Option<String> {
@@ -246,6 +256,7 @@ async fn change_wopi_lock(
     operation: &str,
     requested: &str,
     old: &str,
+    session: &WopiSession,
 ) -> Result<LockChange, AppError> {
     if requested.is_empty() || requested.len() > 1024 || old.len() > 1024 {
         return Err(AppError::Validation(
@@ -259,10 +270,12 @@ async fn change_wopi_lock(
         requested.to_owned(),
         old.to_owned(),
     );
+    let session = session.clone();
     state
         .db
         .run(move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
+                session.validate_write_in_transaction(conn)?;
                 let file = diesel::RunQueryDsl::first::<File>(f::files.find(&file_id), conn)?;
                 crate::services::persistence::authorize(conn, &file, &user_id, "editor")?;
                 let mut existing =
@@ -364,9 +377,17 @@ async fn save_file_bytes(
     state: &AppState,
     file_row: &File,
     data: &[u8],
-    actor_id: &str,
     lock_token: &str,
+    session: &WopiSession,
+    source: &File,
 ) -> Result<String, AppError> {
+    if file_row.is_folder {
+        return Err(AppError::Conflict(
+            "A folder already uses the requested target name".into(),
+        ));
+    }
+    let authorization = session.write_authorization(source, Some(lock_token))?;
+    let actor_id = session.user_id.as_str();
     let linked_document = d::documents
         .filter(d::file_id.eq(&file_row.id))
         .select((d::id, d::version))
@@ -380,7 +401,7 @@ async fn save_file_bytes(
         let _: serde_json::Value = serde_json::from_str(&content).map_err(|_| {
             AppError::Validation("Linked document content must be valid JSON".into())
         })?;
-        return crate::services::persistence::commit_document_with_lock(
+        return crate::services::persistence::commit_document_with_wopi_authorization(
             &state.db,
             &state.storage,
             &document_id,
@@ -389,6 +410,7 @@ async fn save_file_bytes(
             content,
             Some("WOPI save".into()),
             Some(lock_token.to_owned()),
+            &authorization,
         )
         .await
         .map(|version| version.to_string());
@@ -410,7 +432,13 @@ async fn save_file_bytes(
         i64::try_from(data.len()).map_err(|_| AppError::Validation("File too large".into()))?;
     let result = crate::services::persistence::commit_blob(&state.db, new_path, move |conn| {
         conn.immediate_transaction::<_, AppError, _>(|conn| {
+            authorization.validate_in_transaction(conn)?;
             let current = diesel::RunQueryDsl::first::<File>(f::files.find(&original.id), conn)?;
+            if current.is_folder {
+                return Err(AppError::Conflict(
+                    "A folder already uses the requested target name".into(),
+                ));
+            }
             crate::services::persistence::authorize(conn, &current, &actor, "editor")?;
             crate::services::persistence::check_file_lock(conn, &current.id, &actor, Some(&token))?;
             if current.path != original.path || current.updated_at != original.updated_at {
@@ -445,20 +473,25 @@ async fn save_file_bytes(
 
 async fn sibling_exists(
     conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
-    owner_id: &str,
-    parent_id: &Option<String>,
+    scope: &File,
     name: &str,
     exclude_id: Option<&str>,
 ) -> Result<bool, AppError> {
     let mut query = f::files
         .into_boxed()
-        .filter(f::owner_id.eq(owner_id))
         .filter(f::name.eq(name))
         .filter(f::is_trashed.eq(false));
-    query = if let Some(parent_id) = parent_id {
+    query = if let Some(parent_id) = &scope.parent_id {
         query.filter(f::parent_id.eq(parent_id))
     } else {
         query.filter(f::parent_id.is_null())
+    };
+    query = if let Some(room) = &scope.room_id {
+        query.filter(f::room_id.eq(room))
+    } else {
+        query
+            .filter(f::room_id.is_null())
+            .filter(f::owner_id.eq(&scope.owner_id))
     };
 
     if let Some(file_id) = exclude_id {
@@ -481,7 +514,6 @@ fn sibling_exists_sync(
 ) -> Result<bool, AppError> {
     let mut query = f::files
         .into_boxed()
-        .filter(f::owner_id.eq(&scope.owner_id))
         .filter(f::name.eq(name))
         .filter(f::is_trashed.eq(false));
     query = if let Some(parent) = &scope.parent_id {
@@ -492,7 +524,9 @@ fn sibling_exists_sync(
     query = if let Some(room) = &scope.room_id {
         query.filter(f::room_id.eq(room))
     } else {
-        query.filter(f::room_id.is_null())
+        query
+            .filter(f::room_id.is_null())
+            .filter(f::owner_id.eq(&scope.owner_id))
     };
     if let Some(exclude) = exclude {
         query = query.filter(f::id.ne(exclude));
@@ -502,13 +536,12 @@ fn sibling_exists_sync(
 
 async fn next_available_name(
     conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
-    owner_id: &str,
-    parent_id: &Option<String>,
+    scope: &File,
     desired_name: &str,
     exclude_id: Option<&str>,
 ) -> Result<String, AppError> {
     let desired_name = sanitize_file_name(desired_name);
-    if !sibling_exists(conn, owner_id, parent_id, &desired_name, exclude_id).await? {
+    if !sibling_exists(conn, scope, &desired_name, exclude_id).await? {
         return Ok(desired_name);
     }
 
@@ -529,7 +562,7 @@ async fn next_available_name(
         } else {
             format!("{stem} ({index}).{ext}")
         };
-        if !sibling_exists(conn, owner_id, parent_id, &candidate, exclude_id).await? {
+        if !sibling_exists(conn, scope, &candidate, exclude_id).await? {
             return Ok(candidate);
         }
         index += 1;
@@ -1044,13 +1077,14 @@ pub async fn get_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
 pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
     let file_id_param: String = req.param("file_id").unwrap_or_default();
-    let uid = match validate_wopi_token(req, &state, &file_id_param).await {
-        Ok(id) => id,
+    let session = match validate_wopi_session(req, &state, &file_id_param).await {
+        Ok(session) => session,
         Err(e) => {
             render_wopi_error(res, e);
             return;
         }
     };
+    let uid = session.user_id.clone();
     let request_lock = req
         .headers()
         .get("X-WOPI-Lock")
@@ -1098,14 +1132,23 @@ pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
         }
     };
 
-    let item_version =
-        match save_file_bytes(&mut conn, &state, &file_row, &data, &uid, &request_lock).await {
-            Ok(version) => version,
-            Err(e) => {
-                render_wopi_error(res, e);
-                return;
-            }
-        };
+    let item_version = match save_file_bytes(
+        &mut conn,
+        &state,
+        &file_row,
+        &data,
+        &request_lock,
+        &session,
+        &file_row,
+    )
+    .await
+    {
+        Ok(version) => version,
+        Err(e) => {
+            render_wopi_error(res, e);
+            return;
+        }
+    };
 
     res.status_code(StatusCode::OK);
     res.headers_mut().insert(
@@ -1122,13 +1165,14 @@ pub async fn put_file_contents(req: &mut Request, depot: &mut Depot, res: &mut R
 pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
     let file_id_param: String = req.param("file_id").unwrap_or_default();
-    let uid = match validate_wopi_token(req, &state, &file_id_param).await {
-        Ok(id) => id,
+    let session = match validate_wopi_session(req, &state, &file_id_param).await {
+        Ok(session) => session,
         Err(e) => {
             render_wopi_error(res, e);
             return;
         }
     };
+    let uid = session.user_id.clone();
     let override_header = req
         .headers()
         .get("X-WOPI-Override")
@@ -1183,6 +1227,7 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 &override_header,
                 &request_lock,
                 &old_lock,
+                &session,
             )
             .await
             {
@@ -1247,7 +1292,6 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 .unwrap_or(false);
             let mut target_query = f::files
                 .into_boxed()
-                .filter(f::owner_id.eq(&file_row.owner_id))
                 .filter(f::name.eq(&desired_name))
                 .filter(f::is_trashed.eq(false));
             target_query = if let Some(parent) = &file_row.parent_id {
@@ -1258,7 +1302,9 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
             target_query = if let Some(room) = &file_row.room_id {
                 target_query.filter(f::room_id.eq(room))
             } else {
-                target_query.filter(f::room_id.is_null())
+                target_query
+                    .filter(f::room_id.is_null())
+                    .filter(f::owner_id.eq(&file_row.owner_id))
             };
             let existing_target = match target_query.first::<File>(&mut conn).await.optional() {
                 Ok(target) => target,
@@ -1281,10 +1327,9 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 if !overwrite {
                     let valid_name = match next_available_name(
                         &mut conn,
-                        &file_row.owner_id,
-                        &file_row.parent_id,
+                        &file_row,
                         &desired_name,
-                        Some(&existing_target.id),
+                        None,
                     )
                     .await
                     {
@@ -1304,21 +1349,16 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
 
                 match load_active_lock(&mut conn, &existing_target.id).await {
                     Ok(Some(target_lock)) if target_lock.lock_token != request_lock => {
-                        let valid_name = match next_available_name(
-                            &mut conn,
-                            &file_row.owner_id,
-                            &file_row.parent_id,
-                            &desired_name,
-                            Some(&existing_target.id),
-                        )
-                        .await
-                        {
-                            Ok(name) => name,
-                            Err(e) => {
-                                render_wopi_error(res, e);
-                                return;
-                            }
-                        };
+                        let valid_name =
+                            match next_available_name(&mut conn, &file_row, &desired_name, None)
+                                .await
+                            {
+                                Ok(name) => name,
+                                Err(e) => {
+                                    render_wopi_error(res, e);
+                                    return;
+                                }
+                            };
                         res.status_code(StatusCode::CONFLICT);
                         res.headers_mut().insert(
                             "X-WOPI-ValidRelativeTarget",
@@ -1338,8 +1378,9 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                     &state,
                     &existing_target,
                     &data,
-                    &uid,
                     &request_lock,
+                    &session,
+                    &file_row,
                 )
                 .await
                 {
@@ -1406,9 +1447,11 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
             let actor = uid.clone();
             let token = request_lock.clone();
             let original = file_row.clone();
+            let session = session.clone();
             let insertion =
                 crate::services::persistence::commit_blob(&state.db, orphan_path, move |conn| {
                     conn.immediate_transaction::<_, AppError, _>(|conn| {
+                        session.validate_write_in_transaction(conn)?;
                         let current =
                             diesel::RunQueryDsl::first::<File>(f::files.find(&original.id), conn)?;
                         crate::services::persistence::authorize(conn, &current, &actor, "editor")?;
@@ -1492,15 +1535,7 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
                 return;
             }
 
-            match sibling_exists(
-                &mut conn,
-                &file_row.owner_id,
-                &file_row.parent_id,
-                &requested_name,
-                Some(&file_row.id),
-            )
-            .await
-            {
+            match sibling_exists(&mut conn, &file_row, &requested_name, Some(&file_row.id)).await {
                 Ok(true) => {
                     render_wopi_error(
                         res,
@@ -1518,10 +1553,12 @@ pub async fn wopi_file_operation(req: &mut Request, depot: &mut Depot, res: &mut
             let actor = uid.clone();
             let token = request_lock.clone();
             let target_name = requested_name.clone();
+            let session = session.clone();
             let renaming = state
                 .db
                 .run(move |conn| {
                     conn.immediate_transaction::<_, AppError, _>(|conn| {
+                        session.validate_write_in_transaction(conn)?;
                         let current =
                             diesel::RunQueryDsl::first::<File>(f::files.find(&file_row.id), conn)?;
                         crate::services::persistence::authorize(conn, &current, &actor, "editor")?;

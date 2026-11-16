@@ -3,6 +3,7 @@ pub mod audit;
 pub mod collaboration;
 pub mod database_backup;
 pub mod email;
+pub mod legacy_writer_layout;
 pub mod maintenance;
 pub mod notification;
 pub mod notification_bus;

@@ -865,6 +865,23 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     let new_name = StorageService::sanitize_file_name(&body.name);
     let now = Utc::now();
@@ -893,6 +910,12 @@ pub async fn update_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         .db
         .run(move |connection| {
             connection.immediate_transaction::<_, AppError, _>(|connection| {
+                crate::middleware::auth::validate_credential_in_transaction(
+                    connection,
+                    &credential,
+                    &method,
+                    &request_path,
+                )?;
                 let file =
                     diesel::RunQueryDsl::first::<File>(f::files.find(&rename_id), connection)?;
                 crate::services::persistence::authorize(connection, &file, &rename_user, "editor")?;
@@ -962,8 +985,35 @@ pub async fn delete_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         res.status_code(StatusCode::UNAUTHORIZED);
         return;
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
+
     let id: String = req.param("id").unwrap_or_default();
-    match crate::handlers::folders::trash_file_tree(&state.db, &id, &uid).await {
+    match crate::handlers::folders::trash_file_tree(
+        &state.db,
+        &id,
+        &uid,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
         Ok(_) => {
             crate::services::WebhookService::fire_event(
                 &state.db,
@@ -1008,11 +1058,32 @@ pub async fn move_file(req: &mut Request, depot: &mut Depot, res: &mut Response)
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
+
     match crate::handlers::folders::move_file_tree(
         &state.db,
         &id,
         &body.target_folder_id.to_string(),
         &uid,
+        &credential,
+        &method,
+        &request_path,
     )
     .await
     {
@@ -1244,6 +1315,23 @@ pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Resp
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_error(res, error);
+        return;
+    }
 
     let now = Utc::now();
 
@@ -1270,14 +1358,31 @@ pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Resp
         }
     };
 
-    match diesel::update(f::files.filter(f::id.eq(&target.id)))
-        .set((
-            f::sort_order.eq(body.sort_order),
-            f::updated_at.eq(now.to_rfc3339()),
-        ))
-        .execute(&mut conn)
-        .await
-    {
+    let result = state
+        .db
+        .run(move |conn| {
+            conn.immediate_transaction::<_, AppError, _>(|conn| {
+                crate::middleware::auth::validate_credential_in_transaction(
+                    conn,
+                    &credential,
+                    &method,
+                    &request_path,
+                )?;
+                let file = diesel::RunQueryDsl::first::<File>(f::files.find(&target.id), conn)?;
+                crate::services::persistence::authorize_including_trashed(
+                    conn, &file, &uid, "editor",
+                )?;
+                Ok(diesel::RunQueryDsl::execute(
+                    diesel::update(f::files.find(&target.id)).set((
+                        f::sort_order.eq(body.sort_order),
+                        f::updated_at.eq(now.to_rfc3339()),
+                    )),
+                    conn,
+                )?)
+            })
+        })
+        .await;
+    match result {
         Ok(0) => {
             res.status_code(StatusCode::NOT_FOUND);
             res.render(Json(ApiResponse::<()>::err(
@@ -1290,8 +1395,6 @@ pub async fn set_file_order(req: &mut Request, depot: &mut Depot, res: &mut Resp
                 serde_json::json!({ "message": "Sort order updated" }),
             )));
         }
-        Err(e) => {
-            render_error(res, AppError::Database(e.to_string()));
-        }
+        Err(error) => render_error(res, error),
     }
 }

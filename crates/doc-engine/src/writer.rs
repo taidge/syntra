@@ -231,6 +231,10 @@ pub struct Style {
 /// trip through DOCX.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfessionalLayout {
+    /// Layout details not represented by the compact legacy paragraph model.
+    /// Entries refer to stable block identities and remain optional in old JSON.
+    #[serde(default)]
+    pub paragraph_formats: Vec<ParagraphFormat>,
     pub header: String,
     pub footer: String,
     pub page_numbers: bool,
@@ -242,6 +246,19 @@ pub struct ProfessionalLayout {
     pub bibliography: Vec<BibliographyEntry>,
     pub mail_merge_fields: Vec<MailMergeField>,
     pub revisions: Vec<DocumentRevision>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParagraphFormat {
+    pub block_id: Uuid,
+    pub first_line_indent_pt: Option<f32>,
+    pub first_line_indent_chars: Option<f32>,
+    pub left_indent_pt: Option<f32>,
+    pub right_indent_pt: Option<f32>,
+    pub line_height_pt: Option<f32>,
+    pub numbering_label: Option<String>,
+    pub alignment: Option<Alignment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

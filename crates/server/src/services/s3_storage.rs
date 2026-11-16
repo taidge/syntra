@@ -17,6 +17,8 @@ pub struct S3Storage {
     access_key: String,
     secret_key: String,
     endpoint: String,
+    #[cfg(test)]
+    bypass_proxy_for_tests: bool,
     pub(crate) registry: std::sync::OnceLock<crate::state::DbPool>,
 }
 
@@ -38,6 +40,8 @@ impl S3Storage {
             access_key: access_key.to_string(),
             secret_key: secret_key.to_string(),
             endpoint: endpoint.to_string(),
+            #[cfg(test)]
+            bypass_proxy_for_tests: false,
             registry: std::sync::OnceLock::new(),
         }
     }
@@ -80,6 +84,13 @@ impl S3Storage {
 
     // -- internal helpers ----------------------------------------------------
 
+    /// Keep a loopback unit-test fixture independent of the host's proxy setup.
+    #[cfg(test)]
+    pub(crate) fn without_proxy_for_tests(mut self) -> Self {
+        self.bypass_proxy_for_tests = true;
+        self
+    }
+
     /// Generate the full URL for an object key.
     fn object_url(&self, key: &str) -> String {
         let key = encode_path(key);
@@ -104,6 +115,13 @@ impl S3Storage {
 
     /// Build a shared `reqwest::Client`.
     fn client(&self) -> reqwest::Client {
+        #[cfg(test)]
+        if self.bypass_proxy_for_tests {
+            return reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build direct client for loopback unit-test fixture");
+        }
         reqwest::Client::new()
     }
 

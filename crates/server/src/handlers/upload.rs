@@ -118,6 +118,23 @@ pub async fn create_upload_session(req: &mut Request, depot: &mut Depot, res: &m
             return;
         }
     };
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        render_app_error(res, AppError::Auth("Not authenticated".into()));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        render_app_error(res, error);
+        return;
+    }
 
     let max_size = max_upload_bytes(state.config.storage.max_upload_size_mb)
         .min(MAX_UPLOAD_CHUNK_BYTES as i64 * MAX_UPLOAD_CHUNKS as i64);
@@ -190,6 +207,12 @@ pub async fn create_upload_session(req: &mut Request, depot: &mut Depot, res: &m
         .db
         .run(move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
+                crate::middleware::auth::validate_credential_in_transaction(
+                    conn,
+                    &credential,
+                    &method,
+                    &request_path,
+                )?;
                 crate::services::persistence::reserve_upload_session(
                     conn,
                     &new_session.user_id,

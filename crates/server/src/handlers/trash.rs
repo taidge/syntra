@@ -103,6 +103,114 @@ pub async fn list_trashed(depot: &mut Depot, res: &mut Response) {
 // POST /trash/:id/restore
 // ---------------------------------------------------------------------------
 
+fn restore_trashed_tree(
+    conn: &mut SqliteConnection,
+    file_id: &str,
+    user: &str,
+) -> Result<usize, AppError> {
+    use diesel::OptionalExtension;
+
+    let root = diesel::RunQueryDsl::first::<File>(f::files.find(file_id), conn)
+        .optional()?
+        .ok_or_else(|| AppError::NotFound("Trashed file not found".into()))?;
+    if root.room_id.is_none() && root.owner_id != user {
+        return Err(AppError::NotFound("Trashed file not found".into()));
+    }
+    crate::services::persistence::authorize_including_trashed(conn, &root, user, "admin")?;
+    if !root.is_trashed {
+        return Err(AppError::NotFound("Trashed file not found".into()));
+    }
+
+    #[derive(diesel::QueryableByName)]
+    struct Member {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        id: String,
+    }
+    // Restore only this subtree's reachable members of the deletion action.
+    // An older trashed ancestor is a barrier: leave its descendants' membership
+    // intact so they can be restored after that ancestor. Older rows have no
+    // batch; their timestamps cannot prove membership.
+    let members = diesel::RunQueryDsl::load::<Member>(
+        diesel::sql_query(
+            "WITH RECURSIVE deletion_batch(batch_id) AS \
+             (SELECT batch_id FROM trash_batch_members WHERE file_id = ?), subtree(id) AS \
+             (SELECT ? UNION SELECT files.id FROM files JOIN subtree ON files.parent_id = subtree.id \
+              WHERE files.is_trashed = 0 OR files.id IN \
+              (SELECT file_id FROM trash_batch_members WHERE batch_id IN (SELECT batch_id FROM deletion_batch))) \
+             SELECT members.file_id AS id FROM trash_batch_members members \
+             JOIN files ON files.id = members.file_id \
+             WHERE members.batch_id IN (SELECT batch_id FROM deletion_batch) \
+             AND files.is_trashed = 1 AND files.id IN (SELECT id FROM subtree)",
+        )
+        .bind::<diesel::sql_types::Text, _>(file_id)
+        .bind::<diesel::sql_types::Text, _>(file_id),
+        conn,
+    )?;
+    let ids: Vec<String> = if members.is_empty() {
+        vec![root.id]
+    } else {
+        members.into_iter().map(|member| member.id).collect()
+    };
+    let restoring: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let rows = diesel::RunQueryDsl::load::<File>(f::files.filter(f::id.eq_any(&ids)), conn)?;
+    let mut names = std::collections::HashSet::new();
+    for file in &rows {
+        crate::services::persistence::authorize_including_trashed(conn, file, user, "admin")?;
+        if let Some(parent_id) = &file.parent_id {
+            let parent = diesel::RunQueryDsl::first::<File>(f::files.find(parent_id), conn)
+                .optional()?
+                .ok_or_else(|| AppError::Conflict("Parent folder no longer exists".into()))?;
+            crate::services::persistence::authorize_including_trashed(
+                conn, &parent, user, "admin",
+            )?;
+            if !parent.is_folder || (parent.is_trashed && !restoring.contains(parent_id.as_str())) {
+                return Err(AppError::Conflict("Restore the parent folder first".into()));
+            }
+        }
+        crate::handlers::folders::ensure_available_name(
+            conn,
+            &file.owner_id,
+            file.parent_id.as_deref(),
+            file.room_id.as_deref(),
+            &file.name,
+            Some(&file.id),
+        )?;
+        // Also detect conflicting names among the rows about to become active.
+        let namespace_owner = file.room_id.is_none().then_some(file.owner_id.as_str());
+        if !names.insert((
+            file.parent_id.as_deref(),
+            file.room_id.as_deref(),
+            namespace_owner,
+            file.name.as_str(),
+        )) {
+            return Err(AppError::Conflict(
+                "A sibling item with that name already exists".into(),
+            ));
+        }
+    }
+    let restored = diesel::RunQueryDsl::execute(
+        diesel::update(
+            f::files
+                .filter(f::id.eq_any(&ids))
+                .filter(f::is_trashed.eq(true)),
+        )
+        .set((
+            f::is_trashed.eq(false),
+            f::trashed_at.eq(None::<String>),
+            f::updated_at.eq(Utc::now().to_rfc3339()),
+        )),
+        conn,
+    )?;
+    for id in &ids {
+        diesel::RunQueryDsl::execute(
+            diesel::sql_query("DELETE FROM trash_batch_members WHERE file_id = ?")
+                .bind::<diesel::sql_types::Text, _>(id),
+            conn,
+        )?;
+    }
+    Ok(restored)
+}
+
 #[handler]
 pub async fn restore_file(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
@@ -117,36 +225,33 @@ pub async fn restore_file(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Auth("Not authenticated".into()).to_response(),
+        )));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
     let file_id_param: String = req.param("id").unwrap_or_default();
     let result = state
         .db
         .run(move |conn| {
-            use diesel::OptionalExtension;
             conn.immediate_transaction::<_, AppError, _>(|conn| {
-                let file = diesel::RunQueryDsl::first::<File>(f::files.find(&file_id_param), conn)
-                    .optional()?
-                    .ok_or_else(|| AppError::NotFound("Trashed file not found".into()))?;
-                crate::services::persistence::authorize_including_trashed(
-                    conn, &file, &uid, "admin",
-                )?;
-                if !file.is_trashed {
-                    return Err(AppError::NotFound("Trashed file not found".into()));
-                }
-                diesel::RunQueryDsl::execute(
-                    diesel::update(f::files.find(&file_id_param)).set((
-                        f::is_trashed.eq(false),
-                        f::trashed_at.eq(None::<String>),
-                        f::updated_at.eq(Utc::now().to_rfc3339()),
-                    )),
+                crate::middleware::auth::validate_credential_in_transaction(
                     conn,
+                    &credential,
+                    &method,
+                    &request_path,
                 )?;
-                Ok(())
+                restore_trashed_tree(conn, &file_id_param, &uid)
             })
         })
         .await;
     match result {
-        Ok(()) => res.render(Json(ApiResponse::ok(
-            serde_json::json!({"message":"File restored"}),
+        Ok(restored_count) => res.render(Json(ApiResponse::ok(
+            serde_json::json!({"message":"File restored", "restored_count":restored_count}),
         ))),
         Err(error) => {
             res.status_code(
@@ -177,9 +282,25 @@ pub async fn permanently_delete(req: &mut Request, depot: &mut Depot, res: &mut 
     };
 
     let file_id_param: String = req.param("id").unwrap_or_default();
-
-    match crate::services::persistence::purge_trashed(&state.db, &file_id_param, Some(&uid), None)
-        .await
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Auth("Not authenticated".into()).to_response(),
+        )));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    match crate::services::persistence::purge_trashed_with_credential(
+        &state.db,
+        &file_id_param,
+        Some(&uid),
+        None,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
     {
         Ok(count) => {
             crate::services::persistence::request_gc(&state.db, &state.storage);
@@ -202,7 +323,7 @@ pub async fn permanently_delete(req: &mut Request, depot: &mut Depot, res: &mut 
 // ---------------------------------------------------------------------------
 
 #[handler]
-pub async fn empty_trash(depot: &mut Depot, res: &mut Response) {
+pub async fn empty_trash(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let state = crate::require_app_state!(depot, res);
     let uid = match get_user_id(depot) {
         Some(val) => val,
@@ -214,6 +335,30 @@ pub async fn empty_trash(depot: &mut Depot, res: &mut Response) {
             return;
         }
     };
+
+    let Some(credential) = crate::middleware::auth::get_credential(depot) else {
+        res.status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(ApiResponse::<()>::err(
+            AppError::Auth("Not authenticated".into()).to_response(),
+        )));
+        return;
+    };
+    let method = req.method().clone();
+    let request_path = req.uri().path().to_owned();
+    if let Err(error) = crate::middleware::auth::validate_credential_for_request(
+        &state,
+        &credential,
+        &method,
+        &request_path,
+    )
+    .await
+    {
+        res.status_code(
+            StatusCode::from_u16(error.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        );
+        res.render(Json(ApiResponse::<()>::err(error.to_response())));
+        return;
+    }
 
     let mut conn = match state.db.get() {
         Ok(c) => c,
@@ -252,8 +397,16 @@ pub async fn empty_trash(depot: &mut Depot, res: &mut Response) {
 
     let mut count = 0;
     for file in trashed_files {
-        match crate::services::persistence::purge_trashed(&state.db, &file.id, Some(&uid), None)
-            .await
+        match crate::services::persistence::purge_trashed_with_credential(
+            &state.db,
+            &file.id,
+            Some(&uid),
+            None,
+            &credential,
+            &method,
+            &request_path,
+        )
+        .await
         {
             Ok(deleted) => count += deleted,
             Err(AppError::NotFound(_)) => {} // Already removed as part of a subtree.

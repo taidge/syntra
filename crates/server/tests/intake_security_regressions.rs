@@ -116,6 +116,80 @@ async fn count(server: &TestServer, sql: String) -> i64 {
 }
 
 #[tokio::test]
+async fn scoped_keys_keep_the_same_decoded_route_during_final_write_validation() {
+    let server = TestServer::new().await;
+    let (jwt, _) = server
+        .register(
+            "encoded_write",
+            "encoded_write@test.invalid",
+            "Password123!",
+        )
+        .await;
+    let (file, _) = server.create_folder(&jwt, "ordered", None).await;
+    let key = create(
+        &server,
+        &jwt,
+        "/api/v1/api-keys",
+        json!({"name":"order","permissions":"files:write"}),
+    )
+    .await;
+    let unrelated = create(
+        &server,
+        &jwt,
+        "/api/v1/api-keys",
+        json!({"name":"other","permissions":"documents:write"}),
+    )
+    .await;
+    for (index, path) in [
+        format!("/api/v1/files/{file}/order"),
+        format!("/api/v1/%66iles/{file}/order"),
+        format!("/api//v1//files/{file}//order/"),
+        format!("/api/v1/%66iles/{file}/%6frder"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let order = index as i32 + 1;
+        let response = server
+            .client
+            .put(server.url(&path))
+            .bearer_auth(key["key"].as_str().unwrap())
+            .json(&json!({"sort_order":order}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(status, 200, "{path}: {body}");
+        assert_eq!(
+            count(
+                &server,
+                format!("SELECT SUM(sort_order) AS value FROM files WHERE id='{file}'")
+            )
+            .await,
+            i64::from(order)
+        );
+        let denied = server
+            .client
+            .put(server.url(&path))
+            .bearer_auth(unrelated["key"].as_str().unwrap())
+            .json(&json!({"sort_order":999}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 403, "{path}");
+        assert_eq!(
+            count(
+                &server,
+                format!("SELECT SUM(sort_order) AS value FROM files WHERE id='{file}'")
+            )
+            .await,
+            i64::from(order)
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_key_downgraded_during_a_json_body_cannot_commit_document_content() {
     let server = TestServer::new().await;
     let (jwt, _) = server
@@ -190,6 +264,341 @@ async fn a_key_downgraded_during_a_json_body_cannot_commit_document_content() {
         .await,
         before
     );
+}
+
+#[tokio::test]
+async fn credentials_changed_during_create_body_cannot_create_or_charge_a_document() {
+    let server = TestServer::new().await;
+    let (jwt, _) = server
+        .register(
+            "create_intake",
+            "create_intake@test.invalid",
+            "Password123!",
+        )
+        .await;
+    let key = create(
+        &server,
+        &jwt,
+        "/api/v1/api-keys",
+        json!({"name":"create writer","permissions":"documents:write"}),
+    )
+    .await;
+    let body =
+        serde_json::to_vec(&json!({"name":"must not exist","document_type":"writer"})).unwrap();
+    for revoke_jwt in [false, true] {
+        let token = if revoke_jwt {
+            jwt.as_str()
+        } else {
+            key["key"].as_str().unwrap()
+        };
+        let socket = begin_body(
+            &server,
+            "POST",
+            "/api/v1/documents",
+            token,
+            "application/json",
+            &body,
+        )
+        .await;
+        if revoke_jwt {
+            revoke(&server, &jwt).await;
+        } else {
+            let key_id = key["id"].as_str().unwrap().to_owned();
+            server
+                .db
+                .run(move |conn| {
+                    diesel::sql_query("UPDATE api_keys SET permissions='documents:read' WHERE id=?")
+                        .bind::<Text, _>(key_id)
+                        .execute(conn)
+                })
+                .await
+                .unwrap();
+        }
+        let (status, error, wire) = finish_body(socket, &body).await;
+        assert_eq!(status, if revoke_jwt { 401 } else { 403 }, "{wire}");
+        assert_eq!(error["success"], false);
+        for sql in [
+            "SELECT COUNT(*) AS value FROM documents",
+            "SELECT COUNT(*) AS value FROM files",
+            "SELECT SUM(storage_used) AS value FROM users",
+        ] {
+            assert_eq!(count(&server, sql.into()).await, 0, "{sql}");
+        }
+    }
+}
+
+async fn metadata_snapshot(server: &TestServer) -> Value {
+    server.db.run(|conn| {
+        use contrix_core::{
+            models::{Document, File, FileReadStatus, FileTag, UploadSession},
+            schema::{documents, file_read_status, file_tags, files, upload_sessions, users},
+        };
+        use diesel::prelude::*;
+        conn.transaction::<_, contrix_core::error::AppError, _>(|conn| {
+            Ok(json!({
+                "files": files::table.order(files::id).load::<File>(conn)?,
+                "documents": documents::table.order(documents::id).load::<Document>(conn)?,
+                "tags": file_tags::table.order(file_tags::id).load::<FileTag>(conn)?,
+                "read_status": file_read_status::table.order(file_read_status::id).load::<FileReadStatus>(conn)?,
+                "uploads": upload_sessions::table.order(upload_sessions::id).load::<UploadSession>(conn)?,
+                "quota": users::table.order(users::id).select((users::id, users::storage_used)).load::<(String, i64)>(conn)?,
+            }))
+        })
+    }).await.unwrap()
+}
+
+#[tokio::test]
+async fn downgraded_key_during_metadata_bodies_cannot_mutate_or_reserve_storage() {
+    let server = TestServer::new().await;
+    let (jwt, _) = server
+        .register(
+            "metadata_intake",
+            "metadata_intake@test.invalid",
+            "Password123!",
+        )
+        .await;
+    let document = create(
+        &server,
+        &jwt,
+        "/api/v1/documents",
+        json!({"name":"unchanged document","document_type":"writer"}),
+    )
+    .await;
+    let file = document["file_id"].as_str().unwrap();
+    let folder = create(
+        &server,
+        &jwt,
+        "/api/v1/folders",
+        json!({"name":"destination"}),
+    )
+    .await;
+    let folder = folder["id"].as_str().unwrap();
+    let tag = create(
+        &server,
+        &jwt,
+        "/api/v1/tags",
+        json!({"name":"metadata tag"}),
+    )
+    .await;
+    let tag = tag["id"].as_str().unwrap();
+    let before = metadata_snapshot(&server).await;
+    let cases = [
+        (
+            "PUT",
+            format!("/api/v1/files/{file}"),
+            json!({"name":"must not rename"}),
+        ),
+        (
+            "POST",
+            format!("/api/v1/files/{file}/move"),
+            json!({"target_folder_id":folder}),
+        ),
+        (
+            "PUT",
+            format!("/api/v1/files/{file}/order"),
+            json!({"sort_order":99}),
+        ),
+        (
+            "POST",
+            "/api/v1/folders".into(),
+            json!({"name":"must not create"}),
+        ),
+        (
+            "PUT",
+            format!("/api/v1/folders/{folder}"),
+            json!({"name":"must not rename"}),
+        ),
+        (
+            "POST",
+            "/api/v1/upload/sessions".into(),
+            json!({"file_name":"blocked.txt","total_size":4}),
+        ),
+        (
+            "POST",
+            "/api/v1/files/batch/delete".into(),
+            json!({"file_ids":[file]}),
+        ),
+        (
+            "POST",
+            "/api/v1/files/batch/move".into(),
+            json!({"file_ids":[file],"target_folder_id":folder}),
+        ),
+        (
+            "POST",
+            "/api/v1/files/batch/tag".into(),
+            json!({"file_ids":[file],"tag_id":tag}),
+        ),
+        (
+            "POST",
+            "/api/v1/files/batch/mark-read".into(),
+            json!({"file_ids":[file]}),
+        ),
+        (
+            "POST",
+            "/api/v1/files/batch/duplicate".into(),
+            json!({"file_ids":[file]}),
+        ),
+    ];
+    for (index, (method, path, value)) in cases.into_iter().enumerate() {
+        let key = create(
+            &server,
+            &jwt,
+            "/api/v1/api-keys",
+            json!({"name":format!("metadata writer {index}"),"permissions":"write"}),
+        )
+        .await;
+        let body = serde_json::to_vec(&value).unwrap();
+        let socket = begin_body(
+            &server,
+            method,
+            &path,
+            key["key"].as_str().unwrap(),
+            "application/json",
+            &body,
+        )
+        .await;
+        let key_id = key["id"].as_str().unwrap().to_owned();
+        server
+            .db
+            .run(move |conn| {
+                diesel::sql_query("UPDATE api_keys SET permissions='read' WHERE id=?")
+                    .bind::<Text, _>(key_id)
+                    .execute(conn)
+            })
+            .await
+            .unwrap();
+        let (status, error, wire) = finish_body(socket, &body).await;
+        assert_eq!(status, 403, "{method} {path}: {wire}");
+        assert_eq!(error["success"], false);
+        assert_eq!(
+            metadata_snapshot(&server).await,
+            before,
+            "{method} {path} changed durable state"
+        );
+    }
+}
+
+#[tokio::test]
+async fn credentials_changed_during_restore_body_cannot_restore_an_old_version() {
+    let server = TestServer::new().await;
+    let (jwt, _) = server
+        .register(
+            "restore_intake",
+            "restore_intake@test.invalid",
+            "Password123!",
+        )
+        .await;
+    let (observer, _) = server
+        .login("restore_intake@test.invalid", "Password123!")
+        .await;
+    let document = create(
+        &server,
+        &observer,
+        "/api/v1/documents",
+        json!({"name":"restore intake","document_type":"writer"}),
+    )
+    .await;
+    let id = document["id"].as_str().unwrap();
+    let mut current_content = document["content"].clone();
+    current_content["title"] = json!("newer content must survive");
+    let saved = server
+        .client
+        .put(server.url(&format!("/api/v1/documents/{id}")))
+        .bearer_auth(&observer)
+        .json(&json!({"content":current_content,"expected_version":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), 200);
+    let history: Value = server
+        .client
+        .get(server.url(&format!("/api/v1/documents/{id}/versions")))
+        .bearer_auth(&observer)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(history["data"].as_array().unwrap().len(), 1);
+    let version = history["data"][0]["id"].as_str().unwrap();
+    let key = create(
+        &server,
+        &observer,
+        "/api/v1/api-keys",
+        json!({"name":"restore writer","permissions":"documents:write"}),
+    )
+    .await;
+    let quota = count(
+        &server,
+        "SELECT SUM(storage_used) AS value FROM users".into(),
+    )
+    .await;
+    let body = serde_json::to_vec(&json!({"expected_version":2})).unwrap();
+    for revoke_jwt in [false, true] {
+        let token = if revoke_jwt {
+            jwt.as_str()
+        } else {
+            key["key"].as_str().unwrap()
+        };
+        let socket = begin_body(
+            &server,
+            "POST",
+            &format!("/api/v1/documents/{id}/restore/{version}"),
+            token,
+            "application/json",
+            &body,
+        )
+        .await;
+        if revoke_jwt {
+            revoke(&server, &jwt).await;
+        } else {
+            let key_id = key["id"].as_str().unwrap().to_owned();
+            server
+                .db
+                .run(move |conn| {
+                    diesel::sql_query("UPDATE api_keys SET permissions='documents:read' WHERE id=?")
+                        .bind::<Text, _>(key_id)
+                        .execute(conn)
+                })
+                .await
+                .unwrap();
+        }
+        let (status, error, wire) = finish_body(socket, &body).await;
+        assert_eq!(status, if revoke_jwt { 401 } else { 403 }, "{wire}");
+        assert_eq!(error["success"], false);
+        let current: Value = server
+            .client
+            .get(server.url(&format!("/api/v1/documents/{id}")))
+            .bearer_auth(&observer)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(current["data"]["version"], 2);
+        assert_eq!(current["data"]["content"], current_content);
+        let after: Value = server
+            .client
+            .get(server.url(&format!("/api/v1/documents/{id}/versions")))
+            .bearer_auth(&observer)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(after, history);
+        assert_eq!(
+            count(
+                &server,
+                "SELECT SUM(storage_used) AS value FROM users".into()
+            )
+            .await,
+            quota
+        );
+    }
 }
 
 #[tokio::test]

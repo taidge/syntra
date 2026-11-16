@@ -26,6 +26,7 @@ use futures_util::future::BoxFuture;
 use horme::GetConnection;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
+mod memory;
 pub(crate) mod telemetry;
 mod worker;
 
@@ -197,11 +198,42 @@ impl SqliteObservation {
     }
 }
 
+fn sample_requested_sqlite_memory(connection: &mut SqliteConnection) {
+    let Some(observation) = connection
+        .instrumentation()
+        .downcast_ref::<SqliteObservation>()
+    else {
+        return;
+    };
+    let epoch = observation.telemetry.memory_epoch();
+    if epoch == 0 {
+        return;
+    }
+    // This is only the existing numeric observation, never an opaque connection,
+    // Inner, Admission or WorkerControl owner. Release its lock before FFI.
+    let slot = observation.transaction.clone();
+    if slot
+        .lock()
+        .unwrap()
+        .memory
+        .is_some_and(|sample| sample.epoch == epoch)
+    {
+        return;
+    }
+    let sample = memory::sample(connection, epoch);
+    let mut observation = slot.lock().unwrap();
+    observation.memory = Some(sample);
+    observation.memory_pending = true;
+}
+
 impl Drop for SqliteObservation {
     fn drop(&mut self) {
         // Closing a connection ends its transaction; a monitor must not retain
         // a stale active-writer description after the physical owner retires.
         let _ = self.transaction.lock().unwrap().finish();
+        // Instrumentation replacement/disposal is not proof of physical close.
+        self.telemetry
+            .memory_observation_disposed(&self.transaction);
     }
 }
 
@@ -401,8 +433,11 @@ struct CleanupOwner {
 impl CleanupOwner {
     fn return_idle(mut self) {
         let mut connection = self.connection.take().expect("one cleanup owner");
-        connection.admission_anchor = None;
+        // Publish the physical pool slot before releasing its admission. A new
+        // caller must not consume that admission while the slot is still ours.
+        let admission = connection.admission_anchor.take();
         drop(connection);
+        drop(admission);
     }
 }
 impl Drop for CleanupOwner {
@@ -412,11 +447,9 @@ impl Drop for CleanupOwner {
         }
     }
 }
-impl Drop for DatabaseLease {
-    fn drop(&mut self) {
-        let Some(mut connection) = self.connection.take() else {
-            return;
-        };
+impl DatabaseLease {
+    fn take_cleanup(&mut self) -> Option<impl std::future::Future<Output = ()> + Send + use<>> {
+        let mut connection = self.connection.take()?;
         // This anchor remains inside the physical owner on timeout/cancellation.
         // In particular, an aborted unqueued cleanup cannot free admission while
         // its predecessor is still running on the native connection worker.
@@ -424,24 +457,47 @@ impl Drop for DatabaseLease {
         let mut owner = CleanupOwner {
             connection: Some(connection),
         };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
+        // SqliteRuntime starts its async coordinator during spawn_blocking.
+        // Without a runtime, drop the disposal owner before creating that job.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return None;
+        }
         let cleanup = owner.connection.as_mut().expect("one cleanup owner")
             .connection.as_mut().expect("live physical connection")
             .spawn_blocking(move |connection| {
                 let status = <SqliteConnection as Connection>::TransactionManager::transaction_manager_status_mut(connection);
                 if matches!(status, TransactionManagerStatus::Valid(valid) if valid.transaction_depth().is_none()) {
+                    sample_requested_sqlite_memory(connection);
                     Ok(())
                 } else {
                     Err(Error::RollbackTransaction)
                 }
             });
-        runtime.spawn(async move {
+        Some(async move {
             if cleanup.await.is_ok() {
                 owner.return_idle();
             }
-        });
+        })
+    }
+
+    async fn finish(mut self) {
+        if let Some(cleanup) = self.take_cleanup() {
+            // Cancellation drops CleanupOwner and disposes the connection; its
+            // physical owner's admission still outlives any native work.
+            cleanup.await;
+        }
+    }
+}
+
+impl Drop for DatabaseLease {
+    fn drop(&mut self) {
+        let Some(cleanup) = self.take_cleanup() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(cleanup);
     }
 }
 
@@ -685,11 +741,23 @@ impl Database {
             .await
             .map_err(query_error)
             .map_err(E::from)?;
-        observe_database_operation(|| {
+        let result = observe_database_operation(|| {
             connection.spawn_blocking(move |connection| Ok(callback(connection)))
         })
-        .await
-        .map_err(E::from)?
+        .await;
+        match result {
+            Ok(result) => {
+                // The callback has finished. Do not accumulate its cleanup as
+                // hidden admission pressure across sequential short queries.
+                // Cleanup failure retires the slot without changing a possibly
+                // committed business result into a retryable error.
+                connection.finish().await;
+                result
+            }
+            // An overdue/running callback retains the existing Drop fallback;
+            // never extend an operation deadline by awaiting a second barrier.
+            Err(error) => Err(E::from(error)),
+        }
     }
 
     /// Open the first pooled connection and run migrations before starting
@@ -854,6 +922,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn completed_runs_return_the_slot_before_exposing_business_results() {
+        use diesel::connection::SimpleConnection;
+
+        let (_directory, database) = single_slot(5_000);
+        database
+            .run(|connection| {
+                connection.batch_execute(
+                    "CREATE TEMP TABLE completed_run(value INTEGER); INSERT INTO completed_run VALUES(7)",
+                )
+            })
+            .await
+            .unwrap();
+        // No yield, wait-for-idle or retry may hide a leftover cleanup lease.
+        assert_eq!(database.state().admitted_operations, 0);
+        assert_eq!(database.state().idle_connections, 1);
+        let result = database
+            .run(|_| Err::<(), _>(diesel::result::Error::RollbackTransaction))
+            .await;
+        assert!(matches!(
+            result,
+            Err(diesel::result::Error::RollbackTransaction)
+        ));
+        assert_eq!(database.state().admitted_operations, 0);
+        assert_eq!(database.state().idle_connections, 1);
+        let value = database
+            .run(|connection| {
+                diesel::RunQueryDsl::get_result::<i32>(
+                    diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>(
+                        "(SELECT value FROM completed_run)",
+                    )),
+                    connection,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(database.state().admitted_operations, 0);
+        assert_eq!(database.state().idle_connections, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cleanup_retirement_preserves_an_already_committed_business_result() {
+        use diesel::connection::SimpleConnection;
+
+        let (directory, database) = single_slot(5_000);
+        let result = database
+            .run(|connection| {
+                connection.batch_execute(
+                    "CREATE TABLE committed_result(value INTEGER); INSERT INTO committed_result VALUES(1)",
+                )?;
+                <SqliteConnection as Connection>::TransactionManager::begin_transaction(connection)?;
+                connection.batch_execute("INSERT INTO committed_result VALUES(2)")?;
+                Ok::<_, diesel::result::Error>(42)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            result, 42,
+            "cleanup must not invite retrying a committed write"
+        );
+        settled(&database).await;
+        assert_eq!(database.state().connections, 0);
+        let mut peer =
+            SqliteConnection::establish(directory.path().join("runtime.sqlite").to_str().unwrap())
+                .unwrap();
+        // A new app checkout must not hide an improperly recycled writer.
+        peer.batch_execute("PRAGMA busy_timeout=0; BEGIN IMMEDIATE; ROLLBACK;")
+            .unwrap();
+        let value = diesel::RunQueryDsl::get_result::<i32>(
+            diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>(
+                "(SELECT SUM(value) FROM committed_result)",
+            )),
+            &mut peer,
+        )
+        .unwrap();
+        assert_eq!(value, 1, "keep autocommit, roll back abandoned transaction");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn cancelled_blocking_sql_keeps_admission_until_the_worker_really_finishes() {
         let (_directory, database) = single_slot(5_000);
         let (started, running) = oneshot::channel();
@@ -870,10 +1017,15 @@ mod tests {
                 })
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(3), running)
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(3), running)
             .await
             .unwrap()
-            .unwrap();
+        {
+            panic!(
+                "callback did not start: {error}; operation result: {:?}",
+                operation.await
+            );
+        }
         operation.abort();
         assert!(operation.await.unwrap_err().is_cancelled());
         assert_eq!(
@@ -1420,6 +1572,15 @@ mod cleanup_owner_cancellation_regression {
 
     #[test]
     fn shutdown_before_cleanup_owner_is_polled_retires_the_sqlite_writer() {
+        retained_writer_is_disposed(false);
+    }
+
+    #[test]
+    fn dropping_a_lease_without_entering_runtime_retires_the_sqlite_writer() {
+        retained_writer_is_disposed(true);
+    }
+
+    fn retained_writer_is_disposed(without_runtime: bool) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cleanup-owner.sqlite");
         let url = path.to_str().unwrap().to_owned();
@@ -1479,7 +1640,11 @@ mod cleanup_owner_cancellation_regression {
         // Entering is not driving a current-thread runtime. drop(lease) queues
         // its real cleanup worker/owner, but neither new async task can run in
         // this scope or after it: there is no subsequent block_on/yield/sleep.
-        {
+        if without_runtime {
+            // No Tokio context: cleanup creation must dispose without spawning.
+            drop(lease);
+            assert_eq!(database.state().idle_connections, 0);
+        } else {
             let _entered = runtime.enter();
             drop(lease);
             assert_eq!(database.state().idle_connections, 0);

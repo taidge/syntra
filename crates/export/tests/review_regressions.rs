@@ -11,6 +11,35 @@ fn part(bytes: &[u8], name: &str) -> String {
     zip.by_name(name).unwrap().read_to_string(&mut xml).unwrap();
     xml
 }
+
+#[test]
+fn functional_saved_workbook_csv_recalculates_lazy_conditions_and_lookup_dependencies() {
+    let mut book = Workbook::new("Lazy formulas".into());
+    let sheet = &mut book.sheets[0];
+    sheet.set_formula(0, 0, "=IF(TRUE,3,A1)".into());
+    sheet.set_formula(0, 1, "=A1*2".into());
+    sheet.set_formula(0, 2, "=SUMIF(A1:A1,3,B1:B1)".into());
+    sheet.set_formula(0, 3, "=VLOOKUP(3,A1:B1,2,FALSE)".into());
+
+    // Persisted formula cells have no fresh cache. Match the conversion path:
+    // deserialize the saved model, recalculate, then render CSV values.
+    let saved = serde_json::to_vec(&book).unwrap();
+    let mut loaded: Workbook = serde_json::from_slice(&saved).unwrap();
+    loaded.sheets[0].recalculate();
+    assert_eq!(
+        contrix_export::csv::sheet_to_csv(&loaded.sheets[0]),
+        "3,6,6,6\r\n"
+    );
+    loaded.sheets[0].set_formula(0, 0, "=IF(TRUE,4,A1)".into());
+    loaded.sheets[0].set_formula(0, 2, "=SUMIF(A1:A1,4,B1:B1)".into());
+    loaded.sheets[0].set_formula(0, 3, "=VLOOKUP(4,A1:B1,2,FALSE)".into());
+    loaded.sheets[0].recalculate();
+    assert_eq!(
+        contrix_export::csv::sheet_to_csv(&loaded.sheets[0]),
+        "4,8,8,8\r\n"
+    );
+}
+
 #[test]
 fn external_xlsx_keeps_formulas_and_recalculates_after_edit() {
     let mut book =

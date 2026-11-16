@@ -13,6 +13,7 @@
 /e2e/report
 /e2e/blob-report
 /e2e/.cache
+/.playwright-mcp/
 
 # Editor / OS
 .DS_Store
