@@ -16,6 +16,7 @@ default = []
 ssr = ["glory/ssr"]
 
 [dependencies]
+syntra-office-ui = { path = "../office-ui" }
 syntra-doc-engine = { path = "../doc-engine" }
 glory = { workspace = true }
 sapid = { workspace = true }

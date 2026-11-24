@@ -5,20 +5,10 @@ use serde_json::{Value, json};
 use std::rc::Rc;
 
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{JsCast, JsValue, closure::Closure, prelude::wasm_bindgen};
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(module = "/assets/writer-surface.js")]
-extern "C" {
-    #[wasm_bindgen(js_name = createWriterSurface)]
-    fn create_surface(selector: &str, changed: &js_sys::Function) -> JsValue;
-    #[wasm_bindgen(js_name = updateWriterSurface)]
-    fn update_surface(handle: &JsValue, document: &str, enabled: bool);
-    #[wasm_bindgen(catch, js_name = formatWriterSurface)]
-    fn format_surface(handle: &JsValue, format: &str) -> std::result::Result<(), JsValue>;
-    #[wasm_bindgen(js_name = destroyWriterSurface)]
-    fn destroy_surface(handle: &JsValue);
-}
+use syntra_office_ui::writer::{create_surface, destroy_surface, format_surface, update_surface};
 
 #[derive(Clone)]
 pub(super) struct WriterController {

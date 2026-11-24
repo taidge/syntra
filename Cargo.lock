@@ -557,6 +557,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "syntra-doc-engine",
+ "syntra-office-ui",
  "gloo-timers",
  "glory",
  "js-sys",
@@ -570,6 +571,14 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "syntra-office-ui"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]

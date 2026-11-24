@@ -497,6 +497,32 @@ export function formatWriterSurface(surface, serialized) {
   }
   const selection = document.getSelection();
   const selected = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+  // Browser formatBlock can merge adjacent Office paragraphs. Retag only the
+  // selected model blocks, keeping their identities, run spans and table cells.
+  if (format.kind === 'block' && /^(p|h[1-6])$/.test(format.value)) {
+    if (!selected) return;
+    const offsets = selectionOffsets(surface.root);
+    const targets = Array.from(surface.root.querySelectorAll('p,h1,h2,h3,h4,h5,h6')).filter(node => {
+      if (!selected.intersectsNode(node) || node.closest('[contenteditable="false"]')) return false;
+      if (selected.collapsed) return node.contains(selected.startContainer);
+      const overlap = document.createRange();
+      overlap.selectNodeContents(node);
+      if (node.contains(selected.startContainer)) overlap.setStart(selected.startContainer, selected.startOffset);
+      if (node.contains(selected.endContainer)) overlap.setEnd(selected.endContainer, selected.endOffset);
+      return overlap.toString().length > 0;
+    });
+    for (const node of targets) {
+      if (node.localName === format.value) continue;
+      const replacement = document.createElement(format.value);
+      for (const attr of node.attributes) replacement.setAttribute(attr.name, attr.value);
+      if (generatedBlocks.has(node)) generatedBlocks.set(replacement, generatedBlocks.get(node));
+      while (node.firstChild) replacement.append(node.firstChild);
+      node.replaceWith(replacement);
+    }
+    restoreOffsets(surface.root, offsets);
+    surface.emit();
+    return;
+  }
   // Insert an innermost style span so an existing data-run's explicit normal
   // weight cannot swallow a toolbar strong/em wrapper outside that run.
   if (selected && !selected.collapsed && ['bold','italic','code','link'].includes(format.kind)) {

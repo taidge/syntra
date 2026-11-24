@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/server",
     "crates/frontend",
+    "crates/office-ui",
     "crates/doc-engine",
     "crates/collab",
     "crates/export",
