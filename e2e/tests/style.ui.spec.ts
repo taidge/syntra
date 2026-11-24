@@ -5,7 +5,7 @@ test.use({ locale: 'en-US', serviceWorkers: 'block' });
 
 async function authenticate(page: Page, user: AuthUser) {
   await page.addInitScript(auth => {
-    localStorage.setItem('contrix.auth', JSON.stringify({ token: auth.token, user: {
+    localStorage.setItem('syntra.auth', JSON.stringify({ token: auth.token, user: {
       id: auth.userId, username: auth.username, email: auth.email, role: 'editor',
     } }));
     localStorage.setItem('locale', 'en');

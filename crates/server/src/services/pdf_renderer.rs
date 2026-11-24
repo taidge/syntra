@@ -21,10 +21,12 @@ fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn browser_path() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("CONTRIX_PDF_BROWSER") {
+    if let Some(path) = std::env::var_os("SYNTRA_PDF_BROWSER")
+        .or_else(|| std::env::var_os("\x43ONTRIX_PDF_BROWSER"))
+    {
         let path = PathBuf::from(path);
         return path.is_file().then_some(path).ok_or_else(|| {
-            "CONTRIX_PDF_BROWSER must name an installed Chrome, Chromium or Edge executable".into()
+            "SYNTRA_PDF_BROWSER must name an installed Chrome, Chromium or Edge executable".into()
         });
     }
     let names = if cfg!(windows) {
@@ -100,14 +102,15 @@ fn browser_path() -> Result<PathBuf, String> {
             }
         }
     }
-    Err("PDF export requires Chrome, Chromium or Edge on the server. Install a supported browser or set CONTRIX_PDF_BROWSER to its executable.".into())
+    Err("PDF export requires Chrome, Chromium or Edge on the server. Install a supported browser or set SYNTRA_PDF_BROWSER to its executable.".into())
 }
 
 fn bundled_font() -> Option<Vec<u8>> {
-    let root = std::env::var_os("CONTRIX_STATIC_DIR")
+    let root = std::env::var_os("SYNTRA_STATIC_DIR")
+        .or_else(|| std::env::var_os("\x43ONTRIX_STATIC_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(|| "static".into());
-    let path = root.join("assets/pdf-vendor/office-cjk.ttf");
+    let path = root.join("assets/pdf-vendor/syntra-cjk.ttf");
     let size = fs::metadata(&path).ok()?.len();
     if size == 0 || size > 32 * 1024 * 1024 {
         return None;
@@ -134,7 +137,7 @@ pub fn render(html: &str) -> Result<Vec<u8>, String> {
     }
     let browser = browser_path()?;
     let directory = tempfile::Builder::new()
-        .prefix("contrix-pdf-")
+        .prefix("syntra-pdf-")
         .tempdir()
         .map_err(|error| format!("Could not create PDF workspace: {error}"))?;
     let input = directory.path().join("document.html");

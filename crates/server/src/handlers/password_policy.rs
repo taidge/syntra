@@ -3,10 +3,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, PasswordPolicyRequest, PasswordPolicyResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::NewPasswordPolicy;
-use contrix_core::schema::password_policies::dsl as pp;
+use syntra_core::dto::{ApiResponse, PasswordPolicyRequest, PasswordPolicyResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::NewPasswordPolicy;
+use syntra_core::schema::password_policies::dsl as pp;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 use crate::services::password::PasswordService;

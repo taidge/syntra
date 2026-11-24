@@ -2,23 +2,23 @@
 #[allow(dead_code)]
 mod common;
 use common::TestServer;
-use contrix_core::config::MaintenanceConfig;
-use contrix_server::services::{StorageBackend, maintenance, persistence, s3_storage::S3Storage};
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Text};
 use std::collections::HashSet;
+use syntra_core::config::MaintenanceConfig;
+use syntra_server::services::{StorageBackend, maintenance, persistence, s3_storage::S3Storage};
 use uuid::Uuid;
 
 #[tokio::test]
-#[ignore = "requires the isolated OFFICE_S3_* S3-compatible acceptance service"]
+#[ignore = "requires the isolated SYNTRA_S3_* S3-compatible acceptance service"]
 async fn live_s3_maintenance() {
     let required = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
     let storage = StorageBackend::S3(S3Storage::new(
-        &required("OFFICE_S3_BUCKET"),
-        &required("OFFICE_S3_REGION"),
-        &required("OFFICE_S3_ACCESS_KEY"),
-        &required("OFFICE_S3_SECRET_KEY"),
-        &required("OFFICE_S3_ENDPOINT"),
+        &required("SYNTRA_S3_BUCKET"),
+        &required("SYNTRA_S3_REGION"),
+        &required("SYNTRA_S3_ACCESS_KEY"),
+        &required("SYNTRA_S3_SECRET_KEY"),
+        &required("SYNTRA_S3_ENDPOINT"),
     ));
     let server = TestServer::new().await;
     storage.attach_database(server.db.clone()).unwrap();
@@ -68,7 +68,7 @@ async fn live_s3_maintenance() {
     assert!(pages > 1);
     assert_eq!(listed, own);
     let (objects, actor, file_id) = (paths.clone(), owner.clone(), file.clone());
-    server.db.run(move|conn|conn.immediate_transaction::<_,contrix_core::error::AppError,_>(|conn|{
+    server.db.run(move|conn|conn.immediate_transaction::<_,syntra_core::error::AppError,_>(|conn|{
         diesel::sql_query("UPDATE files SET path=?,thumbnail_path=? WHERE id=?").bind::<Text,_>(&objects[0]).bind::<Text,_>(&objects[5]).bind::<Text,_>(&file_id).execute(conn)?;
         diesel::sql_query("INSERT INTO file_versions(id,file_id,version_number,path,size,created_by,created_at) VALUES ('original',?,0,?,6,?,'2000-01-01T00:00:00Z')")
             .bind::<Text,_>(&file_id).bind::<Text,_>(&objects[1]).bind::<Text,_>(&actor).execute(conn)?;
@@ -129,7 +129,7 @@ async fn live_s3_maintenance() {
     let deleted = server
         .db
         .run(move |conn| {
-            Ok::<_, contrix_core::error::AppError>(
+            Ok::<_, syntra_core::error::AppError>(
                 diesel::sql_query(
                     "SELECT COUNT(*) AS value FROM blob_inventory WHERE path=? AND state='deleted'",
                 )
@@ -192,7 +192,7 @@ async fn repeated_exports_and_retry_publish_distinct_immutable_objects() {
     }
     assert_ne!(jobs[0].1, jobs[1].1);
     let root = server._temp_dir.path().join("files");
-    let storage = StorageBackend::Local(contrix_server::services::StorageService::new(
+    let storage = StorageBackend::Local(syntra_server::services::StorageService::new(
         root.to_str().unwrap(),
     ));
     storage.attach_database(server.db.clone()).unwrap();
@@ -244,16 +244,16 @@ async fn repeated_exports_and_retry_publish_distinct_immutable_objects() {
 }
 
 #[tokio::test]
-#[ignore = "requires the isolated OFFICE_S3_* S3-compatible acceptance service"]
+#[ignore = "requires the isolated SYNTRA_S3_* S3-compatible acceptance service"]
 async fn live_s3_maintenance_shared_bucket_isolation() {
     let required = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
     let remote = || {
         StorageBackend::S3(S3Storage::new(
-            &required("OFFICE_S3_BUCKET"),
-            &required("OFFICE_S3_REGION"),
-            &required("OFFICE_S3_ACCESS_KEY"),
-            &required("OFFICE_S3_SECRET_KEY"),
-            &required("OFFICE_S3_ENDPOINT"),
+            &required("SYNTRA_S3_BUCKET"),
+            &required("SYNTRA_S3_REGION"),
+            &required("SYNTRA_S3_ACCESS_KEY"),
+            &required("SYNTRA_S3_SECRET_KEY"),
+            &required("SYNTRA_S3_ENDPOINT"),
         ))
     };
     let first = TestServer::new().await;
@@ -265,7 +265,7 @@ async fn live_s3_maintenance_shared_bucket_isolation() {
     let copy = owner.clone();
     // A restored backup can legitimately have exactly the same owner UUID.
     second.db.run(move|conn|{
-        diesel::sql_query("INSERT INTO users(id,username,email,password_hash) VALUES (?,'backup','backup@s3-isolation.test','test')").bind::<Text,_>(copy).execute(conn)?;Ok::<_,contrix_core::error::AppError>(())
+        diesel::sql_query("INSERT INTO users(id,username,email,password_hash) VALUES (?,'backup','backup@s3-isolation.test','test')").bind::<Text,_>(copy).execute(conn)?;Ok::<_,syntra_core::error::AppError>(())
     }).await.unwrap();
     let storage_a = remote();
     let storage_b = remote();
@@ -286,7 +286,7 @@ async fn live_s3_maintenance_shared_bucket_isolation() {
     second.db.run(move|conn|{
         diesel::sql_query("INSERT INTO files(id,name,path,size,owner_id) VALUES (?,'protected',?,14,?)").bind::<Text,_>(Uuid::new_v4().to_string()).bind::<Text,_>(referenced_key).bind::<Text,_>(actor).execute(conn)?;
         diesel::sql_query("INSERT INTO blob_inventory(path,state,first_seen,lease_until,token) VALUES (?,'writing',0,9223372036854775807,'active-writer')").bind::<Text,_>(active_key).execute(conn)?;
-        Ok::<_,contrix_core::error::AppError>(())
+        Ok::<_,syntra_core::error::AppError>(())
     }).await.unwrap();
     if let StorageBackend::S3(s3) = &storage_b {
         s3.put_object(&active, b"active write owned by backup", "text/plain")
@@ -334,7 +334,7 @@ async fn live_s3_maintenance_shared_bucket_isolation() {
     let adopted = first
         .db
         .run(move |conn| {
-            Ok::<_, contrix_core::error::AppError>(
+            Ok::<_, syntra_core::error::AppError>(
                 diesel::sql_query(
                     "SELECT COUNT(*) AS value FROM blob_inventory WHERE path IN (?,?)",
                 )

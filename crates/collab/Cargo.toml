@@ -1,10 +1,11 @@
 [package]
-name = "contrix-collab"
+name = "syntra-collab"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+repository.workspace = true
 license.workspace = true
-description = "Real-time collaboration engine using CRDT for Contrix Office"
+description = "Real-time collaboration engine using CRDT for syntra"
 
 [dependencies]
 serde = { workspace = true }

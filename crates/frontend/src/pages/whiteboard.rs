@@ -1283,7 +1283,7 @@ mod model_tests {
             canonical_to_ui(native).get("type").and_then(|v| v.as_str()),
             Some("rect")
         );
-        serde_json::from_value::<contrix_doc_engine::Whiteboard>(content).unwrap();
+        serde_json::from_value::<syntra_doc_engine::Whiteboard>(content).unwrap();
     }
 
     #[test]

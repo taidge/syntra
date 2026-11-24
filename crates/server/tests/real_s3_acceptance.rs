@@ -1,7 +1,7 @@
 //! Opt-in integration against an actual S3-compatible server, never a mock.
-//! Set OFFICE_S3_ENDPOINT, OFFICE_S3_BUCKET, OFFICE_S3_ACCESS_KEY,
-//! OFFICE_S3_SECRET_KEY, and optionally OFFICE_S3_REGION before running ignored tests.
-use contrix_server::services::{StorageBackend, s3_storage::S3Storage};
+//! Set SYNTRA_S3_ENDPOINT, SYNTRA_S3_BUCKET, SYNTRA_S3_ACCESS_KEY,
+//! SYNTRA_S3_SECRET_KEY, and optionally SYNTRA_S3_REGION before running ignored tests.
+use syntra_server::services::{StorageBackend, s3_storage::S3Storage};
 
 fn required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("real S3 acceptance requires {name}"))
@@ -10,11 +10,11 @@ fn required(name: &str) -> String {
 #[tokio::test]
 #[ignore = "requires a real, independently running S3-compatible service and disposable bucket"]
 async fn real_s3_authentication_binary_roundtrip_encoded_keys_and_delete() {
-    let endpoint = required("OFFICE_S3_ENDPOINT");
-    let bucket = required("OFFICE_S3_BUCKET");
-    let access = required("OFFICE_S3_ACCESS_KEY");
-    let secret = required("OFFICE_S3_SECRET_KEY");
-    let region = std::env::var("OFFICE_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let endpoint = required("SYNTRA_S3_ENDPOINT");
+    let bucket = required("SYNTRA_S3_BUCKET");
+    let access = required("SYNTRA_S3_ACCESS_KEY");
+    let secret = required("SYNTRA_S3_SECRET_KEY");
+    let region = std::env::var("SYNTRA_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
     let storage = S3Storage::new(&bucket, &region, &access, &secret, &endpoint);
     storage
         .head_bucket()
@@ -25,7 +25,7 @@ async fn real_s3_authentication_binary_roundtrip_encoded_keys_and_delete() {
         unauthorized.head_bucket().await.is_err(),
         "server must verify the signature"
     );
-    let prefix = format!("office-acceptance/{}/", uuid::Uuid::new_v4());
+    let prefix = format!("syntra-acceptance/{}/", uuid::Uuid::new_v4());
     let keys = [
         format!("{prefix}binary.bin"),
         format!("{prefix}空 格+%#?.bin"),
@@ -97,11 +97,11 @@ async fn real_s3_authentication_binary_roundtrip_encoded_keys_and_delete() {
 #[tokio::test]
 #[ignore = "requires a real, independently running S3-compatible service and disposable bucket"]
 async fn real_s3_same_named_concurrent_saves_have_independent_objects() {
-    let endpoint = required("OFFICE_S3_ENDPOINT");
-    let bucket = required("OFFICE_S3_BUCKET");
-    let access = required("OFFICE_S3_ACCESS_KEY");
-    let secret = required("OFFICE_S3_SECRET_KEY");
-    let region = std::env::var("OFFICE_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let endpoint = required("SYNTRA_S3_ENDPOINT");
+    let bucket = required("SYNTRA_S3_BUCKET");
+    let access = required("SYNTRA_S3_ACCESS_KEY");
+    let secret = required("SYNTRA_S3_SECRET_KEY");
+    let region = std::env::var("SYNTRA_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
     let storage = StorageBackend::S3(S3Storage::new(
         &bucket, &region, &access, &secret, &endpoint,
     ));

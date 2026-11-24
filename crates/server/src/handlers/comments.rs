@@ -5,11 +5,11 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, CommentResponse, CreateCommentRequest};
-use contrix_core::error::AppError;
-use contrix_core::models::NewComment;
-use contrix_core::schema::comments::dsl as c;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::dto::{ApiResponse, CommentResponse, CreateCommentRequest};
+use syntra_core::error::AppError;
+use syntra_core::models::NewComment;
+use syntra_core::schema::comments::dsl as c;
+use syntra_core::schema::users::dsl as u;
 
 use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;
@@ -241,8 +241,8 @@ pub async fn create_comment(req: &mut Request, depot: &mut Depot, res: &mut Resp
     .await;
 
     {
-        use contrix_core::schema::documents::dsl as d;
-        use contrix_core::schema::files::dsl as f;
+        use syntra_core::schema::documents::dsl as d;
+        use syntra_core::schema::files::dsl as f;
         let owner: Option<String> = d::documents
             .inner_join(f::files.on(d::file_id.eq(f::id)))
             .filter(d::id.eq(&doc_id_param))

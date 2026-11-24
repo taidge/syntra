@@ -97,6 +97,7 @@ pub fn Register(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
     view().class("auth-page").fill(
         view().class("auth-card").fill((
             view().class("auth-header").fill((
+                syntra_mark("auth-brand-icon"),
                 heading(crate::i18n::t("auth.register_title")),
                 label(crate::i18n::t("auth.register_subtitle")).class("auth-subtitle"),
             )),

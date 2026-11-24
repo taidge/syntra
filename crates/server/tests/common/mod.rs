@@ -2,16 +2,16 @@ use std::sync::Arc;
 
 use horme::prelude::*;
 
-use contrix_collab::CollabManager;
-use contrix_core::config::{
+use salvo::conn::Acceptor;
+use salvo::prelude::*;
+use syntra_collab::CollabManager;
+use syntra_core::config::{
     AiConfig, AppConfig, AuthConfig, DatabaseConfig, RateLimitConfig, ServerConfig, StorageConfig,
     TrashConfig,
 };
-use contrix_server::routes::create_router;
-use contrix_server::services::{AiService, NotificationBus, StorageBackend, WopiSessionStore};
-use contrix_server::state::{AppState, DbPool};
-use salvo::conn::Acceptor;
-use salvo::prelude::*;
+use syntra_server::routes::create_router;
+use syntra_server::services::{AiService, NotificationBus, StorageBackend, WopiSessionStore};
+use syntra_server::state::{AppState, DbPool};
 
 /// A self-contained test server backed by a temporary SQLite database.
 ///
@@ -97,7 +97,7 @@ impl TestServer {
         db.run_startup_migrations(move |conn| {
             let directory =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-            contrix_server::migrations::run_directory(conn, &directory)
+            syntra_server::migrations::run_directory(conn, &directory)
         })
         .await
         .unwrap();
@@ -337,7 +337,7 @@ impl TestServer {
     /// Promote a user to admin role directly via SQL.
     pub async fn make_admin(&self, user_id_val: &str) {
         let mut conn = self.db.clone();
-        use contrix_core::schema::users::dsl::*;
+        use syntra_core::schema::users::dsl::*;
         diesel::update(users.filter(id.eq(user_id_val)))
             .set(role.eq("admin"))
             .execute(&mut conn)
@@ -356,8 +356,8 @@ impl TestServer {
         let now = chrono::Utc::now().to_rfc3339();
         let mut conn = self.db.clone();
 
-        use contrix_core::models::NewNotification;
-        use contrix_core::schema::notifications::dsl::*;
+        use syntra_core::models::NewNotification;
+        use syntra_core::schema::notifications::dsl::*;
 
         let new_notif = NewNotification {
             id: notification_id.clone(),
@@ -386,11 +386,11 @@ impl TestServer {
 #[allow(dead_code)]
 pub struct OccupiedPool {
     db: DbPool,
-    leases: Vec<contrix_server::database::DatabaseLease>,
+    leases: Vec<syntra_server::database::DatabaseLease>,
     pending: Vec<
         futures_util::future::BoxFuture<
             'static,
-            std::result::Result<(), contrix_core::error::AppError>,
+            std::result::Result<(), syntra_core::error::AppError>,
         >,
     >,
 }
@@ -434,14 +434,14 @@ impl OccupiedPool {
         let mut pending: Vec<
             futures_util::future::BoxFuture<
                 'static,
-                std::result::Result<(), contrix_core::error::AppError>,
+                std::result::Result<(), syntra_core::error::AppError>,
             >,
         > = Vec::new();
         for _ in 0..2 {
             let db = server.db.clone();
             let mut request =
                 Box::pin(
-                    async move { db.run(|_| Ok::<_, contrix_core::error::AppError>(())).await },
+                    async move { db.run(|_| Ok::<_, syntra_core::error::AppError>(())).await },
                 );
             assert!(
                 futures_util::poll!(request.as_mut()).is_pending(),

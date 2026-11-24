@@ -5,13 +5,13 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{
+use syntra_core::dto::{
     ApiResponse, CreateTagRequest, TagFileRequest, TagResponse, UpdateTagRequest,
 };
-use contrix_core::error::AppError;
-use contrix_core::models::{NewFileTag, NewTag, Tag};
-use contrix_core::schema::file_tags::dsl as ft;
-use contrix_core::schema::tags::dsl as t;
+use syntra_core::error::AppError;
+use syntra_core::models::{NewFileTag, NewTag, Tag};
+use syntra_core::schema::file_tags::dsl as ft;
+use syntra_core::schema::tags::dsl as t;
 
 use crate::handlers::access::load_accessible_file;
 use crate::middleware::auth::get_user_id;

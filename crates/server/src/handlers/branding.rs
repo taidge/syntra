@@ -5,12 +5,16 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, BrandingResponse, UpdateBrandingRequest};
-use contrix_core::error::AppError;
-use contrix_core::models::{BrandingSettings, NewBrandingSettings};
-use contrix_core::schema::branding_settings::dsl as bs;
+use syntra_core::dto::{ApiResponse, BrandingResponse, UpdateBrandingRequest};
+use syntra_core::error::AppError;
+use syntra_core::models::{BrandingSettings, NewBrandingSettings};
+use syntra_core::schema::branding_settings::dsl as bs;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
+
+const APP_NAME: &str = "Syntra Office";
+const LOGO_URL: &str = "/icons/syntra.svg";
+const FAVICON_URL: &str = "/favicon.ico";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,8 +36,8 @@ fn require_admin(depot: &Depot, res: &mut Response) -> bool {
 
 fn branding_to_response(row: BrandingSettings) -> BrandingResponse {
     BrandingResponse {
-        logo_url: row.logo_url,
-        favicon_url: row.favicon_url,
+        logo_url: row.logo_url.or_else(|| Some(LOGO_URL.into())),
+        favicon_url: row.favicon_url.or_else(|| Some(FAVICON_URL.into())),
         app_name: row.app_name,
         primary_color: row.primary_color,
         custom_css: row.custom_css,
@@ -42,9 +46,9 @@ fn branding_to_response(row: BrandingSettings) -> BrandingResponse {
 
 fn default_branding() -> BrandingResponse {
     BrandingResponse {
-        logo_url: None,
-        favicon_url: None,
-        app_name: "Contrix Office".to_string(),
+        logo_url: Some(LOGO_URL.into()),
+        favicon_url: Some(FAVICON_URL.into()),
+        app_name: APP_NAME.into(),
         primary_color: None,
         custom_css: None,
     }
@@ -212,10 +216,7 @@ pub async fn update_branding(req: &mut Request, depot: &mut Depot, res: &mut Res
                 id: Uuid::new_v4().to_string(),
                 logo_url: body.logo_url.clone(),
                 favicon_url: body.favicon_url.clone(),
-                app_name: body
-                    .app_name
-                    .clone()
-                    .unwrap_or_else(|| "Contrix Office".to_string()),
+                app_name: body.app_name.clone().unwrap_or_else(|| APP_NAME.into()),
                 primary_color: body.primary_color.clone(),
                 custom_css: body.custom_css.clone(),
                 updated_by: uid.clone(),
@@ -235,11 +236,9 @@ pub async fn update_branding(req: &mut Request, depot: &mut Depot, res: &mut Res
             }
 
             let resp = BrandingResponse {
-                logo_url: body.logo_url,
-                favicon_url: body.favicon_url,
-                app_name: body
-                    .app_name
-                    .unwrap_or_else(|| "Contrix Office".to_string()),
+                logo_url: body.logo_url.or_else(|| Some(LOGO_URL.into())),
+                favicon_url: body.favicon_url.or_else(|| Some(FAVICON_URL.into())),
+                app_name: body.app_name.unwrap_or_else(|| APP_NAME.into()),
                 primary_color: body.primary_color,
                 custom_css: body.custom_css,
             };

@@ -8,9 +8,9 @@ use horme::prelude::*;
 use sha2::Sha256;
 use uuid::Uuid;
 
-use contrix_core::models::{NewWebhookDelivery, Webhook, WebhookDelivery};
-use contrix_core::schema::webhook_deliveries::dsl as wd;
-use contrix_core::schema::webhooks::dsl as w;
+use syntra_core::models::{NewWebhookDelivery, Webhook, WebhookDelivery};
+use syntra_core::schema::webhook_deliveries::dsl as wd;
+use syntra_core::schema::webhooks::dsl as w;
 
 /// Backoff delays (in seconds) for each retry attempt after the initial try.
 const RETRY_DELAYS: &[u64] = &[5, 30, 180];

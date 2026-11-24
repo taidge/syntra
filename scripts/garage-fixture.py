@@ -49,7 +49,7 @@ def main():
         encoding="utf-8")
     environment = os.environ.copy()
     environment.update(GARAGE_CONFIG_FILE=str(config), GARAGE_DEFAULT_ACCESS_KEY="GK" + secrets.token_hex(16),
-        GARAGE_DEFAULT_SECRET_KEY=secrets.token_hex(32), GARAGE_DEFAULT_BUCKET="office-test", RUST_LOG="warn")
+        GARAGE_DEFAULT_SECRET_KEY=secrets.token_hex(32), GARAGE_DEFAULT_BUCKET="syntra-test", RUST_LOG="warn")
     credentials = {"endpoint": f"http://127.0.0.1:{api_port}", "bucket": environment["GARAGE_DEFAULT_BUCKET"],
         "region": "garage", "access_key": environment["GARAGE_DEFAULT_ACCESS_KEY"],
         "secret_key": environment["GARAGE_DEFAULT_SECRET_KEY"]}

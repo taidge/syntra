@@ -4,17 +4,17 @@
 //! selectable text into real Writer paragraphs; it does not pretend to OCR an
 //! image-only page or reproduce arbitrary fixed-layout drawing instructions.
 
-use contrix_doc_engine::writer::{Block, WriterDocument};
 use lopdf::{Document, LoadOptions, Object, ObjectId};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use syntra_doc_engine::writer::{Block, WriterDocument};
 
 pub const MAX_PDF_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_PDF_PAGES: usize = 500;
 const MAX_PDF_OBJECTS: usize = 50_000;
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
-const MAX_TEXT_BYTES: usize = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES;
+const MAX_TEXT_BYTES: usize = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES;
 const MAX_PAGE_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_FONT_MAP_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TEXT_BLOCKS: usize = 50_000;
@@ -341,7 +341,7 @@ fn writer_from_pages(title: &str, pages: Vec<String>, ocr: bool) -> Result<PdfIm
         })
         .sum();
     let model = serde_json::to_vec(&document).map_err(|error| error.to_string())?;
-    if model.len() > contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES {
+    if model.len() > syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES {
         return Err("Converted PDF exceeds the editable document-size limit".into());
     }
     let mut warnings = if ocr {

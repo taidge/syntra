@@ -5,15 +5,15 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{
+use syntra_core::dto::{
     ApiResponse, CreateDocumentRequest, DocumentResponse, UpdateDocumentRequest,
 };
-use contrix_core::error::AppError;
-use contrix_core::models::{DocumentType, NewDocument, NewFile};
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::versions::dsl as v;
-use contrix_export::ExportFormat;
+use syntra_core::error::AppError;
+use syntra_core::models::{DocumentType, NewDocument, NewFile};
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::versions::dsl as v;
+use syntra_export::ExportFormat;
 
 use crate::handlers::access::{check_room_access, load_accessible_target_folder};
 use crate::middleware::auth::get_user_id;
@@ -27,30 +27,21 @@ use crate::services::{StorageBackend, StorageService};
 fn default_content(doc_type: &DocumentType, name: &str) -> serde_json::Value {
     match doc_type {
         DocumentType::Writer => {
-            let doc = contrix_doc_engine::WriterDocument::new(name.to_string());
+            let doc = syntra_doc_engine::WriterDocument::new(name.to_string());
             serde_json::to_value(&doc).unwrap_or_default()
         }
         DocumentType::Calc => {
-            let wb = contrix_doc_engine::Workbook::new(name.to_string());
+            let wb = syntra_doc_engine::Workbook::new(name.to_string());
             serde_json::to_value(&wb).unwrap_or_default()
         }
         DocumentType::Slides => {
-            let pres = contrix_doc_engine::Presentation::new(name.to_string());
+            let pres = syntra_doc_engine::Presentation::new(name.to_string());
             serde_json::to_value(&pres).unwrap_or_default()
         }
         DocumentType::Whiteboard => {
-            let wb = contrix_doc_engine::Whiteboard::new(name.to_string());
+            let wb = syntra_doc_engine::Whiteboard::new(name.to_string());
             serde_json::to_value(&wb).unwrap_or_default()
         }
-    }
-}
-
-fn mime_for_doc_type(dt: &DocumentType) -> &'static str {
-    match dt {
-        DocumentType::Writer => "application/vnd.contrix.writer",
-        DocumentType::Calc => "application/vnd.contrix.calc",
-        DocumentType::Slides => "application/vnd.contrix.slides",
-        DocumentType::Whiteboard => "application/vnd.contrix.whiteboard",
     }
 }
 
@@ -59,7 +50,7 @@ fn document_storage_name(name: &str) -> String {
     // storage file name. `save_file` sanitizes again, but doing it here keeps
     // the stored path predictable and removes any ambiguity for other backends.
     let safe = StorageService::sanitize_file_name(name);
-    format!("{safe}.contrix.json")
+    format!("{safe}.syntra.json")
 }
 
 async fn persist_document_blob(
@@ -209,7 +200,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         id: file_id_val.to_string(),
         name: body.name.clone(),
         path: path_val.clone(),
-        mime_type: Some(mime_for_doc_type(&body.document_type).to_string()),
+        mime_type: Some(body.document_type.native_mime_type().into()),
         size: size_val,
         owner_id: uid.clone(),
         parent_id: parent_id_str,
@@ -245,7 +236,7 @@ pub async fn create_document(req: &mut Request, depot: &mut Depot, res: &mut Res
                     "/api/v1/documents",
                 )?;
                 if let Some(parent_id) = &new_file.parent_id {
-                    use contrix_core::models::File;
+                    use syntra_core::models::File;
                     let parent =
                         diesel::RunQueryDsl::first::<File>(f::files.find(parent_id), conn)?;
                     if !parent.is_folder || parent.room_id != new_file.room_id {
@@ -491,7 +482,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
             return;
         }
     };
-    const REQUEST_BYTES: usize = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 64 * 1024;
+    const REQUEST_BYTES: usize = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 64 * 1024;
     const REJECTION_BYTES: usize = REQUEST_BYTES + 1024 * 1024;
     let retained = super::request_body::RetainedBody::install_with_timeouts(
         req,
@@ -568,7 +559,7 @@ pub async fn update_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         })?;
         let content = serde_json::to_string(&body.content)
             .map_err(|error| AppError::Validation(error.to_string()))?;
-        if content.len() > contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES {
+        if content.len() > syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES {
             return Err(AppError::QuotaExceeded(
                 "Document content exceeds 20 MiB".into(),
             ));
@@ -670,7 +661,7 @@ pub async fn delete_document(req: &mut Request, depot: &mut Depot, res: &mut Res
         .db
         .run(move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
-                use contrix_core::models::{Document, File};
+                use syntra_core::models::{Document, File};
                 let document =
                     diesel::RunQueryDsl::first::<Document>(d::documents.find(&id), conn)?;
                 let file =

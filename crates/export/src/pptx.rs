@@ -10,7 +10,7 @@ use std::io::{Cursor, Seek, Write};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use contrix_doc_engine::slides::{
+use syntra_doc_engine::slides::{
     ChartType, ElementGroup, Presentation, Shape, ShapeType, Slide, SlideChart, SlideElement,
     SlideImage, SlideTextRun, SlideVideo, TextBox,
 };
@@ -21,7 +21,7 @@ use zip::write::{SimpleFileOptions, ZipWriter};
 #[path = "pptx_import.rs"]
 pub(crate) mod external_import;
 
-const MAX_MEDIA_BYTES: usize = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 3 / 4;
+const MAX_MEDIA_BYTES: usize = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 3 / 4;
 
 #[derive(Clone)]
 struct MediaPart {
@@ -76,7 +76,7 @@ pub fn presentation_to_pptx(pres: &Presentation) -> Result<Vec<u8>, String> {
   <Default Extension="jpeg" ContentType="image/jpeg"/>
   <Default Extension="gif" ContentType="image/gif"/>
   <Default Extension="mp4" ContentType="video/mp4"/>
-  <Override PartName="/customXml/contrix-presentation.json" ContentType="application/json"/>
+  <Override PartName="/customXml/syntra-presentation.json" ContentType="application/json"/>
   <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
   <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
   <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
@@ -151,10 +151,10 @@ pub fn presentation_to_pptx(pres: &Presentation) -> Result<Vec<u8>, String> {
     p.push_str(&format!("\n  </p:sldIdLst>\n  <p:sldSz cx=\"{slide_width}\" cy=\"{slide_height}\" type=\"custom\"/>\n  <p:notesSz cx=\"6858000\" cy=\"9144000\"/>\n</p:presentation>"));
     write!(zip, "{}", p).map_err(|e| e.to_string())?;
 
-    // Preserve the complete native model for lossless Contrix round-trips.
+    // Preserve the complete native model for lossless syntra round-trips.
     // Office applications ignore this namespaced package part while rendering
     // the standards-based shapes/media/chart parts below.
-    zip.start_file("customXml/contrix-presentation.json", options)
+    zip.start_file("customXml/syntra-presentation.json", options)
         .map_err(|e| e.to_string())?;
     serde_json::to_writer(&mut zip, pres).map_err(|e| e.to_string())?;
 
@@ -229,7 +229,7 @@ pub fn presentation_to_pptx(pres: &Presentation) -> Result<Vec<u8>, String> {
     }
 
     zip.finish().map_err(|e| e.to_string())?;
-    crate::native_package::seal(buf.into_inner(), "customXml/contrix-presentation.json")
+    crate::native_package::seal(buf.into_inner(), "customXml/syntra-presentation.json")
 }
 
 fn decode_data_url(url: &str) -> Option<(&'static str, Vec<u8>)> {
@@ -354,7 +354,7 @@ fn collect_slide_resources(
         media_index,
         chart_index,
     );
-    if let contrix_doc_engine::slides::Background::Image(url) = &slide.background {
+    if let syntra_doc_engine::slides::Background::Image(url) = &slide.background {
         let id = Uuid::new_v4();
         resources.background_id = Some(id);
         let image = SlideElement::Image(SlideImage {
@@ -446,7 +446,7 @@ fn theme_xml(pres: &Presentation) -> String {
         })
         .collect::<Vec<_>>();
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="{}"><a:themeElements><a:clrScheme name="{}"><a:dk1><a:srgbClr val="{}"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="{}"/></a:dk2><a:lt2><a:srgbClr val="F1F5F9"/></a:lt2><a:accent1><a:srgbClr val="{}"/></a:accent1><a:accent2><a:srgbClr val="{}"/></a:accent2><a:accent3><a:srgbClr val="{}"/></a:accent3><a:accent4><a:srgbClr val="{}"/></a:accent4><a:accent5><a:srgbClr val="{}"/></a:accent5><a:accent6><a:srgbClr val="{}"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="Contrix"><a:majorFont><a:latin typeface="{}"/></a:majorFont><a:minorFont><a:latin typeface="{}"/></a:minorFont></a:fontScheme><a:fmtScheme name="Contrix"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="{}"><a:themeElements><a:clrScheme name="{}"><a:dk1><a:srgbClr val="{}"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="{}"/></a:dk2><a:lt2><a:srgbClr val="F1F5F9"/></a:lt2><a:accent1><a:srgbClr val="{}"/></a:accent1><a:accent2><a:srgbClr val="{}"/></a:accent2><a:accent3><a:srgbClr val="{}"/></a:accent3><a:accent4><a:srgbClr val="{}"/></a:accent4><a:accent5><a:srgbClr val="{}"/></a:accent5><a:accent6><a:srgbClr val="{}"/></a:accent6><a:hlink><a:srgbClr val="0563C1"/></a:hlink><a:folHlink><a:srgbClr val="954F72"/></a:folHlink></a:clrScheme><a:fontScheme name="syntra"><a:majorFont><a:latin typeface="{}"/></a:majorFont><a:minorFont><a:latin typeface="{}"/></a:minorFont></a:fontScheme><a:fmtScheme name="syntra"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>"#,
         escape_xml(&pres.theme.name),
         escape_xml(&pres.theme.name),
         pres.theme.secondary_color.trim_start_matches('#'),
@@ -559,7 +559,7 @@ fn shape_preset(shape_type: ShapeType) -> &'static str {
     }
 }
 
-fn slide_border_to_xml(border: Option<&contrix_doc_engine::slides::SlideBorder>, xml: &mut String) {
+fn slide_border_to_xml(border: Option<&syntra_doc_engine::slides::SlideBorder>, xml: &mut String) {
     if let Some(border) = border {
         xml.push_str(&format!(
             "<a:ln w=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></a:ln>",
@@ -745,11 +745,11 @@ fn group_bounds(elements: &[SlideElement]) -> (f32, f32, f32, f32) {
 }
 
 fn background_to_xml(
-    background: &contrix_doc_engine::slides::Background,
+    background: &syntra_doc_engine::slides::Background,
     resources: &SlideResources,
     xml: &mut String,
 ) {
-    use contrix_doc_engine::slides::Background;
+    use syntra_doc_engine::slides::Background;
     match background {
         Background::Solid(color) => xml.push_str(&format!(
             "<p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>",
@@ -771,7 +771,7 @@ fn background_to_xml(
 }
 
 fn transition_to_xml(slide: &Slide, xml: &mut String) {
-    use contrix_doc_engine::slides::TransitionType;
+    use syntra_doc_engine::slides::TransitionType;
     let Some(transition) = &slide.transition else {
         return;
     };
@@ -790,7 +790,7 @@ fn transition_to_xml(slide: &Slide, xml: &mut String) {
 }
 
 fn animations_to_xml(slide: &Slide, shape_ids: &HashMap<Uuid, u32>, xml: &mut String) {
-    use contrix_doc_engine::slides::{AnimationEffect, AnimationTrigger};
+    use syntra_doc_engine::slides::{AnimationEffect, AnimationTrigger};
     if slide.animations.is_empty() {
         return;
     }
@@ -1066,15 +1066,17 @@ fn escape_xml(s: &str) -> String {
 /// Parse a `.pptx` byte slice into a [`Presentation`].
 pub fn pptx_to_presentation(bytes: &[u8]) -> Result<Presentation, String> {
     crate::ooxml::validate(bytes)?;
-    let reader = Cursor::new(bytes);
-    let mut archive = ZipArchive::new(reader).map_err(|e| e.to_string())?;
-
-    if let Some(model) = crate::native_package::read(bytes, "customXml/contrix-presentation.json")
+    let native_paths = [
+        "customXml/syntra-presentation.json",
+        "customXml/\x63ontrix-presentation.json",
+    ];
+    if let Some(model) = crate::native_package::read(bytes, &native_paths)
         && let Ok(presentation) = serde_json::from_value::<Presentation>(model)
     {
         return Ok(presentation);
     }
 
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let title = read_title(&mut archive).unwrap_or_else(|| "Imported Presentation".to_string());
 
     let slide_names = ordered_slide_parts(&mut archive)?;
@@ -1113,7 +1115,7 @@ fn read_title(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contrix_doc_engine::slides::SlideLayout;
+    use syntra_doc_engine::slides::SlideLayout;
 
     #[test]
     fn test_pptx_starts_with_zip_magic() {
@@ -1189,7 +1191,7 @@ mod tests {
 
     #[test]
     fn media_charts_groups_and_animation_are_real_ooxml_and_round_trip() {
-        use contrix_doc_engine::slides::{
+        use syntra_doc_engine::slides::{
             Animation, AnimationEffect, AnimationTrigger, ChartData, Dataset, ElementGroup,
             SlideChart, SlideVideo,
         };

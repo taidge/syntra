@@ -1,7 +1,7 @@
 //! Standard cache/table parts for the single-row-field pivot model.
 use super::{XlsxExportStats, escape_xml as escape};
-use contrix_doc_engine::calc::*;
 use std::collections::{BTreeMap, BTreeSet};
+use syntra_doc_engine::calc::*;
 const NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 pub(super) struct PivotParts {
@@ -34,7 +34,7 @@ pub(super) fn build(
     stats: &mut XlsxExportStats,
 ) -> Result<Vec<PivotParts>, String> {
     let mut result = Vec::new();
-    let mut remaining = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2;
+    let mut remaining = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2;
     for (index, pivot) in workbook.pivot_tables.iter().enumerate() {
         let source = workbook
             .sheets

@@ -1,16 +1,16 @@
 {
-  "name": "Contrix Office",
-  "short_name": "Contrix",
+  "name": "Syntra Office",
+  "short_name": "Syntra",
   "description": "Collaborative office suite",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#1e293b",
+  "theme_color": "#172554",
   "icons": [
     {
-      "src": "/favicon.ico",
+      "src": "/icons/syntra.svg",
       "sizes": "any",
-      "type": "image/x-icon"
+      "type": "image/svg+xml"
     },
     {
       "src": "/icons/icon-192.png",
@@ -21,6 +21,18 @@
       "src": "/icons/icon-512.png",
       "sizes": "512x512",
       "type": "image/png"
+    },
+    {
+      "src": "/icons/syntra-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

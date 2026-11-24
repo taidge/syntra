@@ -5,11 +5,11 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, CreateShareRequest, ShareResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::{File, NewShare, SharePermission};
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::shares::dsl as s;
+use syntra_core::dto::{ApiResponse, CreateShareRequest, ShareResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::{File, NewShare, SharePermission};
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::shares::dsl as s;
 
 use crate::handlers::access::{authorize_file_access, load_accessible_file};
 use crate::middleware::auth::get_user_id;
@@ -129,7 +129,7 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
         return;
     }
     if let Some(group) = body.shared_with_group_id {
-        use contrix_core::schema::groups::dsl as g;
+        use syntra_core::schema::groups::dsl as g;
         let owner = match g::groups
             .find(group.to_string())
             .select(g::created_by)
@@ -217,9 +217,9 @@ pub async fn create_share(req: &mut Request, depot: &mut Depot, res: &mut Respon
             if let Some(target) = body.shared_with_user_id.map(|u| u.to_string())
                 && target != uid
             {
-                let from_username = contrix_core::schema::users::dsl::users
-                    .filter(contrix_core::schema::users::dsl::id.eq(&uid))
-                    .select(contrix_core::schema::users::dsl::username)
+                let from_username = syntra_core::schema::users::dsl::users
+                    .filter(syntra_core::schema::users::dsl::id.eq(&uid))
+                    .select(syntra_core::schema::users::dsl::username)
                     .first::<String>(&mut conn)
                     .await
                     .unwrap_or_else(|_| "Someone".to_string());
@@ -799,7 +799,7 @@ pub async fn access_public_share(req: &mut Request, depot: &mut Depot, res: &mut
         Ok(d) => d,
         Err(_) => {
             // Documents are stored as JSON blobs; fall back to the document row.
-            use contrix_core::schema::documents::dsl as d;
+            use syntra_core::schema::documents::dsl as d;
             let content = d::documents
                 .filter(d::file_id.eq(&file_row.id))
                 .select(d::content)

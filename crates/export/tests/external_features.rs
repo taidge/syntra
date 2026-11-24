@@ -1,7 +1,7 @@
-//! Fixtures are hand-authored standard Office parts, with no Contrix cache.
+//! Fixtures are hand-authored standard Office parts, with no syntra cache.
 use calamine::{Data, Reader, Xlsx};
-use contrix_doc_engine::{calc::*, slides::*};
 use std::io::{Cursor, Read, Write};
+use syntra_doc_engine::{calc::*, slides::*};
 use zip::{
     ZipArchive,
     write::{SimpleFileOptions, ZipWriter},
@@ -44,7 +44,7 @@ fn replace(bytes: &[u8], path: &str, value: &str) -> Vec<u8> {
 #[test]
 fn external_xlsx_imports_styles_dimensions_names_validations_chart_and_simple_pivot() {
     let bytes = include_bytes!("fixtures/external-rich.xlsx");
-    let mut book = contrix_export::xlsx::xlsx_to_workbook(bytes).unwrap();
+    let mut book = syntra_export::xlsx::xlsx_to_workbook(bytes).unwrap();
     let sheet = &book.sheets[0];
     let cell = sheet.get_cell(1, 1).unwrap();
     assert!(cell.format.bold && cell.format.italic && cell.format.underline);
@@ -99,7 +99,7 @@ fn external_xlsx_imports_styles_dimensions_names_validations_chart_and_simple_pi
             && warnings.contains("defined name")
     );
     book.sheets[0].set_cell(1, 1, CellValue::Number(40.));
-    let exported = contrix_export::xlsx::workbook_to_xlsx(&book).unwrap();
+    let exported = syntra_export::xlsx::workbook_to_xlsx(&book).unwrap();
     let chart = part(&exported, "xl/charts/chart1.xml");
     assert!(chart.contains("<c:numCache>") && chart.contains("<c:v>40</c:v>"));
     assert!(chart.contains("Data&apos;!B2:B4"));
@@ -116,7 +116,7 @@ fn external_xlsx_imports_styles_dimensions_names_validations_chart_and_simple_pi
     );
     assert!(part(&exported, "xl/pivotCache/pivotCacheRecords1.xml").contains("count=\"3\""));
     let external = replace(&exported, "unused", "");
-    let reparsed = contrix_export::xlsx::xlsx_to_workbook(&external).unwrap();
+    let reparsed = syntra_export::xlsx::xlsx_to_workbook(&external).unwrap();
     assert_eq!(reparsed.pivot_tables.len(), 1);
     assert_eq!(reparsed.named_ranges.len(), 1);
     assert_eq!(reparsed.sheets[0].charts[0].series_sources.len(), 1);
@@ -150,7 +150,7 @@ fn external_xlsx_imports_styles_dimensions_names_validations_chart_and_simple_pi
 #[test]
 fn external_pptx_imports_actual_coordinates_theme_runs_images_groups_charts_and_timing() {
     let bytes = include_bytes!("fixtures/external-rich.pptx");
-    let presentation = contrix_export::pptx::pptx_to_presentation(bytes).unwrap();
+    let presentation = syntra_export::pptx::pptx_to_presentation(bytes).unwrap();
     assert_eq!(presentation.metadata.slide_width, 1280.);
     assert_eq!(presentation.metadata.slide_height, 720.);
     let slide = &presentation.slides[0];
@@ -229,13 +229,13 @@ fn external_pptx_imports_actual_coordinates_theme_runs_images_groups_charts_and_
             .join(" ")
             .contains("SmartArt")
     );
-    let exported = contrix_export::pptx::presentation_to_pptx(&presentation).unwrap();
+    let exported = syntra_export::pptx::presentation_to_pptx(&presentation).unwrap();
     assert!(part(&exported, "ppt/presentation.xml").contains("cx=\"12192000\""));
     assert!(part(&exported, "ppt/slides/slide1.xml").contains("<p:pic>"));
     assert!(part(&exported, "ppt/charts/chart1.xml").contains("<c:v>20</c:v>"));
     // Strip the native part, then verify the standard exported elements.
     let external = replace(&exported, "unused", "");
-    let reparsed = contrix_export::pptx::pptx_to_presentation(&external).unwrap();
+    let reparsed = syntra_export::pptx::pptx_to_presentation(&external).unwrap();
     assert!(
         reparsed.slides[0]
             .elements
@@ -255,14 +255,14 @@ fn external_xml_budget_is_enforced_at_public_import_entry() {
     let deep = format!("{}{}", "<x>".repeat(130), "</x>".repeat(130));
     let bytes = replace(fixture, "ppt/slides/slide1.xml", &deep);
     assert!(
-        contrix_export::pptx::pptx_to_presentation(&bytes)
+        syntra_export::pptx::pptx_to_presentation(&bytes)
             .unwrap_err()
             .contains("budget")
     );
     let wide = format!("<root>{}</root>", "<item/>".repeat(200_001));
     let bytes = replace(fixture, "ppt/slides/slide1.xml", &wide);
     assert!(
-        contrix_export::pptx::pptx_to_presentation(&bytes)
+        syntra_export::pptx::pptx_to_presentation(&bytes)
             .unwrap_err()
             .contains("budget")
     );
@@ -274,7 +274,7 @@ fn external_hyperlinks_are_filtered_and_media_is_budgeted_before_base64() {
     let links = part(fixture, "ppt/slides/_rels/slide1.xml.rels")
         .replace("https://example.org/safe", "javascript:alert(1)");
     let unsafe_file = replace(fixture, "ppt/slides/_rels/slide1.xml.rels", &links);
-    let model = contrix_export::pptx::pptx_to_presentation(&unsafe_file).unwrap();
+    let model = syntra_export::pptx::pptx_to_presentation(&unsafe_file).unwrap();
     let SlideElement::TextBox(text) = &model.slides[0].elements[0] else {
         panic!("textbox")
     };
@@ -287,7 +287,7 @@ fn external_hyperlinks_are_filtered_and_media_is_budgeted_before_base64() {
         "ppt/media/pixel.png",
         &"x".repeat(2 * 1024 * 1024 + 1),
     );
-    let model = contrix_export::pptx::pptx_to_presentation(&oversized).unwrap();
+    let model = syntra_export::pptx::pptx_to_presentation(&oversized).unwrap();
     assert!(
         !model.slides[0]
             .elements
@@ -301,7 +301,7 @@ fn external_hyperlinks_are_filtered_and_media_is_budgeted_before_base64() {
     let slide = slide.replacen(&slide[begin..end], &slide[begin..end].repeat(10), 1);
     let repeated = replace(fixture, "ppt/media/pixel.png", &"x".repeat(1024 * 1024));
     let repeated = replace(&repeated, "ppt/slides/slide1.xml", &slide);
-    let model = contrix_export::pptx::pptx_to_presentation(&repeated).unwrap();
+    let model = syntra_export::pptx::pptx_to_presentation(&repeated).unwrap();
     assert_eq!(
         model.slides[0]
             .elements
@@ -311,7 +311,7 @@ fn external_hyperlinks_are_filtered_and_media_is_budgeted_before_base64() {
         8
     );
     assert!(
-        serde_json::to_vec(&model).unwrap().len() <= contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES
+        serde_json::to_vec(&model).unwrap().len() <= syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES
     );
     assert!(model.metadata.import_warnings.join(" ").contains("budget"));
 }
@@ -321,11 +321,11 @@ fn external_import_cannot_create_a_model_larger_than_the_editor_can_save() {
     let fixture = include_bytes!("fixtures/external-rich.pptx");
     let slide = part(fixture, "ppt/slides/slide1.xml").replace(
         "Rich ",
-        &"x".repeat(contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES),
+        &"x".repeat(syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES),
     );
     let bytes = replace(fixture, "ppt/slides/slide1.xml", &slide);
     assert!(
-        contrix_export::pptx::pptx_to_presentation(&bytes)
+        syntra_export::pptx::pptx_to_presentation(&bytes)
             .unwrap_err()
             .contains("document content budget")
     );
@@ -334,7 +334,7 @@ fn external_import_cannot_create_a_model_larger_than_the_editor_can_save() {
 #[test]
 fn imported_pivot_count_and_average_follow_office_nonempty_numeric_rules() {
     let mut book =
-        contrix_export::xlsx::xlsx_to_workbook(include_bytes!("fixtures/external-rich.xlsx"))
+        syntra_export::xlsx::xlsx_to_workbook(include_bytes!("fixtures/external-rich.xlsx"))
             .unwrap();
     let id = book.pivot_tables[0].id;
     book.sheets[0].set_cell(1, 1, CellValue::Number(40.));
@@ -368,7 +368,7 @@ fn relationship_attribute_prefixes_and_invalid_non_ascii_colors_are_safe() {
         .replace("r:link=", "rel:link=")
         .replace("val=\"123456\"", "val=\"中abc\"");
     let bytes = replace(fixture, "ppt/slides/slide1.xml", &slide);
-    let model = contrix_export::pptx::pptx_to_presentation(&bytes).unwrap();
+    let model = syntra_export::pptx::pptx_to_presentation(&bytes).unwrap();
     assert!(
         model.slides[0]
             .elements
@@ -383,7 +383,7 @@ fn relationship_attribute_prefixes_and_invalid_non_ascii_colors_are_safe() {
     let fixture = include_bytes!("fixtures/external-rich.xlsx");
     let styles = part(fixture, "xl/styles.xml").replace("FF123456", "中abcde");
     let bytes = replace(fixture, "xl/styles.xml", &styles);
-    assert!(contrix_export::xlsx::xlsx_to_workbook(&bytes).is_ok());
+    assert!(syntra_export::xlsx::xlsx_to_workbook(&bytes).is_ok());
 }
 
 #[test]
@@ -398,7 +398,7 @@ fn sparse_chart_indices_share_a_document_wide_expansion_budget() {
     );
     let chart = chart.replace(&chart[begin..end], &series.repeat(2));
     let bytes = replace(fixture, "ppt/charts/chart1.xml", &chart);
-    let model = contrix_export::pptx::pptx_to_presentation(&bytes).unwrap();
+    let model = syntra_export::pptx::pptx_to_presentation(&bytes).unwrap();
     assert!(
         !model.slides[0]
             .elements
@@ -430,15 +430,15 @@ fn master_decorations_and_embedded_background_images_are_real_standard_objects()
         "<a:blipFill><a:blip r:embed=\"img\"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>",
     );
     let bytes = replace(&bytes, "ppt/slides/slide1.xml", &slide);
-    let model = contrix_export::pptx::pptx_to_presentation(&bytes).unwrap();
+    let model = syntra_export::pptx::pptx_to_presentation(&bytes).unwrap();
     assert!(matches!(&model.slides[0].elements[0],SlideElement::Shape(s) if s.x==80. && s.y==180.));
     assert!(
         matches!(&model.slides[0].background,Background::Image(url) if url.starts_with("data:image/png;base64,"))
     );
-    let exported = contrix_export::pptx::presentation_to_pptx(&model).unwrap();
+    let exported = syntra_export::pptx::presentation_to_pptx(&model).unwrap();
     assert!(part(&exported, "ppt/slides/slide1.xml").contains("<p:bg><p:bgPr><a:blipFill>"));
     let model =
-        contrix_export::pptx::pptx_to_presentation(&replace(&exported, "unused", "")).unwrap();
+        syntra_export::pptx::pptx_to_presentation(&replace(&exported, "unused", "")).unwrap();
     assert!(
         matches!(&model.slides[0].background,Background::Image(url) if url.starts_with("data:image/png;base64,"))
     );
@@ -461,7 +461,7 @@ fn drawingml_numeric_overflow_is_rejected_before_float_model_conversion() {
     ];
     for (field, xml) in invalid_fields {
         let bytes = replace(fixture, "ppt/slides/slide1.xml", &xml);
-        let error = contrix_export::pptx::pptx_to_presentation(&bytes).unwrap_err();
+        let error = syntra_export::pptx::pptx_to_presentation(&bytes).unwrap_err();
         assert!(error.contains("finite geometry budget"), "{field}: {error}");
     }
     // Inherited placeholders/themes go through the same bounded part reader.
@@ -470,7 +470,7 @@ fn drawingml_numeric_overflow_is_rejected_before_float_model_conversion() {
     assert_ne!(layout, part(fixture, "ppt/slideLayouts/slideLayout1.xml"));
     let bytes = replace(fixture, "ppt/slideLayouts/slideLayout1.xml", &layout);
     assert!(
-        contrix_export::pptx::pptx_to_presentation(&bytes)
+        syntra_export::pptx::pptx_to_presentation(&bytes)
             .unwrap_err()
             .contains("finite geometry budget")
     );
@@ -485,7 +485,7 @@ fn bounded_large_drawingml_numbers_still_make_a_reloadable_typed_model() {
         .replace("sz=\"2400\"","sz=\"1000000000000\"")
         .replace("<p:bgPr><a:solidFill><a:srgbClr val=\"F0F4F8\"/></a:solidFill></p:bgPr>","<p:bgPr><a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"FFFFFF\"/></a:gs><a:gs pos=\"100000\"><a:srgbClr val=\"000000\"/></a:gs></a:gsLst><a:lin ang=\"1000000000000\"/></a:gradFill></p:bgPr>");
     let bytes = replace(fixture, "ppt/slides/slide1.xml", &slide);
-    let model = contrix_export::pptx::pptx_to_presentation(&bytes).unwrap();
+    let model = syntra_export::pptx::pptx_to_presentation(&bytes).unwrap();
     let reparsed: Presentation =
         serde_json::from_value(serde_json::to_value(&model).unwrap()).unwrap();
     let Background::Gradient(_, _, angle) = reparsed.slides[0].background else {
@@ -499,7 +499,7 @@ fn bounded_large_drawingml_numbers_still_make_a_reloadable_typed_model() {
     assert_eq!(text.content[0].font_size, Some(10000.));
     // A table is also converted through actual grid/row numeric geometry.
     let slide=part(fixture,"ppt/slides/slide1.xml").replace("<p:spTree>","<p:spTree><p:graphicFrame><p:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"952500\" cy=\"952500\"/></p:xfrm><a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"1000000000000\"/></a:tblGrid><a:tr h=\"1000000000000\"><a:tc><a:txBody><a:p><a:r><a:t>Large table cell</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>");
-    let model = contrix_export::pptx::pptx_to_presentation(&replace(
+    let model = syntra_export::pptx::pptx_to_presentation(&replace(
         fixture,
         "ppt/slides/slide1.xml",
         &slide,
@@ -521,8 +521,7 @@ fn xlsx_float_metrics_reject_nonfinite_and_out_of_budget_values() {
     let fixture = include_bytes!("fixtures/external-rich.xlsx");
     let styles = part(fixture, "xl/styles.xml").replace("<sz val=\"16\"/>", "<sz val=\"1e300\"/>");
     assert!(
-        contrix_export::xlsx::xlsx_to_workbook(&replace(fixture, "xl/styles.xml", &styles))
-            .is_err()
+        syntra_export::xlsx::xlsx_to_workbook(&replace(fixture, "xl/styles.xml", &styles)).is_err()
     );
     let sheet = part(fixture, "xl/worksheets/sheet1.xml");
     for (from, to) in [
@@ -534,7 +533,7 @@ fn xlsx_float_metrics_reject_nonfinite_and_out_of_budget_values() {
             "xl/worksheets/sheet1.xml",
             &sheet.replace(from, to),
         );
-        assert!(contrix_export::xlsx::xlsx_to_workbook(&bytes).is_err());
+        assert!(syntra_export::xlsx::xlsx_to_workbook(&bytes).is_err());
     }
 }
 
@@ -544,10 +543,10 @@ fn external_shared_string_rich_runs_keep_text_and_report_style_downgrade() {
     assert!(
         ZipArchive::new(Cursor::new(fixture))
             .unwrap()
-            .by_name("customXml/contrix-workbook.json")
+            .by_name("customXml/syntra-workbook.json")
             .is_err()
     );
-    let model = contrix_export::xlsx::xlsx_to_workbook(fixture).unwrap();
+    let model = syntra_export::xlsx::xlsx_to_workbook(fixture).unwrap();
     assert!(
         matches!(&model.sheets[0].get_cell(1,0).unwrap().value,CellValue::Text(text) if text=="East")
     );
@@ -580,7 +579,7 @@ fn tiny_external_xlsx_cannot_reserve_from_unbounded_shared_string_headers() {
     ] {
         let bytes = replace(fixture, "xl/sharedStrings.xml", &table.replace(from, to));
         assert!(bytes.len() < 100_000);
-        let outcome = std::panic::catch_unwind(|| contrix_export::xlsx::xlsx_to_workbook(&bytes));
+        let outcome = std::panic::catch_unwind(|| syntra_export::xlsx::xlsx_to_workbook(&bytes));
         assert!(
             outcome.is_ok(),
             "untrusted count must not reach Calamine's reserve"
@@ -598,7 +597,7 @@ fn tiny_external_xlsx_cannot_reserve_from_unbounded_shared_string_headers() {
         &table.replace("uniqueCount=\"1\"", "uniqueCount=\"18446744073709551615\""),
     );
     assert!(
-        contrix_export::xlsx::xlsx_to_workbook(&bytes)
+        syntra_export::xlsx::xlsx_to_workbook(&bytes)
             .unwrap_err()
             .contains("allocation budget")
     );
@@ -609,11 +608,11 @@ fn actual_shared_string_nodes_are_bounded_even_when_headers_understate_them() {
     let fixture = include_bytes!("fixtures/external-shared-rich.xlsx");
     let table = format!(
         "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" count=\"0\" uniqueCount=\"0\">{}</sst>",
-        "<si/>".repeat(contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200 + 1)
+        "<si/>".repeat(syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200 + 1)
     );
     let bytes = replace(fixture, "xl/sharedStrings.xml", &table);
     assert!(
-        contrix_export::xlsx::xlsx_to_workbook(&bytes)
+        syntra_export::xlsx::xlsx_to_workbook(&bytes)
             .unwrap_err()
             .contains("actual content exceeds allocation budget")
     );
@@ -630,7 +629,7 @@ fn standard_pptx_page_size_uses_model_pixels_for_landscape_portrait_and_fraction
         let mut presentation = Presentation::new("Page dimensions".into());
         presentation.metadata.slide_width = width;
         presentation.metadata.slide_height = height;
-        let bytes = contrix_export::pptx::presentation_to_pptx(&presentation).unwrap();
+        let bytes = syntra_export::pptx::presentation_to_pptx(&presentation).unwrap();
         let xml = part(&bytes, "ppt/presentation.xml");
         let expected = format!(
             "<p:sldSz cx=\"{}\" cy=\"{}\"",
@@ -640,7 +639,7 @@ fn standard_pptx_page_size_uses_model_pixels_for_landscape_portrait_and_fraction
         assert!(xml.contains(&expected), "{xml}");
         assert!(xml.contains("<p:notesSz cx=\"6858000\" cy=\"9144000\"/>"));
         let standard_only = replace(&bytes, "unused", "");
-        let imported = contrix_export::pptx::pptx_to_presentation(&standard_only).unwrap();
+        let imported = syntra_export::pptx::pptx_to_presentation(&standard_only).unwrap();
         assert!((imported.metadata.slide_width - width).abs() < 0.001);
         assert!((imported.metadata.slide_height - height).abs() < 0.001);
     }
@@ -659,7 +658,7 @@ fn standard_pptx_export_rejects_invalid_page_size_instead_of_writing_null_or_sat
         presentation.metadata.slide_width = width;
         presentation.metadata.slide_height = height;
         assert!(
-            contrix_export::pptx::presentation_to_pptx(&presentation)
+            syntra_export::pptx::presentation_to_pptx(&presentation)
                 .unwrap_err()
                 .contains("page dimensions")
         );

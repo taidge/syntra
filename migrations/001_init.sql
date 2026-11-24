@@ -1,4 +1,4 @@
--- Contrix Office: Initial schema migration
+-- syntra: Initial schema migration
 -- Creates all core tables and indexes.
 
 CREATE TABLE IF NOT EXISTS users (

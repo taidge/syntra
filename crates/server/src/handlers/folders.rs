@@ -5,11 +5,11 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, CreateFolderRequest, FileResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::{File, NewFile};
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
+use syntra_core::dto::{ApiResponse, CreateFolderRequest, FileResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::{File, NewFile};
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::files::dsl as f;
 
 use crate::handlers::access::{
     authorize_file_access, check_room_access, load_accessible_folder, load_accessible_target_folder,

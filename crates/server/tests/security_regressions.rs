@@ -2,13 +2,13 @@
 mod common;
 
 use common::TestServer;
-use contrix_core::models::NewPasswordResetToken;
-use contrix_core::schema::{
+use diesel::prelude::*;
+use serde_json::{Value, json};
+use syntra_core::models::NewPasswordResetToken;
+use syntra_core::schema::{
     file_locks::dsl as fl, group_members::dsl as gm, password_reset_tokens::dsl as prt,
     room_members::dsl as rm, users::dsl as u,
 };
-use diesel::prelude::*;
-use serde_json::{Value, json};
 
 async fn create(server: &TestServer, token: &str, path: &str, body: Value) -> Value {
     let response = server
@@ -259,7 +259,7 @@ async fn unauthorized_room_and_group_delete_preserves_members_and_failure_rolls_
         .db
         .run(move |conn| {
             Ok::<_, diesel::result::Error>((
-                contrix_core::schema::groups::table
+                syntra_core::schema::groups::table
                     .find(&retained_group)
                     .count()
                     .get_result::<i64>(conn)?,
@@ -374,7 +374,7 @@ async fn invitation_details_do_not_disclose_other_users_capabilities() {
         let unchanged = server
             .db
             .run(move |conn| {
-                use contrix_core::schema::invitations::dsl as inv;
+                use syntra_core::schema::invitations::dsl as inv;
                 Ok::<_, diesel::result::Error>((
                     inv::invitations
                         .find(invitation_id)
@@ -1045,7 +1045,7 @@ async fn assign_tenant(server: &TestServer, user: &str, tenant: &str) {
 
 #[tokio::test]
 async fn tenant_memberships_shares_and_legacy_memberships_do_not_cross_namespaces() {
-    use contrix_core::models::{NewGroupMember, NewRoomMember};
+    use syntra_core::models::{NewGroupMember, NewRoomMember};
     let server = TestServer::new().await;
     let (platform, platform_user) = server
         .register("platform", "platform@test.com", "password123")
@@ -1199,7 +1199,7 @@ async fn tenant_memberships_shares_and_legacy_memberships_do_not_cross_namespace
 
 #[tokio::test]
 async fn accepted_invitation_inherits_issuer_tenant_and_inactive_tenant_revokes_wopi() {
-    use contrix_core::models::NewInvitation;
+    use syntra_core::models::NewInvitation;
     let server = TestServer::new().await;
     let (platform, platform_user) = server
         .register("tenantplatform", "tenantplatform@test.com", "password123")
@@ -1237,7 +1237,7 @@ async fn accepted_invitation_inherits_issuer_tenant_and_inactive_tenant_revokes_
     server
         .db
         .run(move |conn| {
-            diesel::insert_into(contrix_core::schema::invitations::table)
+            diesel::insert_into(syntra_core::schema::invitations::table)
                 .values(invitation)
                 .execute(conn)
         })

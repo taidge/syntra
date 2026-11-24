@@ -737,13 +737,13 @@ fn editor_menus(
         .label(crate::i18n::t("menubar.help"))
         .item(
             sapid::menu_item("project")
-                .label("Contrix Office on GitHub")
-                .on_activate(|| crate::components::ui::go("https://github.com/contrix-org/office")),
+                .label("Syntra Office on GitHub")
+                .on_activate(|| crate::components::ui::go("https://github.com/taidge/syntra")),
         );
     sapid::menubar(format!("{}-document-menu", kind.to_lowercase()))
         .name("Document menu")
         .theme(crate::components::ui::theme())
-        .class("menubar office-menubar")
+        .class("menubar syntra-menubar")
         .menus([file, edit, view_menu, insert, format, tools, help])
 }
 

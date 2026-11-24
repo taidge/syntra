@@ -30,8 +30,8 @@ fn cell_input_text(cell: &serde_json::Value) -> String {
         cell_value_to_string(&cell["value"])
     }
 }
-fn calculated_text(value: &contrix_doc_engine::calc::CellValue) -> String {
-    use contrix_doc_engine::calc::CellValue;
+fn calculated_text(value: &syntra_doc_engine::calc::CellValue) -> String {
+    use syntra_doc_engine::calc::CellValue;
     match value {
         CellValue::Empty => String::new(),
         CellValue::Number(n) => format_number_default(*n),
@@ -67,7 +67,7 @@ fn merge_visible_delta(
     }
 }
 
-type CalculatedCells = HashMap<CellKey, contrix_doc_engine::calc::CellValue>;
+type CalculatedCells = HashMap<CellKey, syntra_doc_engine::calc::CellValue>;
 
 #[derive(Clone)]
 struct CalculationCache {
@@ -366,7 +366,7 @@ impl Book {
             .values
             .get(&(si, row, col))
         {
-            Some(contrix_doc_engine::calc::CellValue::Number(n)) => Some(*n),
+            Some(syntra_doc_engine::calc::CellValue::Number(n)) => Some(*n),
             _ => None,
         }
     }
@@ -389,7 +389,7 @@ impl Book {
                         cache
                             .values
                             .get(&(si, row, col))
-                            .unwrap_or(&contrix_doc_engine::CellValue::Empty),
+                            .unwrap_or(&syntra_doc_engine::CellValue::Empty),
                     )
                     .expect("cell values serialize");
                 }
@@ -3306,23 +3306,23 @@ mod tests {
 mod review_regressions {
     use super::*;
     fn book() -> Book {
-        let mut workbook = contrix_doc_engine::Workbook::new("Review".into());
+        let mut workbook = syntra_doc_engine::Workbook::new("Review".into());
         let sheet = &mut workbook.sheets[0];
         sheet.set_cell(
             0,
             0,
-            contrix_doc_engine::calc::CellValue::Text("00123".into()),
+            syntra_doc_engine::calc::CellValue::Text("00123".into()),
         );
-        sheet.set_cell(0, 1, contrix_doc_engine::calc::CellValue::Boolean(true));
+        sheet.set_cell(0, 1, syntra_doc_engine::calc::CellValue::Boolean(true));
         sheet.set_cell(
             0,
             2,
-            contrix_doc_engine::calc::CellValue::Date("2026-11-09".into()),
+            syntra_doc_engine::calc::CellValue::Date("2026-11-09".into()),
         );
         sheet.set_cell(
             0,
             3,
-            contrix_doc_engine::calc::CellValue::Error("#N/A".into()),
+            syntra_doc_engine::calc::CellValue::Error("#N/A".into()),
         );
         let mut book = Book::default();
         book.hydrate(serde_json::to_value(workbook).unwrap());
@@ -3393,7 +3393,7 @@ mod review_regressions {
 mod snapshot_merge_regressions {
     use super::*;
     fn book() -> Book {
-        let workbook = contrix_doc_engine::Workbook::new("Merge".into());
+        let workbook = syntra_doc_engine::Workbook::new("Merge".into());
         let mut book = Book::default();
         book.hydrate(serde_json::to_value(workbook).unwrap());
         book
@@ -3459,8 +3459,8 @@ mod snapshot_merge_regressions {
     }
     #[test]
     fn derived_formula_cache_does_not_create_a_false_cell_conflict() {
-        let mut engine = contrix_doc_engine::Workbook::new("Formula".into());
-        engine.sheets[0].set_cell(0, 0, contrix_doc_engine::calc::CellValue::Number(1.0));
+        let mut engine = syntra_doc_engine::Workbook::new("Formula".into());
+        engine.sheets[0].set_cell(0, 0, syntra_doc_engine::calc::CellValue::Number(1.0));
         engine.sheets[0].set_formula(0, 1, "=A1+1".into());
         engine.sheets[0].recalculate();
         let base = serde_json::to_value(engine).unwrap();
@@ -3535,13 +3535,13 @@ mod new_cell_format_regressions {
     fn empty_book() -> Book {
         let mut book = Book::default();
         book.hydrate(
-            serde_json::to_value(contrix_doc_engine::Workbook::new("New styled cells".into()))
+            serde_json::to_value(syntra_doc_engine::Workbook::new("New styled cells".into()))
                 .unwrap(),
         );
         book
     }
-    fn strict_cell(content: &serde_json::Value) -> contrix_doc_engine::calc::Cell {
-        let book: contrix_doc_engine::Workbook = serde_json::from_value(content.clone())
+    fn strict_cell(content: &serde_json::Value) -> syntra_doc_engine::calc::Cell {
+        let book: syntra_doc_engine::Workbook = serde_json::from_value(content.clone())
             .expect("formatted new cells must deserialize as a complete native workbook");
         book.sheets[0]
             .get_cell(0, 0)
@@ -3565,7 +3565,7 @@ mod new_cell_format_regressions {
         let cell = strict_cell(&raw);
         assert!(matches!(
             cell.value,
-            contrix_doc_engine::calc::CellValue::Number(5.0)
+            syntra_doc_engine::calc::CellValue::Number(5.0)
         ));
         assert!(cell.format.bold);
         assert_eq!(book.display(0, 0, 0), "5");
@@ -3590,7 +3590,7 @@ mod new_cell_format_regressions {
         let cell = strict_cell(&empty);
         assert!(matches!(
             cell.value,
-            contrix_doc_engine::calc::CellValue::Empty
+            syntra_doc_engine::calc::CellValue::Empty
         ));
         book.checkpoint();
         book.snapshot
@@ -3600,7 +3600,7 @@ mod new_cell_format_regressions {
         let persisted = book.serialize();
         let cell = strict_cell(&persisted);
         assert!(
-            matches!(cell.value,contrix_doc_engine::calc::CellValue::Text(ref text) if text=="Saved via shortcut")
+            matches!(cell.value,syntra_doc_engine::calc::CellValue::Text(ref text) if text=="Saved via shortcut")
         );
         assert_eq!(cell.format.font_family.as_deref(), Some("Arial"));
         assert_eq!(cell.format.font_size, Some(18.0));
@@ -3618,14 +3618,14 @@ mod new_cell_format_regressions {
         });
         merge_visible_delta(&mut format, &before, &after);
         assert_eq!(format, serde_json::json!({"bold":true}));
-        let parsed: contrix_doc_engine::calc::CellFormat = serde_json::from_value(format).unwrap();
+        let parsed: syntra_doc_engine::calc::CellFormat = serde_json::from_value(format).unwrap();
         assert!(parsed.bold);
         assert!(!parsed.italic);
     }
     #[test]
     fn legacy_malformed_visual_format_does_not_hide_values_or_break_formulas() {
-        let mut workbook = contrix_doc_engine::Workbook::new("Legacy".into());
-        workbook.sheets[0].set_cell(0, 0, contrix_doc_engine::calc::CellValue::Number(5.0));
+        let mut workbook = syntra_doc_engine::Workbook::new("Legacy".into());
+        workbook.sheets[0].set_cell(0, 0, syntra_doc_engine::calc::CellValue::Number(5.0));
         workbook.sheets[0].set_formula(0, 1, "=A1+2".into());
         let mut native = serde_json::to_value(workbook).unwrap();
         let legacy_format = serde_json::json!({"bold":null,"horizontal_align":"legacy-unknown"});
@@ -3654,8 +3654,8 @@ mod new_cell_format_regressions {
     }
     #[test]
     fn malformed_typed_value_is_a_visible_error_instead_of_an_empty_cell() {
-        let mut workbook = contrix_doc_engine::Workbook::new("Invalid value".into());
-        workbook.sheets[0].set_cell(0, 0, contrix_doc_engine::calc::CellValue::Number(5.0));
+        let mut workbook = syntra_doc_engine::Workbook::new("Invalid value".into());
+        workbook.sheets[0].set_cell(0, 0, syntra_doc_engine::calc::CellValue::Number(5.0));
         let mut native = serde_json::to_value(workbook).unwrap();
         native["sheets"][0]["cells"][0][1]["value"] =
             serde_json::json!({"type":"Number","value":"invalid"});

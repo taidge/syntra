@@ -5,11 +5,11 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{NewUserPresence, UserPresence};
-use contrix_core::schema::user_presence::dsl as up;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{NewUserPresence, UserPresence};
+use syntra_core::schema::user_presence::dsl as up;
+use syntra_core::schema::users::dsl as u;
 
 use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;

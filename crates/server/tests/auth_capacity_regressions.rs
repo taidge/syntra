@@ -29,7 +29,7 @@ impl LogCapture {
         tracing_subscriber::fmt()
             .with_ansi(false)
             .without_time()
-            .with_env_filter("off,contrix_server::middleware::request_observability=trace")
+            .with_env_filter("off,syntra_server::middleware::request_observability=trace")
             .with_writer(move || writer.clone())
             .finish()
     }

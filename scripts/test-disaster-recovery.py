@@ -152,8 +152,8 @@ def run_server(instance, binary):
         encoding="utf-8",
     )
     env = {key: value for key, value in os.environ.items()
-           if not key.upper().startswith("CONTRIX_") and key.upper() not in {"APP_ENV", "JWT_SECRET"}}
-    env.update(CONTRIX_ENV="recovery-smoke", JWT_SECRET=secrets.token_hex(32), RUST_LOG="warn")
+           if not key.upper().startswith(("SYNTRA_", "\x43ONTRIX_")) and key.upper() not in {"APP_ENV", "JWT_SECRET"}}
+    env.update(SYNTRA_ENV="recovery-smoke", JWT_SECRET=secrets.token_hex(32), RUST_LOG="warn")
     client = Client(port)
     with (instance / "stdout.log").open("wb") as stdout, (instance / "stderr.log").open("wb") as stderr:
         process = subprocess.Popen([str(binary)], cwd=instance, env=env, stdout=stdout, stderr=stderr,
@@ -333,13 +333,13 @@ def main():
     if archive is None:
         version = subprocess.check_output(["rustc", "-vV"], cwd=workspace, text=True, timeout=30)
         host = next(line.split(": ", 1)[1] for line in version.splitlines() if line.startswith("host: "))
-        archive = target / "dist" / f"contrix-office-{host}.zip"
+        archive = target / "dist" / f"syntra-{host}.zip"
     archive = archive_path(archive)
     root = target / "disaster-recovery" / uuid.uuid4().hex
     root.mkdir(parents=True)
     print(f"Disaster recovery artifacts: {root}", flush=True)
     evidence = {"success": False, "archive": str(archive), "archive_sha256": sha256(archive)}
-    binary_name = "contrix-server.exe" if os.name == "nt" else "contrix-server"
+    binary_name = "syntra-server.exe" if os.name == "nt" else "syntra-server"
     try:
         rehearse(root, archive, binary_name, evidence)
         require(sha256(archive) == evidence["archive_sha256"], "release ZIP changed during the rehearsal")

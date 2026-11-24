@@ -3,16 +3,16 @@
 use std::sync::{Arc, LazyLock};
 
 use chrono::Utc;
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{File, FileVersion, NewDocument, NewFile, NewFileVersion};
-use contrix_core::schema::{documents::dsl as d, file_versions::dsl as fv, files::dsl as f};
-use contrix_export::pdf_import::{MAX_PDF_SOURCE_BYTES, PdfInfo};
 use diesel::prelude::*;
 use horme::{OptionalExtension, RunQueryDsl};
 use salvo::prelude::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{DocumentType, File, FileVersion, NewDocument, NewFile, NewFileVersion};
+use syntra_core::schema::{documents::dsl as d, file_versions::dsl as fv, files::dsl as f};
+use syntra_export::pdf_import::{MAX_PDF_SOURCE_BYTES, PdfInfo};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
@@ -102,7 +102,7 @@ async fn inspect(
 ) -> Result<PdfInfo, AppError> {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        contrix_export::pdf_import::validate_pdf(&bytes).map_err(AppError::Validation)
+        syntra_export::pdf_import::validate_pdf(&bytes).map_err(AppError::Validation)
     })
     .await
     .map_err(|_| AppError::Validation("PDF could not be processed".into()))?
@@ -441,7 +441,7 @@ pub async fn convert_pdf(req: &mut Request, depot: &mut Depot, res: &mut Respons
         let id = req.param::<String>("id").unwrap_or_default();
         let original = source(&state,&id,&actor,"viewer").await?;
         let permit=capacity()?;
-        let payload=body(req,res,&state,contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 64 * 1024).await?;
+        let payload=body(req,res,&state,syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 64 * 1024).await?;
         let request: ConvertRequest=serde_json::from_slice(&payload).map_err(|error|AppError::Validation(format!("Invalid conversion request: {error}")))?;
         let expected=expected_etag(Some(&request.expected_etag))?;
         let bytes=source_bytes(&state,&original.path,original.size).await?;
@@ -454,8 +454,8 @@ pub async fn convert_pdf(req: &mut Request, depot: &mut Depot, res: &mut Respons
         let imported=tokio::task::spawn_blocking(move || {
             let _permit=native_permit;
             match request.ocr_pages {
-                Some(pages)=>contrix_export::pdf_import::pdf_to_writer_with_pages(&bytes,&native_title,pages),
-                None=>contrix_export::pdf_import::pdf_to_writer(&bytes,&native_title),
+                Some(pages)=>syntra_export::pdf_import::pdf_to_writer_with_pages(&bytes,&native_title,pages),
+                None=>syntra_export::pdf_import::pdf_to_writer(&bytes,&native_title),
             }
         }).await.map_err(|_|AppError::Validation("PDF conversion could not be completed".into()))?.map_err(AppError::Validation)?;
         let warnings=imported.warnings;
@@ -465,11 +465,11 @@ pub async fn convert_pdf(req: &mut Request, depot: &mut Depot, res: &mut Respons
         let owner=actor.parse().map_err(|_|AppError::Validation("Invalid file owner".into()))?;
         let quota_actor=actor.clone();
         state.db.run(move |conn| persistence::check_staging_quota(conn,&quota_actor,size)).await?;
-        let staged=persistence::stage_blob(&state.db,state.storage.clone(),owner,"pdf-converted.contrix.json".into(),Arc::new(content.as_bytes().to_vec()),permit.clone()).await?;
+        let staged=persistence::stage_blob(&state.db,state.storage.clone(),owner,"pdf-converted.syntra.json".into(),Arc::new(content.as_bytes().to_vec()),permit.clone()).await?;
         let file_id=Uuid::new_v4().to_string();
         let document_id=Uuid::new_v4().to_string();
         let now=Utc::now().to_rfc3339();
-        let new_file=NewFile { id:file_id.clone(),name:title,path:staged.path.clone(),mime_type:Some("application/vnd.contrix.writer".into()),size,owner_id:actor.clone(),parent_id:None,is_folder:false,is_trashed:false,trashed_at:None,created_at:now.clone(),updated_at:now.clone(),room_id:None,thumbnail_path:None,sort_order:0 };
+        let new_file=NewFile { id:file_id.clone(),name:title,path:staged.path.clone(),mime_type:Some(DocumentType::Writer.native_mime_type().into()),size,owner_id:actor.clone(),parent_id:None,is_folder:false,is_trashed:false,trashed_at:None,created_at:now.clone(),updated_at:now.clone(),room_id:None,thumbnail_path:None,sort_order:0 };
         let document=NewDocument { id:document_id.clone(),file_id:file_id.clone(),doc_type:"writer".into(),content:Some(content),version:1,created_at:now.clone(),updated_at:now };
         let request_path=req.uri().path().to_owned();
         staged.commit(move |conn| {

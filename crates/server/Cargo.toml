@@ -1,16 +1,17 @@
 [package]
-name = "contrix-server"
+name = "syntra-server"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+repository.workspace = true
 license.workspace = true
-description = "Salvo-based backend server for Contrix Office"
+description = "Salvo-based backend server for syntra"
 
 [dependencies]
-contrix-core = { path = "../core", features = ["async-db"] }
-contrix-doc-engine = { path = "../doc-engine" }
-contrix-collab = { path = "../collab" }
-contrix-export = { path = "../export" }
+syntra-core = { path = "../core", features = ["async-db"] }
+syntra-doc-engine = { path = "../doc-engine" }
+syntra-collab = { path = "../collab" }
+syntra-export = { path = "../export" }
 
 salvo = { workspace = true }
 tokio = { workspace = true }

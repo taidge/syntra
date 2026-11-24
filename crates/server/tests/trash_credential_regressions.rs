@@ -2,14 +2,14 @@
 mod common;
 
 use common::TestServer;
-use contrix_server::middleware::auth::{hash_token, jwt_auth_middleware};
-use contrix_server::state::AppState;
 use diesel::RunQueryDsl;
 use diesel::sql_types::Text;
 use salvo::conn::Acceptor;
 use salvo::prelude::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use syntra_server::middleware::auth::{hash_token, jwt_auth_middleware};
+use syntra_server::state::AppState;
 use tokio::sync::Notify;
 
 #[derive(Clone)]
@@ -108,9 +108,9 @@ async fn assert_revocation_during_trash_delete(empty: bool) {
         .hoop(jwt_auth_middleware)
         .hoop(gate.clone());
         let route = if empty {
-            route.delete(contrix_server::handlers::trash::empty_trash)
+            route.delete(syntra_server::handlers::trash::empty_trash)
         } else {
-            route.delete(contrix_server::handlers::trash::permanently_delete)
+            route.delete(syntra_server::handlers::trash::permanently_delete)
         };
         let acceptor = TcpListener::new("127.0.0.1:0").bind().await;
         let address = acceptor.holdings()[0]

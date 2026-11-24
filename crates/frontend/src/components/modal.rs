@@ -9,7 +9,7 @@ pub fn Modal<W: Widget>(
 ) -> impl Widget {
     sapid::dialog(key)
         .theme(theme())
-        .class("office-modal")
+        .class("syntra-modal")
         .title(title)
         .close_label(crate::i18n::t("common.close"))
         .close_content(|| icon(Icon::Close))

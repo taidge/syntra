@@ -1,10 +1,11 @@
 [package]
-name = "contrix-doc-engine"
+name = "syntra-doc-engine"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+repository.workspace = true
 license.workspace = true
-description = "Document processing engine for Contrix Office"
+description = "Document processing engine for syntra"
 
 [dependencies]
 serde = { workspace = true }

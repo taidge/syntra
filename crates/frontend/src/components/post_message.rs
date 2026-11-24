@@ -69,7 +69,7 @@ pub fn PostMessageBridge(scope: Scope) -> impl Widget {
                 HostMessage::Save => {
                     if let Some(window) = web_sys::window()
                         && let Some(doc) = window.document()
-                        && let Ok(event) = web_sys::CustomEvent::new("contrix:save")
+                        && let Ok(event) = web_sys::CustomEvent::new("syntra:save")
                     {
                         let _ = doc.dispatch_event(&event);
                     }
@@ -88,11 +88,9 @@ pub fn PostMessageBridge(scope: Scope) -> impl Widget {
                     let route = web_sys::window()
                         .and_then(|w| w.location().pathname().ok())
                         .unwrap_or_default();
-                    let authenticated = web_sys::window()
-                        .and_then(|w| w.local_storage().ok().flatten())
-                        .and_then(|s| s.get_item("contrix.auth").ok().flatten())
-                        .map(|s| !s.is_empty() && s != "{}")
-                        .unwrap_or(false);
+                    let authenticated = crate::state::load_auth_state()
+                        .token
+                        .is_some_and(|token| !token.is_empty());
                     post_to_host(&HostMessage::State {
                         route,
                         authenticated,

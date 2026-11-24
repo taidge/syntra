@@ -4,7 +4,7 @@ port = 8080
 cors_origins = []
 
 [database]
-url = "sqlite:///data/contrix.db?mode=rwc"
+url = "sqlite:///data/syntra.db?mode=rwc"
 max_connections = 20
 
 [auth]

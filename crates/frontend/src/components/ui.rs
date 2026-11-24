@@ -73,6 +73,13 @@ pub fn go(path: &str) {
 pub fn heading(value: impl Into<String>) -> glory::ui::Text {
     text().kind(TextKind::Heading(1)).content(value.into())
 }
+
+pub fn syntra_mark(class: &str) -> glory::ui::Image {
+    image()
+        .source("/icons/syntra.svg")
+        .alt("")
+        .class(format!("syntra-mark {class}"))
+}
 pub fn format_size(bytes: i64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")

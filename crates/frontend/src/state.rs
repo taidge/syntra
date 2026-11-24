@@ -26,7 +26,7 @@ pub struct UserInfo {
 }
 
 // ---------------------------------------------------------------------------
-// DTO types (mirroring server-side contrix_core::dto for JSON de/serialization)
+// DTO types (mirroring server-side syntra_core::dto for JSON de/serialization)
 // ---------------------------------------------------------------------------
 
 /// Envelope used by the backend for all JSON responses.
@@ -121,7 +121,8 @@ pub struct UploadResponse {
 
 /// Same-origin base path for all backend API calls.
 pub const API_BASE: &str = "/api/v1";
-const AUTH_STORAGE_KEY: &str = "contrix.auth";
+const AUTH_STORAGE_KEY: &str = "syntra.auth";
+const LEGACY_AUTH_STORAGE_KEY: &str = "\x63ontrix.auth";
 
 // ---------------------------------------------------------------------------
 // Client-side auth persistence
@@ -129,11 +130,22 @@ const AUTH_STORAGE_KEY: &str = "contrix.auth";
 
 /// Load the last known auth state from browser localStorage.
 pub fn load_auth_state() -> AuthState {
-    web_sys::window()
-        .and_then(|window| window.local_storage().ok().flatten())
-        .and_then(|storage| storage.get_item(AUTH_STORAGE_KEY).ok().flatten())
-        .and_then(|raw| serde_json::from_str::<AuthState>(&raw).ok())
-        .unwrap_or_default()
+    let Some(storage) = web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+    else {
+        return AuthState::default();
+    };
+    if let Ok(Some(raw)) = storage.get_item(AUTH_STORAGE_KEY) {
+        return serde_json::from_str(&raw).unwrap_or_default();
+    }
+    if let Ok(Some(raw)) = storage.get_item(LEGACY_AUTH_STORAGE_KEY)
+        && let Ok(state) = serde_json::from_str(&raw)
+    {
+        if storage.set_item(AUTH_STORAGE_KEY, &raw).is_ok() {
+            let _ = storage.remove_item(LEGACY_AUTH_STORAGE_KEY);
+        }
+        return state;
+    }
+    AuthState::default()
 }
 
 /// Persist the auth state into browser localStorage.
@@ -141,8 +153,9 @@ pub fn persist_auth_state(state: &AuthState) {
     if let Some(storage) =
         web_sys::window().and_then(|window| window.local_storage().ok().flatten())
         && let Ok(serialized) = serde_json::to_string(state)
+        && storage.set_item(AUTH_STORAGE_KEY, &serialized).is_ok()
     {
-        let _ = storage.set_item(AUTH_STORAGE_KEY, &serialized);
+        let _ = storage.remove_item(LEGACY_AUTH_STORAGE_KEY);
     }
 }
 
@@ -151,6 +164,7 @@ pub fn clear_auth_state() {
     if let Some(storage) =
         web_sys::window().and_then(|window| window.local_storage().ok().flatten())
     {
+        let _ = storage.remove_item(LEGACY_AUTH_STORAGE_KEY);
         let _ = storage.remove_item(AUTH_STORAGE_KEY);
     }
 }

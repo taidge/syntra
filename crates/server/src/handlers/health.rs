@@ -1,6 +1,6 @@
-use contrix_core::dto::{ApiResponse, HealthResponse};
-use contrix_core::error::AppError;
 use salvo::prelude::*;
+use syntra_core::dto::{ApiResponse, HealthResponse};
+use syntra_core::error::AppError;
 
 use crate::middleware::request_observability::{database_cause, record_failure};
 
@@ -27,7 +27,7 @@ pub async fn ready_check(depot: &mut Depot, res: &mut Response) {
             .get_result(&mut db)
             .await?;
         state.storage.check_ready().await?;
-        Ok::<_, contrix_core::error::AppError>(())
+        Ok::<_, syntra_core::error::AppError>(())
     };
     let failure = match tokio::time::timeout(std::time::Duration::from_secs(2), probe).await {
         Ok(Ok(())) => None,

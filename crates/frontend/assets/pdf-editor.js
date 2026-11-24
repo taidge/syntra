@@ -44,15 +44,15 @@ async function matchesFontStream(stream, expected, writer) {
   finally { await reader.cancel().catch(() => {}); }
 }
 async function annotationFont(editor, document) {
-  cjkBytes ||= fetch(`${VENDOR}office-cjk.ttf`).then(response => {
+  cjkBytes ||= fetch(`${VENDOR}syntra-cjk.ttf`).then(response => {
     if (!response.ok) throw new Error('The annotation font is unavailable. Rebuild the browser PDF assets.');
     return response.arrayBuffer();
   }).catch(error => { cjkBytes = null; throw error; });
   const bytes = new Uint8Array(await cjkBytes), writer = editor.libs.writer;
-  const embedder = await writer.CustomFontEmbedder.for(editor.libs.fontkit, bytes, 'ContrixAnnotationCJK');
+  const embedder = await writer.CustomFontEmbedder.for(editor.libs.fontkit, bytes, 'SyntraAnnotationCJK');
   const name = writer.PDFName.of('BaseFont');
   for (const [ref, object] of document.context.enumerateIndirectObjects()) {
-    if (!(object instanceof writer.PDFDict) || object.get(name)?.toString() !== '/ContrixAnnotationCJK') continue;
+    if (!(object instanceof writer.PDFDict) || object.get(name)?.toString() !== '/SyntraAnnotationCJK') continue;
     try {
       const descendant = object.lookup(writer.PDFName.of('DescendantFonts'), writer.PDFArray).lookup(0, writer.PDFDict);
       const descriptor = descendant.lookup(writer.PDFName.of('FontDescriptor'), writer.PDFDict);
@@ -111,7 +111,7 @@ async function finishAnnotationFont(editor, document, annotation, text) {
   for (let index = 0; index < pairs.length; index += 100) {
     const group = pairs.slice(index, index + 100); chunks.push(`${group.length} beginbfchar\n${group.join('\n')}\nendbfchar`);
   }
-  const cmap = `/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Contrix-Annotation-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000><ffff>\nendcodespacerange\n${chunks.join('\n')}\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend`;
+  const cmap = `/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Syntra-Annotation-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000><ffff>\nendcodespacerange\n${chunks.join('\n')}\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend`;
   document.context.assign(reference, document.context.flateStream(cmap));
 }
 function download(bytes, name) {

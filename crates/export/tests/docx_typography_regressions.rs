@@ -1,7 +1,7 @@
 use std::io::{Cursor, Read, Write};
 
-use contrix_doc_engine::writer::{Alignment, Block, Paragraph, WriterDocument};
-use contrix_export::docx::{docx_to_writer, writer_to_docx};
+use syntra_doc_engine::writer::{Alignment, Block, Paragraph, WriterDocument};
+use syntra_export::docx::{docx_to_writer, writer_to_docx};
 use zip::{
     ZipArchive,
     write::{SimpleFileOptions, ZipWriter},

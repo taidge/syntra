@@ -42,7 +42,7 @@ for (const language of ['eng', 'chi_sim']) {
 // No PDF, annotation, or document data is sent to the font source.
 const revision = 'f8d157532fbfaeda587e826d4cd5b21a49186f7c';
 const source = `https://raw.githubusercontent.com/notofonts/noto-cjk/${revision}/Sans/`;
-const fontOutput = join(vendor, 'office-cjk.ttf');
+const fontOutput = join(vendor, 'syntra-cjk.ttf');
 const staticHash = '4026d33af9acba66dbd6ae2cc11d015a204ccce96cfb1584ed706674fba56276';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 if (!await readFile(fontOutput).then(bytes => digest(bytes) === staticHash, () => false)) {

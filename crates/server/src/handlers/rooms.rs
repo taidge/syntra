@@ -5,16 +5,16 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{
+use syntra_core::dto::{
     AddRoomMemberRequest, ApiResponse, CreateRoomRequest, FileResponse, RoomMemberResponse,
     RoomResponse, UpdateRoomRequest,
 };
-use contrix_core::error::AppError;
-use contrix_core::models::{File, NewRoom, NewRoomMember, Room, RoomType};
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::room_members::dsl as rm;
-use contrix_core::schema::rooms::dsl as r;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::error::AppError;
+use syntra_core::models::{File, NewRoom, NewRoomMember, Room, RoomType};
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::room_members::dsl as rm;
+use syntra_core::schema::rooms::dsl as r;
+use syntra_core::schema::users::dsl as u;
 
 use crate::middleware::auth::get_user_id;
 

@@ -7,17 +7,18 @@ use horme::prelude::*;
 use salvo::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-use contrix_collab::CollabManager;
-use contrix_core::config::AppConfig;
+use syntra_collab::CollabManager;
+use syntra_core::config::AppConfig;
 
-use contrix_server::{database, handlers, routes, services, state};
+use syntra_server::{database, handlers, routes, services, state};
 
 use state::AppState;
 
 const DEFAULT_JWT_SECRET: &str = "change-me-in-production-use-a-long-random-string";
 
 fn load_config() -> anyhow::Result<(AppConfig, String)> {
-    let environment = std::env::var("CONTRIX_ENV")
+    let environment = std::env::var("SYNTRA_ENV")
+        .or_else(|_| std::env::var("\x43ONTRIX_ENV"))
         .or_else(|_| std::env::var("APP_ENV"))
         .unwrap_or_else(|_| "development".to_string());
     let environment = environment.to_ascii_lowercase();
@@ -29,13 +30,26 @@ fn load_config() -> anyhow::Result<(AppConfig, String)> {
     }
 
     let mut config: AppConfig = figment
-        .merge(Env::prefixed("CONTRIX_").split("_"))
+        .merge(Env::prefixed("\x43ONTRIX_").split("_"))
+        .merge(Env::prefixed("SYNTRA_").split("_"))
         .extract()
         .context("Failed to load application configuration")?;
 
     if config.auth.jwt_secret == "${JWT_SECRET}" {
         config.auth.jwt_secret = std::env::var("JWT_SECRET")
             .context("JWT_SECRET must be set when config uses ${JWT_SECRET}")?;
+    }
+
+    // Keep opening an existing default database in place, including its WAL
+    // and pending restore files. Other configured paths remain authoritative.
+    if let Some(legacy_url) = match config.database.url.as_str() {
+        "sqlite://data/syntra.db?mode=rwc" => Some("sqlite://data/\x63ontrix.db?mode=rwc"),
+        "sqlite:///data/syntra.db?mode=rwc" => Some("sqlite:///data/\x63ontrix.db?mode=rwc"),
+        _ => None,
+    } && !services::database_backup::sqlite_url_to_path(&config.database.url)?.try_exists()?
+        && services::database_backup::sqlite_url_to_path(legacy_url)?.try_exists()?
+    {
+        config.database.url = legacy_url.to_owned();
     }
 
     validate_config(&config, &environment)?;
@@ -142,10 +156,10 @@ async fn main() -> anyhow::Result<()> {
     // 2. Set up tracing
     // -----------------------------------------------------------------------
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,contrix_server=debug,salvo=info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,syntra_server=debug,salvo=info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    tracing::info!("Starting Contrix Office server in {environment} environment");
+    tracing::info!("Starting Syntra Office server in {environment} environment");
 
     // -----------------------------------------------------------------------
     // 3. Ensure data directories exist before connecting
@@ -177,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
     // 5. Run the shared migration catalog in order
     // -----------------------------------------------------------------------
     let mut migrations = Vec::new();
-    for filename in contrix_server::migrations::MIGRATION_FILES {
+    for filename in syntra_server::migrations::MIGRATION_FILES {
         let migration_path = format!("migrations/{filename}");
         let sql = tokio::fs::read_to_string(&migration_path)
             .await
@@ -187,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     let migration_started_at = std::time::Instant::now();
     db.run_startup_migrations(move |conn| {
         for (migration_path, sql) in migrations {
-            contrix_server::migrations::run_migration_file(conn, &migration_path, &sql)?;
+            syntra_server::migrations::run_migration_file(conn, &migration_path, &sql)?;
             tracing::info!("Migration applied: {migration_path}");
         }
         Ok(())
@@ -385,7 +399,7 @@ async fn main() -> anyhow::Result<()> {
                     let cutoff = (chrono::Utc::now() - chrono::Duration::days(cleanup_days as i64))
                         .to_rfc3339();
                     let mut conn = cleanup_db.clone();
-                    use contrix_core::schema::files::dsl as f;
+                    use syntra_core::schema::files::dsl as f;
                     match f::files
                         .filter(f::is_trashed.eq(true))
                         .filter(f::trashed_at.lt(&cutoff))
@@ -395,7 +409,7 @@ async fn main() -> anyhow::Result<()> {
                     {
                         Ok(ids) => {
                             for id in ids {
-                                match contrix_server::services::persistence::purge_trashed(
+                                match syntra_server::services::persistence::purge_trashed(
                                     &cleanup_db,
                                     &id,
                                     None,
@@ -404,7 +418,7 @@ async fn main() -> anyhow::Result<()> {
                                 .await
                                 {
                                     Ok(count) => tracing::info!(count, "Expired trash removed"),
-                                    Err(contrix_core::error::AppError::NotFound(_)) => {}
+                                    Err(syntra_core::error::AppError::NotFound(_)) => {}
                                     Err(error) => {
                                         tracing::warn!(%error, file_id = %id, "Trash purge will retry")
                                     }
@@ -415,7 +429,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 ticks = ticks.wrapping_add(1);
-                contrix_server::services::persistence::request_gc(&cleanup_db, &cleanup_storage);
+                syntra_server::services::persistence::request_gc(&cleanup_db, &cleanup_storage);
             }
         });
     }

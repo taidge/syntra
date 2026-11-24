@@ -50,8 +50,8 @@
   "auth.register_link": "Sign Up",
   "auth.login_link": "Sign In",
   "auth.fill_all_fields": "Please fill in all fields.",
-  "auth.login_subtitle": "Welcome back to Contrix Office",
-  "auth.register_subtitle": "Join Contrix Office",
+  "auth.login_subtitle": "Welcome back to Syntra Office",
+  "auth.register_subtitle": "Join Syntra Office",
   "auth.email_placeholder": "you@example.com",
   "auth.password_placeholder": "Enter your password",
   "auth.totp_code": "Authenticator or backup code",
@@ -63,7 +63,7 @@
   "auth.signing_in": "Signing in...",
   "auth.creating_account": "Creating account...",
 
-  "dashboard.welcome": "Welcome to Contrix Office",
+  "dashboard.welcome": "Welcome to Syntra Office",
   "dashboard.recent": "Recent documents",
   "dashboard.recent_empty": "No recent documents yet.",
   "dashboard.quick_new": "Create new",
@@ -351,7 +351,7 @@
   "menu.tools.comments": "Comments",
   "menu.tools.version_history": "Version History",
   "menu.help.shortcuts": "Keyboard Shortcuts",
-  "menu.help.about": "About Contrix Office",
+  "menu.help.about": "About Syntra Office",
 
   "find.placeholder": "Find...",
   "find.replace_placeholder": "Replace with...",

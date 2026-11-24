@@ -2,10 +2,10 @@
 mod common;
 
 use common::TestServer;
-use contrix_core::models::{Document, File, FileLock, Version};
-use contrix_core::schema::{documents, file_locks, files, users, versions};
 use diesel::prelude::*;
 use serde_json::{Value, json};
+use syntra_core::models::{Document, File, FileLock, Version};
+use syntra_core::schema::{documents, file_locks, files, users, versions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn create(server: &TestServer, jwt: &str, path: &str, body: Value) -> Value {
@@ -44,7 +44,7 @@ async fn mint(server: &TestServer, jwt: &str, file: &str) -> String {
 }
 
 async fn snapshot(server: &TestServer) -> Value {
-    server.db.run(|conn| conn.transaction::<_, contrix_core::error::AppError, _>(|conn| Ok(json!({
+    server.db.run(|conn| conn.transaction::<_, syntra_core::error::AppError, _>(|conn| Ok(json!({
         "files": files::table.order(files::id).load::<File>(conn)?,
         "documents": documents::table.order(documents::id).load::<Document>(conn)?,
         "versions": versions::table.order(versions::id).load::<Version>(conn)?,

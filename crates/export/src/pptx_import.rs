@@ -1,10 +1,10 @@
 //! Import real DrawingML objects from relationship-addressed presentation parts.
 use crate::ooxml_import::{self as xml, Archive, Node, Relationship, warn};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use contrix_doc_engine::slides::*;
 use image::{GenericImageView, ImageFormat, ImageReader, imageops::FilterType};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
+use syntra_doc_engine::slides::*;
 use uuid::Uuid;
 const EMU: f64 = 9525.0;
 #[cfg(test)]
@@ -536,10 +536,10 @@ impl MediaImporter {
     fn new(slide_width: f32, slide_height: f32) -> Self {
         Self {
             cache: BTreeMap::new(),
-            source_remaining: contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 4,
+            source_remaining: syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 4,
             pixels_remaining: MAX_IMAGE_PIXELS * 4,
             // Leave room for editable objects; model_budget checks the complete JSON.
-            inline_remaining: contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 3 / 5,
+            inline_remaining: syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 3 / 5,
             max_side: slide_width.max(slide_height).ceil().clamp(1024.0, 2048.0) as u32,
         }
     }
@@ -1287,7 +1287,7 @@ pub(super) fn import(
     result.metadata.pptx_import_revision = 2;
     let mut media_remaining =
         MediaImporter::new(result.metadata.slide_width, result.metadata.slide_height);
-    let mut points_remaining = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
+    let mut points_remaining = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
     for path in paths {
         let root = xml::part(archive, path)?;
         let rels = xml::relationships(archive, path)?;

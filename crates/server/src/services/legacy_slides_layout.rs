@@ -99,7 +99,7 @@ pub async fn for_response(
     if !needs_compatibility(version, &content) {
         return content;
     }
-    use contrix_core::schema::file_versions::dsl as fv;
+    use syntra_core::schema::file_versions::dsl as fv;
     let source = fv::file_versions
         .filter(fv::file_id.eq(file_id))
         .filter(fv::version_number.eq(0))
@@ -124,7 +124,7 @@ pub async fn for_response(
         return content;
     }
     let serialized = match serde_json::to_vec(&content) {
-        Ok(serialized) if serialized.len() <= contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES => {
+        Ok(serialized) if serialized.len() <= syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES => {
             serialized
         }
         _ => return content,
@@ -155,7 +155,7 @@ pub async fn for_response(
     let original = match tokio::task::spawn_blocking(move || {
         // Cancellation does not release import capacity until decoding ends.
         let _permit = permit;
-        contrix_export::pptx::pptx_to_presentation(&bytes)
+        syntra_export::pptx::pptx_to_presentation(&bytes)
             .and_then(|document| serde_json::to_value(document).map_err(|error| error.to_string()))
     })
     .await
@@ -174,7 +174,7 @@ pub async fn for_response(
         return content;
     };
     let bytes = match serde_json::to_vec(&recovered) {
-        Ok(serialized) if serialized.len() <= contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES => {
+        Ok(serialized) if serialized.len() <= syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES => {
             serialized.len()
         }
         _ => return content,
@@ -296,7 +296,8 @@ fn stable_image_id(
     image: &Value,
 ) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"contrix-legacy-pptx-image-v1\0");
+    // Keep the original namespace so previously recovered image IDs stay stable.
+    hash.update(b"\x63ontrix-legacy-pptx-image-v1\0");
     hash.update(presentation_id.as_bytes());
     hash.update([0]);
     hash.update((slide_index as u64).to_le_bytes());

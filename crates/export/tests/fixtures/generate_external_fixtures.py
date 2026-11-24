@@ -1,4 +1,4 @@
-"""Hand-authored ECMA-376 standard parts; never invokes Contrix exporters.
+"""Hand-authored ECMA-376 standard parts; never invokes syntra exporters.
 
 Run from any cwd with Python's standard library. Fixtures intentionally contain
 both representable features and explicit unsupported features. No customXml.

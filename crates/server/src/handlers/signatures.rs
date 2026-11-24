@@ -5,11 +5,11 @@ use salvo::prelude::*;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{DocumentSignature, NewDocumentSignature};
-use contrix_core::schema::document_signatures::dsl as ds;
-use contrix_core::schema::documents::dsl as d;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{DocumentSignature, NewDocumentSignature};
+use syntra_core::schema::document_signatures::dsl as ds;
+use syntra_core::schema::documents::dsl as d;
 
 use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;

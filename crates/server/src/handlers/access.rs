@@ -6,10 +6,10 @@ use diesel::prelude::*;
 use horme::OptionalExtension;
 use horme::RunQueryDsl;
 
-use contrix_core::error::AppError;
-use contrix_core::models::File;
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::room_members::dsl as rm;
+use syntra_core::error::AppError;
+use syntra_core::models::File;
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::room_members::dsl as rm;
 
 /// Count the number of active (non-expired) share rows for a file. Used to
 /// populate `FileResponse.shared_with_count` with a real value.
@@ -17,7 +17,7 @@ pub async fn count_shares_for_file(
     conn: &mut impl horme::GetConnection<Connection = crate::database::DbConnection>,
     file_id: &str,
 ) -> u32 {
-    use contrix_core::schema::shares::dsl as s;
+    use syntra_core::schema::shares::dsl as s;
 
     let now = chrono::Utc::now().to_rfc3339();
     s::shares
@@ -37,7 +37,7 @@ pub async fn check_room_access(
     room_id: &str,
     required_role: &str,
 ) -> Result<(), AppError> {
-    use contrix_core::schema::rooms::dsl as rooms;
+    use syntra_core::schema::rooms::dsl as rooms;
     let owner = rooms::rooms
         .find(room_id)
         .select(rooms::owner_id)
@@ -147,7 +147,7 @@ pub async fn load_accessible_document(
     user_id: &str,
     required_role: &str,
 ) -> Result<Option<File>, AppError> {
-    use contrix_core::schema::documents::dsl as d;
+    use syntra_core::schema::documents::dsl as d;
 
     let row = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))

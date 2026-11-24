@@ -1,6 +1,6 @@
-//! # contrix-collab
+//! # syntra-collab
 //!
-//! Real-time collaboration engine for Contrix Office.
+//! Real-time collaboration engine for syntra.
 //!
 //! Implements a simplified CRDT / Operational Transformation (OT) model for
 //! concurrent document editing over WebSocket connections.

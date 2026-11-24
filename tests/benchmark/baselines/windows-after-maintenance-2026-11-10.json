@@ -2,7 +2,7 @@
   "schema": 2,
   "summarized_at_utc": "2026-11-09T21:23:34.660297Z",
   "scope": "已验收的中间分发包，HTTP503分类修正前",
-  "binary": "target/package-smoke/9138fb211c3c4872b43ecc565ecdeec3/package/contrix-server.exe",
+  "binary": "target/package-smoke/9138fb211c3c4872b43ecc565ecdeec3/package/\u0063ontrix-server.exe",
   "binary_sha256": "b22ad53302dd0f3c82b3323a992923cdceae85c15b816c850a1718f877959280",
   "binary_mtime_utc": "2026-11-09T21:16:38Z",
   "binary_size_bytes": 36311040,
@@ -116,7 +116,7 @@
         "copied_default": "target/performance/http-instance-69ffbe877b05433fba2849a0d3ae2389/config/default.toml",
         "copied_development": "target/performance/http-instance-69ffbe877b05433fba2849a0d3ae2389/config/development.toml",
         "development_database_overrides": {},
-        "benchmark_child_environment_database_override": "CONTRIX_DATABASE_URL=sqlite://data/benchmark.db",
+        "benchmark_child_environment_database_override": "\u0043ONTRIX_DATABASE_URL=sqlite://data/benchmark.db",
         "admission_capacity_basis": "Database implementation admits max_connections * 2; not an independently sampled runtime counter."
       },
       "failure_phase_annotations": []
@@ -261,7 +261,7 @@
         "copied_default": "target/performance/http-instance-26fe912b9c3f463c9f8cb04aa2f02c0d/config/default.toml",
         "copied_development": "target/performance/http-instance-26fe912b9c3f463c9f8cb04aa2f02c0d/config/development.toml",
         "development_database_overrides": {},
-        "benchmark_child_environment_database_override": "CONTRIX_DATABASE_URL=sqlite://data/benchmark.db",
+        "benchmark_child_environment_database_override": "\u0043ONTRIX_DATABASE_URL=sqlite://data/benchmark.db",
         "admission_capacity_basis": "Database implementation admits max_connections * 2; not an independently sampled runtime counter."
       },
       "failure_phase_annotations": [
@@ -390,6 +390,6 @@
       "RSS is sampled process resident memory, not allocator usage or a guaranteed OS high-water mark."
     ]
   },
-  "archive_retained": "target/dist/phase2-before-http-backpressure-contrix-office-x86_64-pc-windows-msvc.zip",
+  "archive_retained": "target/dist/phase2-before-http-backpressure-\u0063ontrix-office-x86_64-pc-windows-msvc.zip",
   "archive_retained_sha256": "af9a4150024b0915c1d6c9303611f11446c0a20a1f0c5596ebbf2b46916273fd"
 }

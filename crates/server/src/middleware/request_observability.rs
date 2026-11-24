@@ -8,8 +8,8 @@ use std::sync::atomic::{
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use contrix_core::error::AppError;
 use salvo::prelude::*;
+use syntra_core::error::AppError;
 
 use crate::database::telemetry::TransactionSnapshot;
 pub(crate) use crate::database::telemetry::database_cause;

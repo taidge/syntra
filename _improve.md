@@ -20,8 +20,8 @@
 ### 验证记录
 
 - [x] `cargo test --workspace --all-targets --quiet`：394 项通过，0 失败（collab 12、doc-engine 84、export 48、frontend 37、server lib/main 各 35、HTTP API 143）。
-- [x] `cargo clippy --workspace --all-targets -- -D warnings` 通过；最后的前端追加改动再次通过 `cargo clippy -p contrix-frontend --all-targets -- -D warnings`。
-- [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 通过；最后的前端追加改动再次通过 `cargo clippy -p syntra-frontend --all-targets -- -D warnings`。
+- [x] `cargo check -p syntra-frontend --target wasm32-unknown-unknown` 通过。
 - [x] `cargo fmt --all -- --check`、`git diff --check` 通过；原有 handler 状态提取 `unwrap` 搜索无残留。
 - [x] `cargo audit` 更新 RustSec 数据后扫描 559 个依赖，0 vulnerability、0 warning。
 - [x] Playwright `--list` 发现 87 项既有测试；仅验证测试发现，本轮未执行浏览器交互测试，也未进行桌面 Word/Excel/PowerPoint 的打开及版式验收。
@@ -77,7 +77,7 @@
 - [x] `cargo check --workspace --all-targets` 通过且无 warning。
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 通过。
 - [x] `cargo test --workspace --all-targets` 使用更新后的锁文件通过，共 370 项（collab 12、doc-engine 82、export 44、frontend 23、server lib/main 各 34、server API 141）。
-- [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
+- [x] `cargo check -p syntra-frontend --target wasm32-unknown-unknown` 通过。
 - [x] `cargo audit` 扫描 559 个依赖，结果为 0 vulnerability、0 warning。
 - [x] Playwright `--list` 在 `e2e/` 成功发现 87 项测试。
 
@@ -101,7 +101,7 @@
 
 ## 第二轮已完成
 
-- [x] `config/production.toml` 没有被启动逻辑加载，并且写的是 PostgreSQL URL；当前服务只初始化 SQLite 连接。已支持按 `CONTRIX_ENV`/`APP_ENV` 加载 `config/{env}.toml`，并把生产配置改回 SQLite。
+- [x] `config/production.toml` 没有被启动逻辑加载，并且写的是 PostgreSQL URL；当前服务只初始化 SQLite 连接。已支持按 `SYNTRA_ENV`/`APP_ENV` 加载 `config/{env}.toml`，并把生产配置改回 SQLite。
 - [x] `S3Storage` 已实现并在配置中暴露 `backend = "s3"`，但上传、下载、缩略图、转换等路径仍只接入本地 `StorageService`。已引入统一 `StorageBackend`，本地/S3 均从启动配置初始化，上传、下载、缩略图、转换、WOPI 写入和清理任务统一走后端。
 - [x] 迁移执行器吞掉执行错误，可能导致启动时数据库 schema 半成功。已改为读取迁移失败和非幂等 SQL 失败都会中止启动；旧库重放 `ADD COLUMN` 的 duplicate-column 会被显式视为幂等跳过。
 - [x] 默认 JWT secret 是固定字符串，启动时没有阻止生产环境使用默认密钥。已增加生产环境强密钥校验，并支持 `${JWT_SECRET}` 从环境变量展开。
@@ -109,8 +109,8 @@
 - [x] 分享密码使用裸 SHA-256，无盐且无 KDF。已改为 Argon2 带盐哈希。
 - [x] `FileResponse` 返回内部存储 `path`，会暴露服务端存储布局。已对 API 序列化隐藏该字段，保留 Rust 内部结构字段以降低改动面。
 - [x] WOPI access token 主要通过 URL query/form 传递，容易进入代理日志和浏览器历史。已对 host 页增加 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`，脚本启动时从地址栏移除 `access_token`，并把传入 JWT 兑换为短期、绑定 user/file 的 WOPI session token。
-- [x] `cargo check -p contrix-server --lib` 仍报告若干既有 warning，包括未使用 import、未接入的 `IpFilter`/`AuditService`/`EmailService`/`S3Storage` 等。已清理明确未使用 import、接入 `IpFilter`，并对保留但未接线的服务模块做显式 dead-code 标注。
-- [x] `cargo check -p contrix-frontend` 报告未使用组件重导出、多余 `mut`、未调用的协作发送函数、未读取字段和过期 helper。已清理可自动修复项，并删除 `send_message`、`RemoteCursor::is_active`、`display_value`、`AuthState::is_authenticated` 等死代码。
+- [x] `cargo check -p syntra-server --lib` 仍报告若干既有 warning，包括未使用 import、未接入的 `IpFilter`/`AuditService`/`EmailService`/`S3Storage` 等。已清理明确未使用 import、接入 `IpFilter`，并对保留但未接线的服务模块做显式 dead-code 标注。
+- [x] `cargo check -p syntra-frontend` 报告未使用组件重导出、多余 `mut`、未调用的协作发送函数、未读取字段和过期 helper。已清理可自动修复项，并删除 `send_message`、`RemoteCursor::is_active`、`display_value`、`AuthState::is_authenticated` 等死代码。
 
 ## 后续建议（已完成）
 
@@ -239,14 +239,14 @@
 ## 版本基线说明
 
 - 本地 `main` 已包含所有本地分支提交，且没有未合并的本地分支。
-- 当前 Git 配置没有任何 remote；`Cargo.toml` 声明的 `https://github.com/contrix-org/office` 返回 Repository not found，因此无法执行远端 `fetch/pull` 或证明远端 `main` 最新。恢复有效 remote 后应补做同步与推送。
+- 当时 Git 未配置远端，旧仓库地址返回 Repository not found，未能核对远端 `main`。
 
 ## 最终验证
 
 - [x] `cargo fmt --all -- --check` 通过。
 - [x] `cargo check --workspace --all-targets` 通过且无编译 warning。
 - [x] `cargo test --workspace --all-targets` 全部通过，共执行 357 项（collab 12、doc-engine 82、export 43、frontend 23、server lib/main 各 29、server API 集成测试 139）。
-- [x] `cargo check -p contrix-frontend --target wasm32-unknown-unknown` 通过。
+- [x] `cargo check -p syntra-frontend --target wasm32-unknown-unknown` 通过。
 - [x] 前端中英文 i18n JSON 解析通过，Playwright `--list` 成功发现 87 项测试，说明测试源码可加载。
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 已清零；逐项修复嵌套条件、可派生 Default、无效 clone、冗余闭包/排序以及易与 `FromStr` 混淆的 helper 命名，未使用全局 `allow` 压制。
 - [x] `cargo audit` 扫描 559 个依赖，结果为 0 个 vulnerability、0 个 warning，未配置 ignore。

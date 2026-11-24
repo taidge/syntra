@@ -26,13 +26,11 @@ pub fn Navbar(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
         view().class("navbar-brand").fill(
             link()
                 .target("/dashboard")
-                .name("Contrix Office")
+                .name("Syntra Office")
                 .class("brand-link")
                 .fill((
-                    view()
-                        .class("brand-icon")
-                        .fill(icon_sized(Icon::Office, 20.)),
-                    label("Contrix Office").class("brand-text"),
+                    syntra_mark("brand-icon"),
+                    label("Syntra Office").class("brand-text"),
                 )),
         ),
         view().class("navbar-menu").fill((

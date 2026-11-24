@@ -9,12 +9,12 @@ use std::io::{Cursor, Read, Write};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use contrix_doc_engine::writer::{
+use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
+use syntra_doc_engine::writer::{
     Alignment, Block, Blockquote, CodeBlock, Heading, ImageBlock, List, ListItem, Paragraph,
     ParagraphFormat, Spacing, Table, TableCell, TableRow, TextRun, WriterDocument,
 };
-use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
 use uuid::Uuid;
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -409,7 +409,7 @@ fn footer_xml(text: &str, page_numbers: bool) -> String {
     xml
 }
 
-fn notes_xml(notes: &[contrix_doc_engine::writer::DocumentNote], endnotes: bool) -> String {
+fn notes_xml(notes: &[syntra_doc_engine::writer::DocumentNote], endnotes: bool) -> String {
     let (root, item) = if endnotes {
         ("endnotes", "endnote")
     } else {
@@ -459,8 +459,8 @@ fn append_professional_markers(doc: &WriterDocument, block_index: usize, xml: &m
     for revision in &doc.professional.revisions {
         if revision.block_index == block_index {
             let tag = match revision.kind {
-                contrix_doc_engine::writer::RevisionKind::Insert => "ins",
-                contrix_doc_engine::writer::RevisionKind::Delete => "del",
+                syntra_doc_engine::writer::RevisionKind::Insert => "ins",
+                syntra_doc_engine::writer::RevisionKind::Delete => "del",
             };
             let text_tag = if tag == "del" { "delText" } else { "t" };
             xml.push_str(&format!(
@@ -491,7 +491,7 @@ fn section_properties_xml(doc: &WriterDocument) -> String {
 }
 
 fn section_properties_for(
-    settings: &contrix_doc_engine::writer::PageSettings,
+    settings: &syntra_doc_engine::writer::PageSettings,
     section_header: Option<&str>,
     section_footer: Option<&str>,
     doc: &WriterDocument,
@@ -512,7 +512,7 @@ fn section_properties_for(
         "<w:pgSz w:w=\"{}\" w:h=\"{}\"{} /><w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"720\" w:footer=\"720\" w:gutter=\"0\"/>",
         twips(settings.width_mm),
         twips(settings.height_mm),
-        if matches!(settings.orientation, contrix_doc_engine::writer::Orientation::Landscape) {
+        if matches!(settings.orientation, syntra_doc_engine::writer::Orientation::Landscape) {
             " w:orient=\"landscape\""
         } else {
             ""
@@ -1091,7 +1091,7 @@ fn read_notes<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     name: &str,
     endnotes: bool,
-) -> Result<Vec<contrix_doc_engine::writer::DocumentNote>, String> {
+) -> Result<Vec<syntra_doc_engine::writer::DocumentNote>, String> {
     let Some(xml) = read_part_xml(archive, name) else {
         return Ok(Vec::new());
     };
@@ -1115,7 +1115,7 @@ fn read_notes<R: Read + std::io::Seek>(
                 if let Some(id) = current_id.take()
                     && id > 0
                 {
-                    notes.push(contrix_doc_engine::writer::DocumentNote {
+                    notes.push(syntra_doc_engine::writer::DocumentNote {
                         id: id as u32,
                         reference_block: 0,
                         text: current_text.trim().to_string(),
@@ -1131,11 +1131,11 @@ fn read_notes<R: Read + std::io::Seek>(
     Ok(notes)
 }
 
-fn parse_page_settings(xml: &str) -> Option<contrix_doc_engine::writer::PageSettings> {
+fn parse_page_settings(xml: &str) -> Option<syntra_doc_engine::writer::PageSettings> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
-    let mut settings = contrix_doc_engine::writer::PageSettings::default();
+    let mut settings = syntra_doc_engine::writer::PageSettings::default();
     let mut found = false;
     loop {
         match reader.read_event_into(&mut buf) {
@@ -1149,7 +1149,7 @@ fn parse_page_settings(xml: &str) -> Option<contrix_doc_engine::writer::PageSett
                     settings.height_mm = height / 56.692_913;
                 }
                 if attr_val(&event, b"orient").as_deref() == Some("landscape") {
-                    settings.orientation = contrix_doc_engine::writer::Orientation::Landscape;
+                    settings.orientation = syntra_doc_engine::writer::Orientation::Landscape;
                 }
                 found = true;
             }
@@ -2579,7 +2579,7 @@ fn attr_val(e: &BytesStart, key: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contrix_doc_engine::writer::{List, ListItem, Paragraph, TextRun, WriterDocument};
+    use syntra_doc_engine::writer::{List, ListItem, Paragraph, TextRun, WriterDocument};
 
     #[test]
     fn test_docx_generation() {
@@ -2658,14 +2658,14 @@ mod tests {
         doc.professional.table_of_contents = true;
         doc.professional
             .footnotes
-            .push(contrix_doc_engine::writer::DocumentNote {
+            .push(syntra_doc_engine::writer::DocumentNote {
                 id: 1,
                 reference_block: 1,
                 text: "Supporting detail".into(),
             });
         doc.professional
             .mail_merge_fields
-            .push(contrix_doc_engine::writer::MailMergeField {
+            .push(syntra_doc_engine::writer::MailMergeField {
                 name: "CustomerName".into(),
                 block_index: 1,
                 default_value: Some("Customer".into()),
@@ -2698,7 +2698,7 @@ mod tests {
     fn test_docx_bold_text() {
         let mut doc = WriterDocument::new("Bold Test".into());
         doc.body
-            .push(Block::Paragraph(contrix_doc_engine::writer::Paragraph {
+            .push(Block::Paragraph(syntra_doc_engine::writer::Paragraph {
                 id: uuid::Uuid::new_v4(),
                 runs: vec![TextRun {
                     text: "Bold text".into(),

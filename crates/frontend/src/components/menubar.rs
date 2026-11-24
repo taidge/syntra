@@ -199,7 +199,7 @@ pub fn Menubar(
     let widgets = menus
         .into_iter()
         .map(|(key, label, items)| {
-            let mut menu = sapid::menu(format!("office-{key}"))
+            let mut menu = sapid::menu(format!("syntra-{key}"))
                 .theme(theme())
                 .label(crate::i18n::t(label));
             for (index, item) in items.into_iter().enumerate() {

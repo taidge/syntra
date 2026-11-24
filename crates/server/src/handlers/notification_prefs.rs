@@ -4,10 +4,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{NewNotificationPreference, NotificationPreference};
-use contrix_core::schema::notification_preferences::dsl as np;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{NewNotificationPreference, NotificationPreference};
+use syntra_core::schema::notification_preferences::dsl as np;
 
 use crate::middleware::auth::get_user_id;
 

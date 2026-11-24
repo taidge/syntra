@@ -3,9 +3,9 @@ use crate::database::telemetry::{
     TransactionStage, immediate_transaction as observed_immediate_transaction,
 };
 use crate::state::DbPool;
-use contrix_core::{config::MaintenanceConfig, error::AppError};
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Text};
+use syntra_core::{config::MaintenanceConfig, error::AppError};
 use uuid::Uuid;
 
 const WRITE_LEASE_SECONDS: i64 = 120;
@@ -534,8 +534,8 @@ pub async fn retain_native_history_count_page(
                     conn,
                     TransactionStage::NativeHistoryRetention,
                     |conn| {
-                        use contrix_core::schema::documents::dsl as d;
-                        use contrix_core::schema::versions::dsl as v;
+                        use syntra_core::schema::documents::dsl as d;
+                        use syntra_core::schema::versions::dsl as v;
                         let current = d::documents
                             .find(&entity.id)
                             .select(d::version)
@@ -1129,8 +1129,7 @@ mod tests {
         let (file_id, current, base_size) = file(&db, &storage, &owner).await;
         let document = Uuid::new_v4().to_string();
         let original =
-            serde_json::to_value(contrix_doc_engine::WriterDocument::new("current".into()))
-                .unwrap();
+            serde_json::to_value(syntra_doc_engine::WriterDocument::new("current".into())).unwrap();
         let current_json = serde_json::to_string(&original).unwrap();
         let (doc, fileid, actor) = (document.clone(), file_id.clone(), owner.clone());
         db.run(move |conn| {
@@ -1719,7 +1718,7 @@ mod tests {
         let (file_id, _, _) = file(&db, &storage, &owner).await;
         let document = Uuid::new_v4().to_string();
         let mut content =
-            serde_json::to_value(contrix_doc_engine::WriterDocument::new("base".into())).unwrap();
+            serde_json::to_value(syntra_doc_engine::WriterDocument::new("base".into())).unwrap();
         let (doc, file, actor, base) = (document.clone(), file_id, owner.clone(), content.clone());
         db.run(move|conn|conn.immediate_transaction::<_,AppError,_>(|conn|{
             diesel::sql_query("INSERT INTO documents(id,file_id,doc_type,content,version) VALUES (?,?,'writer',?,300)").bind::<Text,_>(&doc).bind::<Text,_>(file).bind::<Text,_>(base.to_string()).execute(conn)?;
@@ -1761,7 +1760,7 @@ mod tests {
         db.run(move|conn|conn.immediate_transaction::<_,AppError,_>(|conn|{
             let date=chrono::Utc::now().to_rfc3339();
             for version in 301..=303 {
-                let operation=contrix_collab::Operation::new(actor.parse().unwrap(),Uuid::new_v4(),1,contrix_collab::OpType::Insert{path:vec!["title".into()],index:4+(version-301) as usize,content:char::from(b'A'+(version-301) as u8).to_string()}).with_base_version((version-1) as u64);
+                let operation=syntra_collab::Operation::new(actor.parse().unwrap(),Uuid::new_v4(),1,syntra_collab::OpType::Insert{path:vec!["title".into()],index:4+(version-301) as usize,content:char::from(b'A'+(version-301) as u8).to_string()}).with_base_version((version-1) as u64);
                 diesel::sql_query("INSERT INTO operation_log(id,document_id,user_id,op_type,op_data,version,created_at) VALUES (?,?,?,?,?,?,?)")
                     .bind::<Text,_>(format!("live-{version}")).bind::<Text,_>(&doc).bind::<Text,_>(&actor).bind::<Text,_>(serde_json::to_string(&operation.op_type).unwrap()).bind::<Text,_>(serde_json::to_string(&operation).unwrap()).bind::<Integer,_>(version).bind::<Text,_>(&date).execute(conn)?;
                 let mut snapshot=base.clone();snapshot["title"]=serde_json::json!(format!("base{}",&"ABC"[..(version-300) as usize]));
@@ -1796,7 +1795,7 @@ mod tests {
             .await,
             1
         );
-        let config: contrix_core::config::AppConfig = toml::from_str(include_str!(concat!(
+        let config: syntra_core::config::AppConfig = toml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/default.toml"
         )))
@@ -1805,7 +1804,7 @@ mod tests {
             db: db.clone(),
             config,
             storage: storage.clone(),
-            collab: contrix_collab::CollabManager::new(),
+            collab: syntra_collab::CollabManager::new(),
             started_at: chrono::Utc::now(),
             ai: None,
             thumbnail: None,
@@ -1814,11 +1813,11 @@ mod tests {
         };
         // A stale delete really loads the retained canonical base and preserves
         // the three concurrent inserts, proving this exception is operational.
-        let operation = contrix_collab::Operation::new(
+        let operation = syntra_collab::Operation::new(
             owner.parse().unwrap(),
             Uuid::new_v4(),
             1,
-            contrix_collab::OpType::Delete {
+            syntra_collab::OpType::Delete {
                 path: vec!["title".into()],
                 index: 0,
                 length: 4,

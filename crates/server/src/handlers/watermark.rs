@@ -5,10 +5,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{NewWatermarkSettings, WatermarkSettings};
-use contrix_core::schema::watermark_settings::dsl as ws;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{NewWatermarkSettings, WatermarkSettings};
+use syntra_core::schema::watermark_settings::dsl as ws;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 

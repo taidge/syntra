@@ -5,14 +5,14 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{
+use syntra_core::dto::{
     ApiResponse, CreateWebhookRequest, UpdateWebhookRequest, WebhookDeliveryResponse,
     WebhookResponse,
 };
-use contrix_core::error::AppError;
-use contrix_core::models::{NewWebhook, Webhook, WebhookDelivery};
-use contrix_core::schema::webhook_deliveries::dsl as wd;
-use contrix_core::schema::webhooks::dsl as w;
+use syntra_core::error::AppError;
+use syntra_core::models::{NewWebhook, Webhook, WebhookDelivery};
+use syntra_core::schema::webhook_deliveries::dsl as wd;
+use syntra_core::schema::webhooks::dsl as w;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 use crate::services::WebhookService;

@@ -56,17 +56,20 @@ pub fn seal(bytes: Vec<u8>, native_path: &str) -> Result<Vec<u8>, String> {
     Ok(output.into_inner())
 }
 
-pub fn read(bytes: &[u8], native_path: &str) -> Option<serde_json::Value> {
+pub fn read(bytes: &[u8], native_paths: &[&str]) -> Option<serde_json::Value> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).ok()?;
+    let native_index = native_paths
+        .iter()
+        .find_map(|path| archive.index_for_name(path))?;
     let wrapper: serde_json::Value = {
-        let mut file = archive.by_name(native_path).ok()?;
-        if file.size() > (contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2) as u64 {
+        let mut file = archive.by_index(native_index).ok()?;
+        if file.size() > (syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2) as u64 {
             return None;
         }
         let mut data = Vec::new();
         crate::ooxml::bounded_with_limit(
             &mut file,
-            (contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2) as u64,
+            (syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 2) as u64,
         )
         .read_to_end(&mut data)
         .ok()?;
@@ -111,7 +114,8 @@ mod tests {
         zip.start_file(path, SimpleFileOptions::default()).unwrap();
         zip.write_all(br#"{"title":"before"}"#).unwrap();
         let sealed = seal(zip.finish().unwrap().into_inner(), path).unwrap();
-        assert_eq!(read(&sealed, path).unwrap()["title"], "before");
+        let paths = ["customXml/renamed-model.json", path];
+        assert_eq!(read(&sealed, &paths).unwrap()["title"], "before");
         let mut source = ZipArchive::new(Cursor::new(&sealed)).unwrap();
         let mut edited = ZipWriter::new(Cursor::new(Vec::new()));
         for index in 0..source.len() {
@@ -130,7 +134,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert!(read(&edited.finish().unwrap().into_inner(), path).is_none());
+        assert!(read(&edited.finish().unwrap().into_inner(), &paths).is_none());
         Ok(())
     }
 }

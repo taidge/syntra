@@ -50,7 +50,7 @@ test('homepage keeps the Dioxus typography and four-column feature layout', asyn
 test('account and file pages preserve their cards and fit narrow screens', async ({ page, request }) => {
   const user = await registerUser(request, uniqueUsername(), uniqueEmail(), 'LayoutTest@123');
   await page.addInitScript(auth => {
-    localStorage.setItem('contrix.auth', JSON.stringify({ token: auth.token, user: {
+    localStorage.setItem('syntra.auth', JSON.stringify({ token: auth.token, user: {
       id: auth.userId, username: auth.username, email: auth.email, role: 'editor',
     } }));
     localStorage.setItem('locale', 'en');
@@ -87,7 +87,7 @@ for (const kind of ['writer', 'calc', 'slides', 'whiteboard'] as const) {
     const { body, response } = await createDocument(request, user.token, 'Layout reference', kind);
     expect(response.ok(), JSON.stringify(body)).toBe(true);
     await page.addInitScript(auth => {
-      localStorage.setItem('contrix.auth', JSON.stringify({ token: auth.token, user: {
+      localStorage.setItem('syntra.auth', JSON.stringify({ token: auth.token, user: {
         id: auth.userId, username: auth.username, email: auth.email, role: 'editor',
       } }));
       localStorage.setItem('locale', 'en');

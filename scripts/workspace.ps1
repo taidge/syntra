@@ -1,5 +1,5 @@
 # Shared read-only discovery. Never redirect Cargo or temporary directories.
-function Get-OfficeWorkspaceMetadata {
+function Get-SyntraWorkspaceMetadata {
     foreach ($path in @($env:CARGO_HOME, $env:CARGO_TARGET_DIR, $env:TEMP, $env:TMP, $env:TMPDIR)) {
         if ($path -and ($path.Replace('\', '/') -match '(?i)^(D:/BuildCache|/mnt/d/BuildCache)(/|$)|(^|/)\.codex/build-targets(/|$)')) {
             throw 'A prohibited legacy build/cache path is configured. Remove that setting before building.'

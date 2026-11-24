@@ -42,7 +42,7 @@ fn qr_data_uri(value: &str) -> std::result::Result<String, String> {
 }
 
 fn backup_codes_file(codes: &[String]) -> String {
-    let mut contents = String::from("Contrix Office two-factor authentication backup codes\n\n");
+    let mut contents = String::from("Syntra Office two-factor authentication backup codes\n\n");
     contents.push_str(&codes.join("\n"));
     contents.push_str("\n\nEach code can be used only once. Store these codes securely.\n");
     contents
@@ -204,7 +204,7 @@ pub fn TotpSecurity(scope: Scope, auth_token: String) -> impl Widget {
                         action(crate::i18n::t("profile.totp_backup_codes"), move || {
                             if let Some(data) = setup.get() {
                                 let _ = download_text_file(
-                                    "contrix-backup-codes.txt",
+                                    "syntra-backup-codes.txt",
                                     &backup_codes_file(&data.backup_codes),
                                 );
                             }
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn qr_is_generated_locally_as_an_svg_data_uri() {
-        let uri = qr_data_uri("otpauth://totp/Contrix:test@example.com?secret=ABC123").unwrap();
+        let uri = qr_data_uri("otpauth://totp/syntra:test@example.com?secret=ABC123").unwrap();
         assert!(uri.starts_with("data:image/svg+xml;base64,"));
         assert!(!uri.contains("ABC123"));
     }

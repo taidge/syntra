@@ -4,10 +4,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{ClientLog, NewClientLog};
-use contrix_core::schema::client_logs::dsl as cl;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{ClientLog, NewClientLog};
+use syntra_core::schema::client_logs::dsl as cl;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 

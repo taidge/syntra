@@ -5,14 +5,14 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{
+use syntra_core::dto::{
     ApiResponse, CreateUploadSessionRequest, FileResponse, MAX_UPLOAD_CHUNK_BYTES,
     MAX_UPLOAD_CHUNKS, UploadSessionResponse,
 };
-use contrix_core::error::AppError;
-use contrix_core::models::{File, NewFile, NewUploadSession, UploadSession};
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::upload_sessions::dsl as us;
+use syntra_core::error::AppError;
+use syntra_core::models::{File, NewFile, NewUploadSession, UploadSession};
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::upload_sessions::dsl as us;
 
 use crate::middleware::auth::get_user_id;
 use crate::services::StorageBackend;

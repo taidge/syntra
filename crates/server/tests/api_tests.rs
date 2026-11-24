@@ -52,10 +52,10 @@ async fn database_backpressure_preserves_sessions_and_recovers() {
 }
 
 use common::TestServer;
-use contrix_core::config::AiConfig;
-use contrix_server::handlers::totp::current_totp_code;
 use salvo::conn::Acceptor;
 use salvo::prelude::*;
+use syntra_core::config::AiConfig;
+use syntra_server::handlers::totp::current_totp_code;
 
 #[handler]
 async fn mock_ai_provider(req: &mut Request, res: &mut Response) {
@@ -1361,8 +1361,8 @@ async fn test_ai_assistant_calls_provider_sanitizes_output_and_audits() {
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["data"]["answer"], "safe answer");
 
-    use contrix_core::schema::activity_logs::dsl as logs;
     use horme::prelude::*;
+    use syntra_core::schema::activity_logs::dsl as logs;
     let mut connection = server.db.clone();
     let details: String = logs::activity_logs
         .filter(logs::user_id.eq(user_id))
@@ -1415,7 +1415,7 @@ async fn test_notification_websocket_delivers_persisted_event() {
         .replacen("http://", "ws://", 1);
     let (mut socket, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
 
-    contrix_server::services::NotificationService::create(
+    syntra_server::services::NotificationService::create(
         &server.db,
         &server.notifications,
         user_id,
@@ -1686,8 +1686,8 @@ async fn test_admin_activity_log() {
 
 #[tokio::test]
 async fn test_admin_backup_is_consistent_and_restore_is_staged() {
-    use contrix_core::schema::users::dsl as users;
     use diesel::prelude::*;
+    use syntra_core::schema::users::dsl as users;
 
     let server = TestServer::new().await;
     let (_, reg_body) = server
@@ -2671,10 +2671,10 @@ async fn test_accept_invitation_creates_hashed_user_and_allows_login() {
 
 #[tokio::test]
 async fn test_room_member_can_access_room_files_and_upload_inherits_room_id() {
-    use contrix_core::models::{NewFile, NewRoomMember};
-    use contrix_core::schema::files::dsl as f;
-    use contrix_core::schema::room_members::dsl as rm;
     use horme::prelude::*;
+    use syntra_core::models::{NewFile, NewRoomMember};
+    use syntra_core::schema::files::dsl as f;
+    use syntra_core::schema::room_members::dsl as rm;
 
     let server = TestServer::new().await;
     let (owner_token, owner_body) = server
@@ -2813,10 +2813,10 @@ async fn test_room_member_can_access_room_files_and_upload_inherits_room_id() {
 
 #[tokio::test]
 async fn test_room_member_can_create_room_root_folder_and_upload_root_file() {
-    use contrix_core::models::NewRoomMember;
-    use contrix_core::schema::files::dsl as f;
-    use contrix_core::schema::room_members::dsl as rm;
     use horme::prelude::*;
+    use syntra_core::models::NewRoomMember;
+    use syntra_core::schema::files::dsl as f;
+    use syntra_core::schema::room_members::dsl as rm;
 
     let server = TestServer::new().await;
     let (owner_token, _) = server
@@ -2959,10 +2959,10 @@ async fn test_room_member_can_create_room_root_folder_and_upload_root_file() {
 
 #[tokio::test]
 async fn test_document_creation_requires_parent_access_and_supports_room_root() {
-    use contrix_core::models::NewRoomMember;
-    use contrix_core::schema::files::dsl as f;
-    use contrix_core::schema::room_members::dsl as rm;
     use horme::prelude::*;
+    use syntra_core::models::NewRoomMember;
+    use syntra_core::schema::files::dsl as f;
+    use syntra_core::schema::room_members::dsl as rm;
 
     let server = TestServer::new().await;
     let (owner_token, _) = server
@@ -4095,7 +4095,7 @@ async fn test_totp_setup() {
     assert_eq!(body["success"], true);
     assert!(body["data"]["secret"].is_string());
     let qr_url = body["data"]["qr_url"].as_str().unwrap();
-    assert!(qr_url.starts_with("otpauth://totp/ContrixOffice:"));
+    assert!(qr_url.starts_with("otpauth://totp/syntra:"));
     assert!(qr_url.contains("user1%2Btotp%40test.com"));
     let backup_codes = body["data"]["backup_codes"].as_array().unwrap();
     assert_eq!(backup_codes.len(), 8);
@@ -4129,8 +4129,8 @@ async fn test_totp_enabled_login_requires_valid_second_factor() {
         .unwrap()
         .to_string();
     {
-        use contrix_core::schema::totp_secrets::dsl as ts;
         use horme::prelude::*;
+        use syntra_core::schema::totp_secrets::dsl as ts;
 
         let mut conn = server.db.clone();
         let stored: String = ts::totp_secrets
@@ -4549,13 +4549,13 @@ async fn test_openapi_and_prometheus_metrics() {
         .unwrap();
     assert_eq!(response.status(), 200);
     let metrics = response.text().await.unwrap();
-    assert!(metrics.contains("# TYPE contrix_uptime_seconds gauge"));
-    assert!(metrics.contains("contrix_conversion_jobs"));
-    assert!(metrics.contains("# TYPE contrix_database_admitted_operations gauge"));
-    assert!(metrics.contains("# TYPE contrix_database_checkouts_total counter"));
+    assert!(metrics.contains("# TYPE syntra_uptime_seconds gauge"));
+    assert!(metrics.contains("syntra_conversion_jobs"));
+    assert!(metrics.contains("# TYPE syntra_database_admitted_operations gauge"));
+    assert!(metrics.contains("# TYPE syntra_database_checkouts_total counter"));
     let checkouts = metrics
         .lines()
-        .find_map(|line| line.strip_prefix("contrix_database_checkouts_total "))
+        .find_map(|line| line.strip_prefix("syntra_database_checkouts_total "))
         .unwrap();
     assert!(checkouts.parse::<u64>().unwrap() > 0);
 }
@@ -4585,8 +4585,9 @@ async fn test_admin_branding_get() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["success"], true);
-    // Default branding should have an app_name.
-    assert!(body["data"]["app_name"].is_string());
+    assert_eq!(body["data"]["app_name"], "Syntra Office");
+    assert_eq!(body["data"]["logo_url"], "/icons/syntra.svg");
+    assert_eq!(body["data"]["favicon_url"], "/favicon.ico");
 }
 
 #[tokio::test]

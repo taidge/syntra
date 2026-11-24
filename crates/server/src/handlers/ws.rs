@@ -2,11 +2,11 @@ use crate::middleware::auth::{AuthenticatedCredential, get_credential};
 use crate::middleware::request_observability::{observe_ws_operation, with_database_stage};
 use crate::services::collaboration::{self, Snapshot};
 use crate::state::AppState;
-use contrix_collab::CollabMessage;
-use contrix_core::{dto::ApiResponse, error::AppError};
 use salvo::prelude::*;
 use salvo::websocket::{Message, WebSocket, WebSocketUpgrade};
 use std::sync::Arc;
+use syntra_collab::CollabMessage;
+use syntra_core::{dto::ApiResponse, error::AppError};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -67,9 +67,9 @@ async fn authorized_once(
     credential: &AuthenticatedCredential,
     id: Uuid,
 ) -> Result<(), AppError> {
-    use contrix_core::models::File;
-    use contrix_core::schema::{documents::dsl as d, files::dsl as f};
     use diesel::prelude::*;
+    use syntra_core::models::File;
+    use syntra_core::schema::{documents::dsl as d, files::dsl as f};
 
     let credential = credential.clone();
     let path = format!("/api/v1/ws/collab/{id}");
@@ -134,9 +134,9 @@ pub async fn collab_ws(req: &mut Request, depot: &mut Depot, res: &mut Response)
         }
     };
     let username = {
-        use contrix_core::schema::users::dsl as u;
         use diesel::prelude::*;
         use horme::RunQueryDsl;
+        use syntra_core::schema::users::dsl as u;
         let mut db = state.db.clone();
         match u::users
             .find(&credential.user_id)

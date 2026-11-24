@@ -6,11 +6,11 @@ use rand::RngExt;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, TotpSetupRequest, TotpSetupResponse, TotpVerifyRequest};
-use contrix_core::error::AppError;
-use contrix_core::models::{NewTotpSecret, TotpSecret, User};
-use contrix_core::schema::totp_secrets::dsl as ts;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::dto::{ApiResponse, TotpSetupRequest, TotpSetupResponse, TotpVerifyRequest};
+use syntra_core::error::AppError;
+use syntra_core::models::{NewTotpSecret, TotpSecret, User};
+use syntra_core::schema::totp_secrets::dsl as ts;
+use syntra_core::schema::users::dsl as u;
 
 use crate::middleware::auth::get_user_id;
 use crate::services::password_crypto;
@@ -69,7 +69,7 @@ fn generate_backup_codes() -> Vec<String> {
 /// Build the otpauth URL for authenticator app QR code scanning.
 fn build_otpauth_url(email: &str, secret: &str) -> String {
     format!(
-        "otpauth://totp/ContrixOffice:{}?secret={}&issuer=ContrixOffice",
+        "otpauth://totp/syntra:{}?secret={}&issuer=syntra",
         encode_uri_component(email),
         secret,
     )
@@ -330,7 +330,7 @@ mod totp_tests {
         let uri = build_otpauth_url("user+测试@example.com", "ABC234");
         assert_eq!(
             uri,
-            "otpauth://totp/ContrixOffice:user%2B%E6%B5%8B%E8%AF%95%40example.com?secret=ABC234&issuer=ContrixOffice"
+            "otpauth://totp/syntra:user%2B%E6%B5%8B%E8%AF%95%40example.com?secret=ABC234&issuer=syntra"
         );
     }
 }

@@ -1,7 +1,7 @@
 //! OOXML style table. Whole formats are deduplicated independently of native caches.
 use super::{XlsxExportStats, differential_format_xml, escape_xml};
-use contrix_doc_engine::calc::{Border, BorderStyle, CellFormat, HAlign, VAlign, Workbook};
 use std::collections::BTreeMap;
+use syntra_doc_engine::calc::{Border, BorderStyle, CellFormat, HAlign, VAlign, Workbook};
 
 pub(super) struct Styles {
     formats: Vec<CellFormat>,

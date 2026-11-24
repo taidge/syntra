@@ -8,7 +8,7 @@ test('PPTX import retains large reused backgrounds and wrapped text @ui', async 
   const headers = { Authorization: `Bearer ${auth.token}` };
   const user = (await (await request.get('/api/v1/auth/me', { headers })).json()).data;
   await page.addInitScript(({ token, user }) => {
-    localStorage.setItem('contrix.auth', JSON.stringify({ token, user }));
+    localStorage.setItem('syntra.auth', JSON.stringify({ token, user }));
     localStorage.setItem('locale', 'en');
   }, { token: auth.token, user });
   await page.goto('/files');

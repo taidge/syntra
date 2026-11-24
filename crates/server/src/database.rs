@@ -11,7 +11,6 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use contrix_core::{config::DatabaseConfig, error::AppError};
 use deadpool::managed::{Object, Pool};
 use diesel::connection::{
     Instrumentation, InstrumentationEvent, TransactionManager, TransactionManagerStatus,
@@ -24,6 +23,7 @@ use diesel_async::pooled_connection::{
 use diesel_async::sync_connection_wrapper::{SpawnBlocking, SyncConnectionWrapper};
 use futures_util::future::BoxFuture;
 use horme::GetConnection;
+use syntra_core::{config::DatabaseConfig, error::AppError};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 mod memory;

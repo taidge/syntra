@@ -3,10 +3,10 @@ use diesel::prelude::*;
 use horme::RunQueryDsl;
 use salvo::prelude::*;
 
-use contrix_core::dto::{ApiResponse, NotificationResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::NotificationType;
-use contrix_core::schema::notifications::dsl as n;
+use syntra_core::dto::{ApiResponse, NotificationResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::NotificationType;
+use syntra_core::schema::notifications::dsl as n;
 
 use crate::middleware::auth::get_user_id;
 

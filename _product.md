@@ -1,4 +1,4 @@
-# Contrix Office — Product Improvement Roadmap
+# Syntra Office — Product Improvement Roadmap
 
 > Last updated: 2026-03-19
 > Status: 165 API endpoints, 40 handler files, 9 migrations, 37+ tables

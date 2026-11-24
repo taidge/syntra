@@ -22,7 +22,7 @@
 .editor-shell .save-status { flex: 0 1 auto; white-space: nowrap; }
 .editor-shell .editor-presence { gap: 8px; flex-wrap: nowrap; padding: 0; color: var(--text-light); font-size: 12px; }
 .editor-shell .editor-commandbar { height: 32px; min-height: 32px; padding: 0 12px; gap: 4px; align-items: center; border-bottom: 1px solid var(--border); background: var(--bg-white); }
-.editor-shell .office-menubar { border: 0; padding: 0; min-height: 28px; min-width: 0; gap: 2px; background: transparent; overflow-x: auto; overflow-y: hidden; }
+.editor-shell .syntra-menubar { border: 0; padding: 0; min-height: 28px; min-width: 0; gap: 2px; background: transparent; overflow-x: auto; overflow-y: hidden; }
 .editor-shell .editor-history-actions { margin-left: auto; gap: 2px; align-items: center; }
 .editor-header-slides .doc-title-bar, .editor-header-whiteboard .doc-title-bar { height: 42px; min-height: 42px; }
 .editor-present { padding: 4px 16px !important; min-height: 28px !important; font-size: 13px !important; }

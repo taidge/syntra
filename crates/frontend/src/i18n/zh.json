@@ -50,8 +50,8 @@
   "auth.register_link": "注册",
   "auth.login_link": "登录",
   "auth.fill_all_fields": "请填写所有字段。",
-  "auth.login_subtitle": "欢迎回到 Contrix Office",
-  "auth.register_subtitle": "加入 Contrix Office",
+  "auth.login_subtitle": "欢迎回到 Syntra Office",
+  "auth.register_subtitle": "加入 Syntra Office",
   "auth.email_placeholder": "you@example.com",
   "auth.password_placeholder": "输入密码",
   "auth.totp_code": "身份验证器动态码或备用码",
@@ -63,7 +63,7 @@
   "auth.signing_in": "正在登录...",
   "auth.creating_account": "正在创建账户...",
 
-  "dashboard.welcome": "欢迎使用 Contrix Office",
+  "dashboard.welcome": "欢迎使用 Syntra Office",
   "dashboard.recent": "最近文档",
   "dashboard.recent_empty": "暂无最近文档。",
   "dashboard.quick_new": "新建",
@@ -351,7 +351,7 @@
   "menu.tools.comments": "评论",
   "menu.tools.version_history": "版本历史",
   "menu.help.shortcuts": "键盘快捷键",
-  "menu.help.about": "关于 Contrix Office",
+  "menu.help.about": "关于 Syntra Office",
 
   "find.placeholder": "查找...",
   "find.replace_placeholder": "替换为...",

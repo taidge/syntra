@@ -1,10 +1,10 @@
 //! Tenant boundaries are enforced by the shared ACL and credential services.
 //! Unassigned users share the default namespace; tenant-bound users cannot use
 //! memberships or shares to cross into another tenant or the default namespace.
-use contrix_core::error::AppError;
 use diesel::prelude::*;
 use diesel::sql_types::{Integer, Nullable, Text};
 use horme::RunQueryDsl;
+use syntra_core::error::AppError;
 
 #[derive(diesel::QueryableByName)]
 struct Membership {

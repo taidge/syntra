@@ -2,15 +2,15 @@
 mod common;
 
 use common::TestServer;
-use contrix_collab::{CollabMessage, OpType, Operation};
-use contrix_core::schema::{
-    documents::dsl as d, files::dsl as f, operation_log::dsl as ol, users::dsl as u,
-    versions::dsl as v,
-};
 use diesel::prelude::*;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::time::Duration;
+use syntra_collab::{CollabMessage, OpType, Operation};
+use syntra_core::schema::{
+    documents::dsl as d, files::dsl as f, operation_log::dsl as ol, users::dsl as u,
+    versions::dsl as v,
+};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
@@ -77,7 +77,7 @@ fn replacement(content: &Value, version: u64, text: &str) -> Operation {
         OpType::Replace {
             path: vec![],
             old_value: content.clone(),
-            new_value: contrix_doc_engine::writer::writer_content_with_text(content, text),
+            new_value: syntra_doc_engine::writer::writer_content_with_text(content, text),
         },
     )
     .with_base_version(version)
@@ -220,7 +220,7 @@ async fn durable(server: &TestServer, document: &str) -> DurableState {
 async fn seed_operation_suffix(server: &TestServer, document: &str, count: u64) {
     let document = document.to_owned();
     server.db.run(move |conn| {
-        use contrix_core::{error::AppError, models::{Document, File, NewOperationLogEntry, NewVersion}};
+        use syntra_core::{error::AppError, models::{Document, File, NewOperationLogEntry, NewVersion}};
         use diesel::sql_types::{BigInt, Integer, Text};
         conn.immediate_transaction::<_, AppError, _>(|conn| {
             let row = d::documents.find(&document).first::<Document>(conn)?;
@@ -235,7 +235,7 @@ async fn seed_operation_suffix(server: &TestServer, document: &str, count: u64) 
                     path: vec![], old_value: content.clone(), new_value: content.clone(),
                 }).with_base_version(counter);
                 let id = format!("{document}:{client}:{counter}");
-                let hash = contrix_server::services::persistence::operation_request_hash(&operation)?;
+                let hash = syntra_server::services::persistence::operation_request_hash(&operation)?;
                 diesel::insert_into(v::versions).values(NewVersion {
                     id: Uuid::new_v4().to_string(), document_id: document.clone(),
                     version_number: i32::try_from(counter).unwrap(), content: row.content.clone(),
@@ -266,7 +266,7 @@ async fn seed_operation_suffix(server: &TestServer, document: &str, count: u64) 
 async fn operation_transaction_snapshot(server: &TestServer, document: &str) -> Value {
     let document = document.to_owned();
     server.db.run(move |conn| {
-        use contrix_core::{error::AppError, models::{Document, File, OperationLogEntry, Version}};
+        use syntra_core::{error::AppError, models::{Document, File, OperationLogEntry, Version}};
         use diesel::sql_types::Text;
         #[derive(QueryableByName)]
         struct JsonRow { #[diesel(sql_type = Text)] payload: String }
@@ -336,7 +336,7 @@ async fn assert_failed_operation_candidate_collected(
             // Wait for the real detached completion owner to enqueue this
             // candidate; only then drive the existing idempotent cleanup pass.
             if status.pending != 0 {
-                contrix_server::services::persistence::drain_storage_gc(&server.db, &server.state.storage).await.unwrap();
+                syntra_server::services::persistence::drain_storage_gc(&server.db, &server.state.storage).await.unwrap();
             }
             tokio::task::yield_now().await;
         }
@@ -503,11 +503,11 @@ async fn operation_history_row_boundary_and_excessive_backlog_are_transactional(
             // Drive the exact production catch-up entry point with no new edit,
             // then retry the original uncommitted operation identity once.
             let mut cursor =
-                contrix_server::services::operation_history::OperationHistoryCursor::default();
+                syntra_server::services::operation_history::OperationHistoryCursor::default();
             let mut removed = 0;
             for _ in 0..4 {
                 let page =
-                    contrix_server::services::operation_history::catch_up_operation_history_page(
+                    syntra_server::services::operation_history::catch_up_operation_history_page(
                         &server.db,
                         &mut cursor,
                     )
@@ -621,7 +621,7 @@ async fn a_reused_operation_id_cannot_ack_a_different_payload() {
     changed.op_type = OpType::Replace {
         path: vec![],
         old_value: initial.clone(),
-        new_value: contrix_doc_engine::writer::writer_content_with_text(
+        new_value: syntra_doc_engine::writer::writer_content_with_text(
             &initial,
             "different request with stolen id",
         ),
@@ -796,7 +796,7 @@ async fn concurrent_insert_and_delete_keep_inserted_text_in_both_durable_orders(
 #[tokio::test]
 async fn websocket_ack_follows_durable_commit_and_retries_snapshots_and_rest_stay_consistent() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("contrix_server::handlers::ws=debug")
+        .with_env_filter("syntra_server::handlers::ws=debug")
         .with_test_writer()
         .try_init();
     let server = TestServer::new().await;
@@ -887,7 +887,7 @@ async fn websocket_ack_follows_durable_commit_and_retries_snapshots_and_rest_sta
         (expected.clone(), initial_version + 1)
     );
     let rest_content =
-        contrix_doc_engine::writer::writer_content_with_text(&expected, "Saved over REST");
+        syntra_doc_engine::writer::writer_content_with_text(&expected, "Saved over REST");
     let rest_version =
         rest_save(&server, &jwt, &document, &rest_content, initial_version + 1).await;
     assert_eq!(rest_version, initial_version + 2);
@@ -938,7 +938,7 @@ async fn lagged_websocket_recovers_from_the_durable_snapshot_and_keeps_receiving
     assert_eq!(snapshot(&mut socket).await, (initial.clone(), version));
 
     let changed =
-        contrix_doc_engine::writer::writer_content_with_text(&initial, "Saved after overflow");
+        syntra_doc_engine::writer::writer_content_with_text(&initial, "Saved after overflow");
     let next_version = rest_save(&server, &jwt, &document, &changed, version).await;
     assert_eq!(next_version, version + 1);
     assert_eq!(snapshot(&mut socket).await, (changed, next_version));
@@ -1067,7 +1067,7 @@ async fn revocation_during_database_backpressure_never_uses_cached_authorization
     let mut admin = diesel::SqliteConnection::establish(db_path.to_str().unwrap()).unwrap();
     assert_eq!(
         diesel::sql_query("UPDATE sessions SET is_active=0 WHERE token_hash=?")
-            .bind::<diesel::sql_types::Text, _>(contrix_server::middleware::auth::hash_token(&jwt))
+            .bind::<diesel::sql_types::Text, _>(syntra_server::middleware::auth::hash_token(&jwt))
             .execute(&mut admin)
             .unwrap(),
         1,
@@ -1134,7 +1134,7 @@ async fn revoked_jwt_and_api_key_connections_cannot_write_or_receive_later_commi
                     .into(),
             ))
             .await;
-        let after_revoke = contrix_doc_engine::writer::writer_content_with_text(
+        let after_revoke = syntra_doc_engine::writer::writer_content_with_text(
             &initial,
             "Confidential after revocation",
         );
@@ -1214,7 +1214,7 @@ async fn removed_room_member_connections_cannot_write_or_receive_new_body() {
                 .into(),
         ))
         .await;
-    let private = contrix_doc_engine::writer::writer_content_with_text(
+    let private = syntra_doc_engine::writer::writer_content_with_text(
         &initial,
         "Only remaining members can see this",
     );
@@ -1302,7 +1302,7 @@ async fn notification_socket_accepts_read_scope_but_stops_delivering_after_revoc
         .headers_mut()
         .insert("authorization", format!("Bearer {key}").parse().unwrap());
     let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    contrix_server::services::NotificationService::create(
+    syntra_server::services::NotificationService::create(
         &server.db,
         &server.notifications,
         user,
@@ -1330,7 +1330,7 @@ async fn notification_socket_accepts_read_scope_but_stops_delivering_after_revoc
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    contrix_server::services::NotificationService::create(
+    syntra_server::services::NotificationService::create(
         &server.db,
         &server.notifications,
         user,
@@ -1357,8 +1357,8 @@ async fn notification_socket_accepts_read_scope_but_stops_delivering_after_revoc
 
 #[tokio::test]
 async fn revocation_during_slow_operation_storage_write_prevents_the_final_transaction() {
-    use contrix_server::middleware::auth::{AuthenticatedCredential, hash_token};
-    use contrix_server::services::{StorageBackend, persistence, s3_storage::S3Storage};
+    use syntra_server::middleware::auth::{AuthenticatedCredential, hash_token};
+    use syntra_server::services::{StorageBackend, persistence, s3_storage::S3Storage};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let server = TestServer::new().await;
     let (jwt, registered) = server
@@ -1473,8 +1473,8 @@ async fn revocation_during_slow_operation_storage_write_prevents_the_final_trans
     assert!(
         matches!(
             result,
-            Err(contrix_core::error::AppError::Auth(_))
-                | Err(contrix_core::error::AppError::Forbidden(_))
+            Err(syntra_core::error::AppError::Auth(_))
+                | Err(syntra_core::error::AppError::Forbidden(_))
         ),
         "{result:?}"
     );

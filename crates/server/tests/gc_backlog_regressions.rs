@@ -4,10 +4,10 @@ mod common;
 use std::time::Duration;
 
 use common::TestServer;
-use contrix_core::error::AppError;
-use contrix_server::services::persistence;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Nullable, Text};
+use syntra_core::error::AppError;
+use syntra_server::services::persistence;
 
 #[derive(QueryableByName)]
 struct Count {

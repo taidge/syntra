@@ -5,10 +5,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, CreateIpRestrictionRequest, IpRestrictionResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::NewIpRestriction;
-use contrix_core::schema::ip_restrictions::dsl as ip;
+use syntra_core::dto::{ApiResponse, CreateIpRestrictionRequest, IpRestrictionResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::NewIpRestriction;
+use syntra_core::schema::ip_restrictions::dsl as ip;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 

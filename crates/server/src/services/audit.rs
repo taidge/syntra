@@ -2,8 +2,8 @@ use chrono::Utc;
 use horme::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::models::NewActivityLog;
-use contrix_core::schema::activity_logs::dsl as al;
+use syntra_core::models::NewActivityLog;
+use syntra_core::schema::activity_logs::dsl as al;
 
 pub struct AuditService;
 

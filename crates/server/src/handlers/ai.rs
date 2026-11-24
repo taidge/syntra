@@ -3,9 +3,9 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::schema::documents::dsl as d;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::schema::documents::dsl as d;
 
 use crate::handlers::access::load_accessible_document;
 use crate::middleware::auth::get_user_id;

@@ -1,11 +1,12 @@
 [package]
-name = "contrix-frontend"
+name = "syntra-frontend"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+repository.workspace = true
 license.workspace = true
-description = "Glory and Sapid WebAssembly frontend for Contrix Office"
+description = "Glory and Sapid WebAssembly frontend for syntra"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -15,7 +16,7 @@ default = []
 ssr = ["glory/ssr"]
 
 [dependencies]
-contrix-doc-engine = { path = "../doc-engine" }
+syntra-doc-engine = { path = "../doc-engine" }
 glory = { workspace = true }
 sapid = { workspace = true }
 serde = { workspace = true }

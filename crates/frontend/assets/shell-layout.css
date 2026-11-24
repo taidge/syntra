@@ -65,7 +65,7 @@
   .navbar { padding-inline: 12px; }
   .navbar .navbar-brand { margin-right: 8px; }
   .navbar .brand-text { font-size: .875rem; }
-  .navbar .brand-icon { font-size: 1.25rem; }
+  .navbar .brand-icon { inline-size: 1.75rem; }
   .navbar .navbar-user > .btn { padding: 4px 6px; font-size: .75rem; }
   .profile-row > :last-child { min-width: 0; overflow-wrap: anywhere; }
   .auth-page, .app-page { padding-bottom: 60px; }

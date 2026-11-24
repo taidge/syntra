@@ -27,7 +27,7 @@ async function documentContent(request: APIRequestContext, fixture: Fixture) {
 }
 async function openEditor(page: Page, fixture: Fixture, kind: EditorKind) {
   await page.addInitScript(({ token, user }) => {
-    localStorage.setItem('contrix.auth', JSON.stringify({ token, user }));
+    localStorage.setItem('syntra.auth', JSON.stringify({ token, user }));
     localStorage.setItem('locale', 'en');
   }, fixture);
   await page.goto(`${APP_BASE}/${kind}/${fixture.id}`);

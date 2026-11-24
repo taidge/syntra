@@ -9,8 +9,8 @@ async fn file_snapshot(server: &TestServer, id: &str) -> Value {
     server
         .db
         .run(move |conn| {
-            use contrix_core::{models::File, schema::files};
             use diesel::prelude::*;
+            use syntra_core::{models::File, schema::files};
             files::table
                 .find(id)
                 .first::<File>(conn)

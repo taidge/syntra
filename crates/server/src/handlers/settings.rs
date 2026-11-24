@@ -5,10 +5,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{NewUserSetting, UserSetting};
-use contrix_core::schema::user_settings::dsl as us;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{NewUserSetting, UserSetting};
+use syntra_core::schema::user_settings::dsl as us;
 
 use crate::middleware::auth::get_user_id;
 

@@ -1,4 +1,4 @@
-//! Contrix Office's Glory + Sapid browser application.
+//! Syntra Office's Glory + Sapid browser application.
 
 pub mod collab_client;
 pub mod components;
@@ -116,7 +116,7 @@ pub fn app(route: Route, initial_auth: state::AuthState) -> impl Widget {
             Route::Pdf { id } => Box::new(pages::Pdf(scope.clone(), auth, id)),
             Route::NotFound {} => Box::new(col().class("not-found").fill((
                 text().content("Page not found"),
-                link().target("/").label("Contrix Office"),
+                link().target("/").label("Syntra Office"),
             ))),
         };
         page.build(scope)?;

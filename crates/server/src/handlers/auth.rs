@@ -8,20 +8,20 @@ use uuid::Uuid;
 
 use serde::Deserialize;
 
-use contrix_core::dto::{
+use syntra_core::dto::{
     ApiResponse, AuthResponse, ForgotPasswordRequest, LoginRequest, RegisterRequest,
     ResetPasswordRequest, UserProfile,
 };
-use contrix_core::error::AppError;
-use contrix_core::models::{
+use syntra_core::error::AppError;
+use syntra_core::models::{
     NewLoginAttempt, NewPasswordResetToken, NewSession, NewUser, PasswordResetToken, TotpSecret,
     User, UserRole,
 };
-use contrix_core::schema::login_attempts::dsl as la;
-use contrix_core::schema::password_reset_tokens::dsl as prt;
-use contrix_core::schema::sessions::dsl as sess;
-use contrix_core::schema::totp_secrets::dsl as ts;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::schema::login_attempts::dsl as la;
+use syntra_core::schema::password_reset_tokens::dsl as prt;
+use syntra_core::schema::sessions::dsl as sess;
+use syntra_core::schema::totp_secrets::dsl as ts;
+use syntra_core::schema::users::dsl as u;
 
 use crate::middleware::auth::{JwtClaims, get_user_id, hash_token};
 use crate::services::password::PasswordService;

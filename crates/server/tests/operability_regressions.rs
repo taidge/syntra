@@ -70,7 +70,7 @@ async fn failed_metrics_collection_is_unavailable_instead_of_zero() {
             .text()
             .await
             .unwrap()
-            .contains("contrix_conversion_jobs{")
+            .contains("syntra_conversion_jobs{")
     );
 }
 
@@ -173,7 +173,7 @@ async fn external_import_warns_and_retains_original_after_document_save() {
         current.starts_with(b"PK"),
         "Current Office download must be an OOXML ZIP, not mislabeled native JSON"
     );
-    let exported = contrix_export::pptx::pptx_to_presentation(&current).unwrap();
+    let exported = syntra_export::pptx::pptx_to_presentation(&current).unwrap();
     assert_eq!(exported.title, "Edited title");
     let url = upload["data"]["original_download_url"].as_str().unwrap();
     let response = server

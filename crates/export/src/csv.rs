@@ -2,7 +2,7 @@
 //!
 //! Converts between the doc-engine [`Sheet`] model and RFC 4180-style CSV text.
 
-use contrix_doc_engine::calc::{Cell, CellValue, Sheet};
+use syntra_doc_engine::calc::{Cell, CellValue, Sheet};
 
 /// Export a [`Sheet`] to a CSV string.
 ///

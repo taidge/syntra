@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use chrono::Utc;
-use contrix_core::error::AppError;
 use reqwest::{Method, StatusCode, Url};
 use sha2::{Digest, Sha256};
+use syntra_core::error::AppError;
 
 /// S3-compatible storage backend.
 ///
@@ -46,10 +46,10 @@ impl S3Storage {
         }
     }
 
-    /// Build an `S3Storage` from an [`contrix_core::config::StorageConfig`].
+    /// Build an `S3Storage` from an [`syntra_core::config::StorageConfig`].
     ///
     /// Returns `None` if the required S3 fields are not configured.
-    pub fn from_config(cfg: &contrix_core::config::StorageConfig) -> Option<Self> {
+    pub fn from_config(cfg: &syntra_core::config::StorageConfig) -> Option<Self> {
         let bucket = cfg.s3_bucket.as_deref()?;
         let region = cfg.s3_region.as_deref().unwrap_or("us-east-1");
         let access_key = cfg.s3_access_key.as_deref()?;
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn from_config_returns_none_when_no_bucket() {
-        let cfg = contrix_core::config::StorageConfig {
+        let cfg = syntra_core::config::StorageConfig {
             upload_idle_timeout_seconds: 30,
             upload_total_timeout_seconds: 900,
             base_path: "data/files".to_string(),
@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn from_config_returns_some_with_bucket() {
-        let cfg = contrix_core::config::StorageConfig {
+        let cfg = syntra_core::config::StorageConfig {
             upload_idle_timeout_seconds: 30,
             upload_total_timeout_seconds: 900,
             base_path: "data/files".to_string(),

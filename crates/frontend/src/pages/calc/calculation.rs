@@ -1,5 +1,5 @@
-use contrix_doc_engine::{CellRef, CellValue, Sheet};
 use serde::{Deserialize, Serialize};
+use syntra_doc_engine::{CellRef, CellValue, Sheet};
 
 use super::{
     CalcSnapshot, CalculatedCells, CellKey, HashMap, cell_input_text, workbook_cell_entries,
@@ -91,7 +91,7 @@ impl CalculationInput {
             sheet.cells.extend(cells.iter().map(|(point, cell)| {
                 (
                     point.clone(),
-                    contrix_doc_engine::calc::Cell {
+                    syntra_doc_engine::calc::Cell {
                         value: cell.value.clone(),
                         formula: cell.formula.clone(),
                         format: Default::default(),
@@ -174,7 +174,7 @@ fn inline_formula_cost(formula: &str) -> Option<usize> {
 
 #[cfg(target_arch = "wasm32")]
 pub(super) const MAX_WIRE_BYTES: usize =
-    contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 4 * 1024 * 1024;
+    syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 4 * 1024 * 1024;
 
 #[cfg(target_arch = "wasm32")]
 pub(super) fn encode(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {

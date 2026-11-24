@@ -5,11 +5,11 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, FileResponse, MoveFileRequest};
-use contrix_core::error::AppError;
-use contrix_core::models::{File, NewFile};
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
+use syntra_core::dto::{ApiResponse, FileResponse, MoveFileRequest};
+use syntra_core::error::AppError;
+use syntra_core::models::{File, NewFile};
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::files::dsl as f;
 
 use crate::handlers::access::{
     check_room_access, load_accessible_file, load_accessible_folder, load_accessible_target_folder,
@@ -527,7 +527,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "docx" | "xlsx" | "pptx"));
     let commit_owner = uid.clone();
     let commit_parent = parent_id_param.clone();
-    let source_version = contrix_core::models::NewFileVersion {
+    let source_version = syntra_core::models::NewFileVersion {
         id: Uuid::new_v4().to_string(),
         file_id: file_id_val.to_string(),
         version_number: 0,
@@ -582,7 +582,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 crate::services::persistence::adjust_quota(connection, &commit_owner, size_val)?;
                 if imported_format {
                     diesel::RunQueryDsl::execute(
-                        diesel::insert_into(contrix_core::schema::file_versions::table)
+                        diesel::insert_into(syntra_core::schema::file_versions::table)
                             .values(&source_version),
                         connection,
                     )?;
@@ -656,21 +656,21 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
                 let _permit = permit;
                 let _capacity = parse_capacity;
                 match ext.as_str() {
-                    "docx" => contrix_export::docx::docx_to_writer(&data)
+                    "docx" => syntra_export::docx::docx_to_writer(&data)
                         .and_then(|document| {
                             serde_json::to_value(document).map_err(|e| e.to_string())
                         })
-                        .map(|value| (value, contrix_core::models::DocumentType::Writer)),
-                    "xlsx" => contrix_export::xlsx::xlsx_to_workbook(&data)
+                        .map(|value| (value, syntra_core::models::DocumentType::Writer)),
+                    "xlsx" => syntra_export::xlsx::xlsx_to_workbook(&data)
                         .and_then(|document| {
                             serde_json::to_value(document).map_err(|e| e.to_string())
                         })
-                        .map(|value| (value, contrix_core::models::DocumentType::Calc)),
-                    _ => contrix_export::pptx::pptx_to_presentation(&data)
+                        .map(|value| (value, syntra_core::models::DocumentType::Calc)),
+                    _ => syntra_export::pptx::pptx_to_presentation(&data)
                         .and_then(|document| {
                             serde_json::to_value(document).map_err(|e| e.to_string())
                         })
-                        .map(|value| (value, contrix_core::models::DocumentType::Slides)),
+                        .map(|value| (value, syntra_core::models::DocumentType::Slides)),
                 }
             })
             .await
@@ -691,7 +691,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
                     })
                     .unwrap_or_default();
                 let new_doc_id = Uuid::new_v4();
-                let document = contrix_core::models::NewDocument {
+                let document = syntra_core::models::NewDocument {
                     id: new_doc_id.to_string(),
                     file_id: file_id_val.to_string(),
                     doc_type: doc_type.as_str().to_owned(),
@@ -731,7 +731,7 @@ pub async fn upload_file(req: &mut Request, depot: &mut Depot, res: &mut Respons
                                 ));
                             }
                             diesel::RunQueryDsl::execute(
-                                diesel::insert_into(contrix_core::schema::documents::table)
+                                diesel::insert_into(syntra_core::schema::documents::table)
                                     .values(&document),
                                 connection,
                             )?;
@@ -1162,7 +1162,7 @@ pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Respo
     let resolved_file_id = file_row.id.clone();
     let file_name = file_row.name.clone();
     let file_path = if req.query::<bool>("original").unwrap_or(false) {
-        use contrix_core::schema::file_versions::dsl as fv;
+        use syntra_core::schema::file_versions::dsl as fv;
         match fv::file_versions
             .filter(fv::file_id.eq(&resolved_file_id))
             .filter(fv::version_number.eq(0))
@@ -1208,8 +1208,10 @@ pub async fn download_file(req: &mut Request, depot: &mut Depot, res: &mut Respo
         .unwrap_or_else(|| "application/octet-stream".to_owned());
     // Edited imports are stored as native JSON. Download their current Office
     // representation rather than returning JSON with an Office MIME/filename.
-    if !req.query::<bool>("original").unwrap_or(false) && file_path.ends_with(".contrix.json") {
-        use contrix_export::ExportFormat;
+    if !req.query::<bool>("original").unwrap_or(false)
+        && (file_path.ends_with(".syntra.json") || file_path.ends_with(".\x63ontrix.json"))
+    {
+        use syntra_export::ExportFormat;
         let extension = std::path::Path::new(&file_name)
             .extension()
             .and_then(|value| value.to_str())

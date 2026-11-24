@@ -1,6 +1,6 @@
 use salvo::prelude::*;
 
-use contrix_core::dto::ApiResponse;
+use syntra_core::dto::ApiResponse;
 
 // ---------------------------------------------------------------------------
 // GET /capabilities  (Return server capabilities)

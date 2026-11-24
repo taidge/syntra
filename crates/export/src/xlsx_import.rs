@@ -1,7 +1,7 @@
-//! Read standard SpreadsheetML features independently of Contrix native caches.
+//! Read standard SpreadsheetML features independently of syntra native caches.
 use crate::ooxml_import::{self as xml, Archive, Node, warn};
-use contrix_doc_engine::calc::*;
 use std::collections::{BTreeMap, BTreeSet};
+use syntra_doc_engine::calc::*;
 #[derive(Default)]
 struct Styles {
     formats: Vec<CellFormat>,
@@ -598,12 +598,12 @@ fn chart(
     let root = xml::part(archive, part).ok()?;
     let (kind, data) = crate::pptx::external_import::chart_data(&root, warnings, points_remaining)?;
     let kind = match kind {
-        contrix_doc_engine::slides::ChartType::Bar => SheetChartType::Bar,
-        contrix_doc_engine::slides::ChartType::Line => SheetChartType::Line,
-        contrix_doc_engine::slides::ChartType::Pie => SheetChartType::Pie,
-        contrix_doc_engine::slides::ChartType::Area => SheetChartType::Area,
-        contrix_doc_engine::slides::ChartType::Doughnut => SheetChartType::Doughnut,
-        contrix_doc_engine::slides::ChartType::Scatter => SheetChartType::Scatter,
+        syntra_doc_engine::slides::ChartType::Bar => SheetChartType::Bar,
+        syntra_doc_engine::slides::ChartType::Line => SheetChartType::Line,
+        syntra_doc_engine::slides::ChartType::Pie => SheetChartType::Pie,
+        syntra_doc_engine::slides::ChartType::Area => SheetChartType::Area,
+        syntra_doc_engine::slides::ChartType::Doughnut => SheetChartType::Doughnut,
+        syntra_doc_engine::slides::ChartType::Scatter => SheetChartType::Scatter,
     };
     let point = |name: &str, default: (u32, u32)| {
         let node = anchor.child(name);
@@ -885,7 +885,7 @@ pub(super) fn preflight_shared_strings(bytes: &[u8]) -> Result<(), String> {
     if root.name != "sst" {
         return Err("Invalid shared string table root".into());
     }
-    let max_unique = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
+    let max_unique = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
     let max_references = 1_000_000u64;
     for (attribute, limit) in [
         ("uniqueCount", max_unique as u64),
@@ -908,7 +908,7 @@ pub(super) fn preflight_shared_strings(bytes: &[u8]) -> Result<(), String> {
     while let Some(node) = stack.pop() {
         actual += usize::from(node.name == "si");
         text_bytes = text_bytes.saturating_add(node.text.len());
-        if actual > max_unique || text_bytes > contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES {
+        if actual > max_unique || text_bytes > syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES {
             return Err("Shared string actual content exceeds allocation budget".into());
         }
         stack.extend(&node.children);
@@ -972,7 +972,7 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
             rels,
         ));
     }
-    let mut points_remaining = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
+    let mut points_remaining = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
     for (name, root, relations) in &sheets {
         let Some(sheet) = workbook.sheets.iter_mut().find(|s| &s.name == name) else {
             continue;

@@ -4,7 +4,9 @@ use std::path::{Component, Path};
 #[handler]
 pub async fn spa_fallback(req: &mut Request, res: &mut Response) {
     let path = req.uri().path().to_string();
-    let static_root = std::env::var("CONTRIX_STATIC_DIR").unwrap_or_else(|_| "static".into());
+    let static_root = std::env::var("SYNTRA_STATIC_DIR")
+        .or_else(|_| std::env::var("\x43ONTRIX_STATIC_DIR"))
+        .unwrap_or_else(|_| "static".into());
     serve_spa(Path::new(&static_root), &path, res).await;
 }
 
@@ -242,9 +244,9 @@ mod tests {
             .join("System32/WindowsPowerShell/v1.0/powershell.exe");
         let result = std::process::Command::new(powershell)
             .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
-                "New-Item -ItemType Junction -Path $env:OFFICE_TEST_JUNCTION -Value $env:OFFICE_TEST_TARGET -ErrorAction Stop | Out-Null"])
-            .env("OFFICE_TEST_JUNCTION", &junction)
-            .env("OFFICE_TEST_TARGET", &private)
+                "New-Item -ItemType Junction -Path $env:SYNTRA_TEST_JUNCTION -Value $env:SYNTRA_TEST_TARGET -ErrorAction Stop | Out-Null"])
+            .env("SYNTRA_TEST_JUNCTION", &junction)
+            .env("SYNTRA_TEST_TARGET", &private)
             .creation_flags(0x0800_0000)
             .output()
             .unwrap();

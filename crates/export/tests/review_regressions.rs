@@ -1,9 +1,9 @@
-use contrix_doc_engine::calc::{
+use std::io::{Cursor, Read};
+use syntra_doc_engine::calc::{
     CellRef, CellValue, PivotAggregation, PivotTable, Sheet, SheetChart, SheetChartType, Workbook,
 };
-use contrix_doc_engine::slides::SlideElement;
-use contrix_export::xlsx::{XlsxExportStats, workbook_to_xlsx_with_stats};
-use std::io::{Cursor, Read};
+use syntra_doc_engine::slides::SlideElement;
+use syntra_export::xlsx::{XlsxExportStats, workbook_to_xlsx_with_stats};
 use zip::ZipArchive;
 fn part(bytes: &[u8], name: &str) -> String {
     let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
@@ -27,7 +27,7 @@ fn functional_saved_workbook_csv_recalculates_lazy_conditions_and_lookup_depende
     let mut loaded: Workbook = serde_json::from_slice(&saved).unwrap();
     loaded.sheets[0].recalculate();
     assert_eq!(
-        contrix_export::csv::sheet_to_csv(&loaded.sheets[0]),
+        syntra_export::csv::sheet_to_csv(&loaded.sheets[0]),
         "3,6,6,6\r\n"
     );
     loaded.sheets[0].set_formula(0, 0, "=IF(TRUE,4,A1)".into());
@@ -35,7 +35,7 @@ fn functional_saved_workbook_csv_recalculates_lazy_conditions_and_lookup_depende
     loaded.sheets[0].set_formula(0, 3, "=VLOOKUP(4,A1:B1,2,FALSE)".into());
     loaded.sheets[0].recalculate();
     assert_eq!(
-        contrix_export::csv::sheet_to_csv(&loaded.sheets[0]),
+        syntra_export::csv::sheet_to_csv(&loaded.sheets[0]),
         "4,8,8,8\r\n"
     );
 }
@@ -43,7 +43,7 @@ fn functional_saved_workbook_csv_recalculates_lazy_conditions_and_lookup_depende
 #[test]
 fn external_xlsx_keeps_formulas_and_recalculates_after_edit() {
     let mut book =
-        contrix_export::xlsx::xlsx_to_workbook(include_bytes!("fixtures/external-formulas.xlsx"))
+        syntra_export::xlsx::xlsx_to_workbook(include_bytes!("fixtures/external-formulas.xlsx"))
             .unwrap();
     assert_eq!(
         book.sheets[0].get_cell(0, 1).unwrap().formula.as_deref(),
@@ -55,7 +55,7 @@ fn external_xlsx_keeps_formulas_and_recalculates_after_edit() {
         book.sheets[0].get_cell(0, 1).unwrap().value,
         CellValue::Number(11.0)
     ));
-    let bytes = contrix_export::xlsx::workbook_to_xlsx(&book).unwrap();
+    let bytes = syntra_export::xlsx::workbook_to_xlsx(&book).unwrap();
     assert!(part(&bytes, "xl/worksheets/sheet1.xml").contains("<f>A1+1</f>"));
 }
 #[test]
@@ -100,12 +100,12 @@ fn sparse_xlsx_visits_only_occupied_cells_and_writes_real_styles() {
         assert!(styles.contains("FF123456"));
         assert!(styles.contains("formatCode=\"0.00%\""));
         assert!(styles.contains("applyNumberFormat=\"1\""));
-        let restored = contrix_export::xlsx::xlsx_to_workbook(&bytes).unwrap();
+        let restored = syntra_export::xlsx::xlsx_to_workbook(&bytes).unwrap();
         assert!(matches!(
             restored.sheets[0].get_cell(row, col).unwrap().value,
             CellValue::Number(42.0)
         ));
-        let ordinary = contrix_export::xlsx::workbook_to_xlsx(&book).unwrap();
+        let ordinary = syntra_export::xlsx::workbook_to_xlsx(&book).unwrap();
         assert_eq!(part(&ordinary, "xl/worksheets/sheet1.xml"), xml);
         assert_eq!(part(&ordinary, "xl/styles.xml"), styles);
     }
@@ -138,7 +138,7 @@ fn xlsx_cell_counts_include_stored_empty_cells_and_all_sheets() {
         })
         .sum();
     assert_eq!(emitted, stats.emitted_cells);
-    let restored = contrix_export::xlsx::xlsx_to_workbook(&bytes).unwrap();
+    let restored = syntra_export::xlsx::xlsx_to_workbook(&bytes).unwrap();
     assert!(matches!(
         restored.sheets[0].get_cell(0, 0).unwrap().value,
         CellValue::Empty
@@ -220,7 +220,7 @@ fn xlsx_cell_counts_include_chart_and_pivot_coordinate_lookups() {
     }
     assert!(part(&bytes, "xl/pivotCache/pivotCacheRecords1.xml").contains("count=\"1\""));
     assert!(matches!(
-        contrix_export::xlsx::xlsx_to_workbook(&bytes)
+        syntra_export::xlsx::xlsx_to_workbook(&bytes)
             .unwrap()
             .sheets[0]
             .get_cell(1, 1)
@@ -231,7 +231,7 @@ fn xlsx_cell_counts_include_chart_and_pivot_coordinate_lookups() {
 }
 #[test]
 fn external_pptx_uses_relationship_order_excludes_orphans_and_reports_fidelity() {
-    let presentation = contrix_export::pptx::pptx_to_presentation(include_bytes!(
+    let presentation = syntra_export::pptx::pptx_to_presentation(include_bytes!(
         "fixtures/external-slide-order.pptx"
     ))
     .unwrap();
@@ -257,7 +257,7 @@ fn reordered_external_pptx_keeps_rich_elements_and_explicit_degradation_warnings
     }));
     let order = part(bytes, "ppt/presentation.xml");
     assert!(order.find("r:id=\"leading\"").unwrap() < order.find("r:id=\"slide\"").unwrap());
-    let presentation = contrix_export::pptx::pptx_to_presentation(bytes).unwrap();
+    let presentation = syntra_export::pptx::pptx_to_presentation(bytes).unwrap();
     assert_eq!(presentation.slides.len(), 2);
     assert!(matches!(&presentation.slides[0].elements[0],
         SlideElement::TextBox(text) if text.content[0].text == "Second file, first slide"));

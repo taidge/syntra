@@ -2,14 +2,14 @@
 mod common;
 
 use common::TestServer;
-use contrix_core::error::AppError;
-use contrix_server::handlers::{documents, files, upload};
-use contrix_server::middleware::auth::jwt_auth_middleware;
-use contrix_server::state::AppState;
 use salvo::conn::Acceptor;
 use salvo::prelude::*;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
+use syntra_core::error::AppError;
+use syntra_server::handlers::{documents, files, upload};
+use syntra_server::middleware::auth::jwt_auth_middleware;
+use syntra_server::state::AppState;
 use tokio::sync::Notify;
 
 #[derive(Clone)]
@@ -31,7 +31,7 @@ struct AuthenticatedBarrier {
 #[handler]
 impl AuthenticatedBarrier {
     async fn handle(&self, depot: &mut Depot) {
-        assert!(contrix_server::middleware::auth::get_credential(depot).is_some());
+        assert!(syntra_server::middleware::auth::get_credential(depot).is_some());
         self.entered.notify_one();
         self.release.notified().await;
     }

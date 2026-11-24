@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
-use contrix_core::config::StorageConfig;
-use contrix_core::error::AppError;
+use syntra_core::config::StorageConfig;
+use syntra_core::error::AppError;
 use uuid::Uuid;
 
 use crate::middleware::request_observability::with_database_stage;

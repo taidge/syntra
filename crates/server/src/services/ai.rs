@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use contrix_core::config::AiConfig;
+use syntra_core::config::AiConfig;
 
 pub struct AiService {
     config: AiConfig,

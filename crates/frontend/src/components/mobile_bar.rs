@@ -19,7 +19,7 @@ pub fn MobileBar(_scope: Scope, _auth: Cage<AuthState>) -> impl Widget {
         action(crate::i18n::t("mobile.ai"), || {
             if let Some(window) = web_sys::window()
                 && let Some(document) = window.document()
-                && let Ok(event) = web_sys::CustomEvent::new("contrix:open-ai")
+                && let Ok(event) = web_sys::CustomEvent::new("syntra:open-ai")
             {
                 let _ = document.dispatch_event(&event);
             }

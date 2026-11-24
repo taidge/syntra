@@ -66,48 +66,48 @@
 }
 
 /* Shared dialogs retain the original title, close icon, and padded form body. */
-.sapid-dialog.office-modal {
+.sapid-dialog.syntra-modal {
   width:480px !important; max-width:calc(100vw - 48px) !important;
   max-height:90dvh; overflow:auto; padding:0 !important; gap:0 !important;
   background:var(--bg-white) !important; color:var(--text) !important;
   border:1px solid var(--border); border-radius:var(--radius-lg) !important;
   box-shadow:var(--shadow-lg);
 }
-.sapid-dialog.office-modal > h2 {
+.sapid-dialog.syntra-modal > h2 {
   margin:0; padding:16px 60px 16px 24px; border-bottom:1px solid var(--border);
   font-size:18px !important; font-weight:600 !important; line-height:28px;
 }
-.sapid-dialog.office-modal > .modal-body {
+.sapid-dialog.syntra-modal > .modal-body {
   width:100%; min-width:0; padding:24px; gap:0;
 }
-.sapid-dialog.office-modal .modal-form { min-width:0; }
-.sapid-dialog.office-modal .modal-actions .sapid-button.btn-outline { background:transparent !important; color:var(--primary) !important; border-color:var(--border-dark) !important; }
-.sapid-dialog.office-modal .modal-actions .sapid-button {
+.sapid-dialog.syntra-modal .modal-form { min-width:0; }
+.sapid-dialog.syntra-modal .modal-actions .sapid-button.btn-outline { background:transparent !important; color:var(--primary) !important; border-color:var(--border-dark) !important; }
+.sapid-dialog.syntra-modal .modal-actions .sapid-button {
   min-height:43px !important; padding:10px 20px !important;
   font-size:15px !important; border-radius:var(--radius-md) !important;
 }
-.sapid-dialog.office-modal .modal-actions .sapid-button-primary {
+.sapid-dialog.syntra-modal .modal-actions .sapid-button-primary {
   background:var(--primary) !important; border-color:var(--primary) !important;
 }
-.sapid-dialog.office-modal .modal-actions .sapid-button-outline {
+.sapid-dialog.syntra-modal .modal-actions .sapid-button-outline {
   color:var(--primary) !important; border-color:var(--border-dark) !important;
 }
-.sapid-dialog.office-modal .sapid-layer-close {
+.sapid-dialog.syntra-modal .sapid-layer-close {
   position:absolute; top:14px; right:16px; width:32px; height:32px;
   min-height:0; margin:0; padding:0; border:0; border-radius:var(--radius-sm);
   background:transparent; color:var(--text-muted); font:inherit;
   font-size:24px; line-height:32px; cursor:pointer; display:flex;
   align-items:center; justify-content:center;
 }
-.sapid-dialog.office-modal .sapid-layer-close:hover { background:var(--bg); color:var(--text); }
-.sapid-dialog.office-modal .sapid-layer-close:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+.sapid-dialog.syntra-modal .sapid-layer-close:hover { background:var(--bg); color:var(--text); }
+.sapid-dialog.syntra-modal .sapid-layer-close:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
 
 /* Sapid Theme is mount-time configuration. Keep live application colors on the
    root theme so mounted controls and top-layer popups switch together. */
-:root { --office-color-scheme: light; }
-:root[data-theme="dark"] { --office-color-scheme: dark; }
+:root { --syntra-color-scheme: light; }
+:root[data-theme="dark"] { --syntra-color-scheme: dark; }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --office-color-scheme: dark; }
+  :root:not([data-theme="light"]) { --syntra-color-scheme: dark; }
 }
 :root [class*="sapid-theme-"] {
   --sp-canvas: var(--bg);
@@ -128,7 +128,7 @@
   --sp-danger: var(--danger);
   --sp-danger-fill: var(--danger);
   --sp-on-danger: var(--text-white);
-  color-scheme: var(--office-color-scheme);
+  color-scheme: var(--syntra-color-scheme);
 }
 /* Portable Sapid colors are inline values; override only their color channels,
    leaving the widget's dimensions, positioning and interaction styles intact. */

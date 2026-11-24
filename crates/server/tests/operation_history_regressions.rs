@@ -5,15 +5,15 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::time::Duration;
 
-use contrix_core::error::AppError;
-use contrix_server::services::operation_history::{
-    MAX_HISTORY_BYTES, MAX_HISTORY_ROWS, OperationHistoryCursor, catch_up_operation_history_page,
-    has_future_history, prune_operation_history_page, run_operation_history_retention,
-};
-use contrix_server::state::DbPool;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Text};
+use syntra_core::error::AppError;
+use syntra_server::services::operation_history::{
+    MAX_HISTORY_BYTES, MAX_HISTORY_ROWS, OperationHistoryCursor, catch_up_operation_history_page,
+    has_future_history, prune_operation_history_page, run_operation_history_retention,
+};
+use syntra_server::state::DbPool;
 
 #[derive(Clone, Copy, Default)]
 struct AllocationCount {
@@ -120,7 +120,7 @@ async fn fixture() -> (tempfile::TempDir, DbPool) {
     )
     .unwrap();
     db.run_startup_migrations(|conn| {
-        contrix_server::migrations::run_directory(
+        syntra_server::migrations::run_directory(
             conn,
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
         )

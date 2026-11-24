@@ -5,10 +5,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, CreateInvitationRequest, InvitationResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::{Invitation, NewInvitation, UserRole};
-use contrix_core::schema::invitations::dsl as inv;
+use syntra_core::dto::{ApiResponse, CreateInvitationRequest, InvitationResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::{Invitation, NewInvitation, UserRole};
+use syntra_core::schema::invitations::dsl as inv;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 use crate::services::password::PasswordService;
@@ -43,7 +43,7 @@ fn consume_invitation(
     expected: &Invitation,
     existing_user: Option<&str>,
 ) -> Result<Option<String>, AppError> {
-    use contrix_core::schema::users::dsl as u;
+    use syntra_core::schema::users::dsl as u;
 
     let current = diesel::OptionalExtension::optional(diesel::RunQueryDsl::first::<Invitation>(
         inv::invitations
@@ -514,9 +514,9 @@ pub async fn accept_invitation_with_depot(
         res.render(Json(ApiResponse::<()>::err(error.to_response())));
         return;
     }
-    let issuer_role = contrix_core::schema::users::table
+    let issuer_role = syntra_core::schema::users::table
         .find(&invitation.invited_by)
-        .select(contrix_core::schema::users::role)
+        .select(syntra_core::schema::users::role)
         .first::<String>(&mut conn)
         .await;
     if !matches!(issuer_role.as_deref(), Ok("admin")) {
@@ -544,7 +544,7 @@ pub async fn accept_invitation_with_depot(
     }
 
     // Check if a user with this email already exists.
-    use contrix_core::schema::users::dsl as u_dsl;
+    use syntra_core::schema::users::dsl as u_dsl;
 
     let existing_user: Option<String> = match u_dsl::users
         .filter(u_dsl::email.eq(&body.email))
@@ -643,7 +643,7 @@ pub async fn accept_invitation_with_depot(
     let now = Utc::now();
     let default_quota = (state.config.storage.default_quota_mb as i64) * 1024 * 1024;
 
-    let new_user = contrix_core::models::NewUser {
+    let new_user = syntra_core::models::NewUser {
         id: user_id.to_string(),
         username: body.username.clone(),
         email: body.email.clone(),

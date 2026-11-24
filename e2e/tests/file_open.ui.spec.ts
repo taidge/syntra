@@ -59,7 +59,7 @@ test.describe('Open files from their cards @ui', () => {
 
     await page.addInitScript(auth => {
       localStorage.setItem('locale', 'en');
-      localStorage.setItem('contrix.auth', JSON.stringify({
+      localStorage.setItem('syntra.auth', JSON.stringify({
         token: auth.token,
         user: {
           id: auth.userId,
@@ -131,7 +131,7 @@ test.describe('Open files from their cards @ui', () => {
 
       await page.addInitScript(auth => {
         localStorage.setItem('locale', 'en');
-        localStorage.setItem('contrix.auth', JSON.stringify({
+        localStorage.setItem('syntra.auth', JSON.stringify({
           token: auth.token,
           user: {
             id: auth.userId,

@@ -2,14 +2,14 @@ use diesel::prelude::*;
 use horme::RunQueryDsl;
 use salvo::prelude::*;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::{AppError, ErrorResponse};
-use contrix_core::schema::conversion_jobs::dsl as cj;
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::user_presence::dsl as up;
-use contrix_core::schema::users::dsl as u;
-use contrix_core::schema::webhook_deliveries::dsl as wd;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::{AppError, ErrorResponse};
+use syntra_core::schema::conversion_jobs::dsl as cj;
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::user_presence::dsl as up;
+use syntra_core::schema::users::dsl as u;
+use syntra_core::schema::webhook_deliveries::dsl as wd;
 
 use crate::middleware::auth::get_user_role;
 
@@ -271,16 +271,16 @@ pub async fn prometheus_metrics(depot: &mut Depot, res: &mut Response) {
     let db_admitted = database.admitted_operations;
     let db_checkouts = database.checkouts;
     let body = format!(
-        "# HELP contrix_uptime_seconds Server uptime in seconds\n# TYPE contrix_uptime_seconds gauge\ncontrix_uptime_seconds {uptime}\n\
-# HELP contrix_users_total Registered users\n# TYPE contrix_users_total gauge\ncontrix_users_total {users}\n\
-# HELP contrix_documents_total Stored documents\n# TYPE contrix_documents_total gauge\ncontrix_documents_total {documents}\n\
-# HELP contrix_active_presence Active collaborative presence records\n# TYPE contrix_active_presence gauge\ncontrix_active_presence {active}\n\
-# HELP contrix_conversion_jobs Durable conversion jobs by status\n# TYPE contrix_conversion_jobs gauge\ncontrix_conversion_jobs{{status=\"pending\"}} {pending}\ncontrix_conversion_jobs{{status=\"failed\"}} {failed}\n\
-# HELP contrix_webhook_deliveries_failed Failed webhook deliveries available for retry\n# TYPE contrix_webhook_deliveries_failed gauge\ncontrix_webhook_deliveries_failed {webhook_failed}\n\
-# HELP contrix_database_connections Current SQLite pool connections\n# TYPE contrix_database_connections gauge\ncontrix_database_connections {db_connections}\n\
-# HELP contrix_database_idle_connections SQLite connections available for a query lease\n# TYPE contrix_database_idle_connections gauge\ncontrix_database_idle_connections {db_idle}\n\
-# HELP contrix_database_admitted_operations Admitted SQL operations including waiters and pending blocking cleanup\n# TYPE contrix_database_admitted_operations gauge\ncontrix_database_admitted_operations {db_admitted}\n\
-# HELP contrix_database_checkouts_total SQL and transaction leases acquired since startup\n# TYPE contrix_database_checkouts_total counter\ncontrix_database_checkouts_total {db_checkouts}\n"
+        "# HELP syntra_uptime_seconds Server uptime in seconds\n# TYPE syntra_uptime_seconds gauge\nsyntra_uptime_seconds {uptime}\n\
+# HELP syntra_users_total Registered users\n# TYPE syntra_users_total gauge\nsyntra_users_total {users}\n\
+# HELP syntra_documents_total Stored documents\n# TYPE syntra_documents_total gauge\nsyntra_documents_total {documents}\n\
+# HELP syntra_active_presence Active collaborative presence records\n# TYPE syntra_active_presence gauge\nsyntra_active_presence {active}\n\
+# HELP syntra_conversion_jobs Durable conversion jobs by status\n# TYPE syntra_conversion_jobs gauge\nsyntra_conversion_jobs{{status=\"pending\"}} {pending}\nsyntra_conversion_jobs{{status=\"failed\"}} {failed}\n\
+# HELP syntra_webhook_deliveries_failed Failed webhook deliveries available for retry\n# TYPE syntra_webhook_deliveries_failed gauge\nsyntra_webhook_deliveries_failed {webhook_failed}\n\
+# HELP syntra_database_connections Current SQLite pool connections\n# TYPE syntra_database_connections gauge\nsyntra_database_connections {db_connections}\n\
+# HELP syntra_database_idle_connections SQLite connections available for a query lease\n# TYPE syntra_database_idle_connections gauge\nsyntra_database_idle_connections {db_idle}\n\
+# HELP syntra_database_admitted_operations Admitted SQL operations including waiters and pending blocking cleanup\n# TYPE syntra_database_admitted_operations gauge\nsyntra_database_admitted_operations {db_admitted}\n\
+# HELP syntra_database_checkouts_total SQL and transaction leases acquired since startup\n# TYPE syntra_database_checkouts_total counter\nsyntra_database_checkouts_total {db_checkouts}\n"
     );
     res.status_code(StatusCode::OK);
     res.headers_mut().insert(

@@ -1,9 +1,9 @@
 use horme::prelude::*;
 use std::result::Result;
 
-use contrix_core::error::AppError;
-use contrix_core::models::PasswordPolicy;
-use contrix_core::schema::password_policies::dsl as pp;
+use syntra_core::error::AppError;
+use syntra_core::models::PasswordPolicy;
+use syntra_core::schema::password_policies::dsl as pp;
 
 pub struct PasswordService;
 

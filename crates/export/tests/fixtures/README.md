@@ -1,4 +1,4 @@
-These minimal OOXML fixtures are authored independently of the Contrix exporters and contain no customXml native model. external-formulas.xlsx contains A1=1 and B1=A1+1 with a cached result. external-slide-order.pptx lists slide2 before slide1 and includes an unreferenced slide3, plus an unsupported picture. They exercise the actual compatibility import paths.
+These minimal OOXML fixtures are authored independently of the syntra exporters and contain no customXml native model. external-formulas.xlsx contains A1=1 and B1=A1+1 with a cached result. external-slide-order.pptx lists slide2 before slide1 and includes an unreferenced slide3, plus an unsupported picture. They exercise the actual compatibility import paths.
 
 `writer-typography.docx` is a synthetic, independently authored document with inherited SimSun typography, a centered 16pt title, 1.5 line spacing, two-character first-line indentation, Chinese numbering starting at two, and an explicit numbering cancellation. It contains no user document content.
 `writer-typography-grid.docx` adds a 312-twip Word document line grid to the same synthetic content.

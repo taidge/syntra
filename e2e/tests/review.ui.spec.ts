@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { registerUser, createDocument, uniqueEmail, uniqueUsername } from './helpers';
 const BASE = (process.env.API_URL || 'http://localhost:3000').replace(/\/$/, '');
 async function authenticate(page: Page, token: string, user: unknown) {
-  await page.addInitScript(({token,user}) => { localStorage.setItem('contrix.auth', JSON.stringify({token,user})); localStorage.setItem('locale','en'); }, {token,user});
+  await page.addInitScript(({token,user}) => { localStorage.setItem('syntra.auth', JSON.stringify({token,user})); localStorage.setItem('locale','en'); }, {token,user});
 }
 async function editCell(page:Page, address:string, text:string) {
   await page.getByRole('button',{name:address,exact:true}).click();

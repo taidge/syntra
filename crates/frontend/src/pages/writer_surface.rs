@@ -75,7 +75,7 @@ pub(super) fn writer_surface(
                 {
                     // Whole-surface replacement (including accessibility fill)
                     // retains native blocks and untouched run metadata.
-                    contrix_doc_engine::writer::writer_content_with_text(&content.get(), text)
+                    syntra_doc_engine::writer::writer_content_with_text(&content.get(), text)
                 } else {
                     value
                 };

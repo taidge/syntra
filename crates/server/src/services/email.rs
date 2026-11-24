@@ -5,8 +5,8 @@ use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 
-use contrix_core::models::SmtpSettings;
-use contrix_core::schema::smtp_settings::dsl as smtp;
+use syntra_core::models::SmtpSettings;
+use syntra_core::schema::smtp_settings::dsl as smtp;
 
 pub struct EmailService;
 

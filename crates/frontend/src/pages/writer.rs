@@ -20,8 +20,8 @@ fn writer_replace_from_operation(payload: &serde_json::Value) -> Option<(String,
 }
 
 #[cfg(test)]
-use contrix_doc_engine::writer::extract_run_text;
-pub(super) use contrix_doc_engine::writer::{
+use syntra_doc_engine::writer::extract_run_text;
+pub(super) use syntra_doc_engine::writer::{
     plain_writer_run, replace_writer_runs, writer_content_to_plain, writer_content_with_text,
 };
 
@@ -55,11 +55,11 @@ mod collaboration_tests {
 
     #[test]
     fn text_save_preserves_rich_blocks_and_unaffected_run_formatting() {
-        let mut doc = contrix_doc_engine::WriterDocument::new("Report".into());
+        let mut doc = syntra_doc_engine::WriterDocument::new("Report".into());
         doc.add_paragraph("Hello 世界");
         doc.body
-            .push(contrix_doc_engine::writer::Block::HorizontalRule);
-        doc.body.push(contrix_doc_engine::writer::Block::PageBreak);
+            .push(syntra_doc_engine::writer::Block::HorizontalRule);
+        doc.body.push(syntra_doc_engine::writer::Block::PageBreak);
         doc.add_heading("Appendix", 2);
         let mut base = serde_json::to_value(doc).unwrap();
         base["body"][0]["runs"][0]["bold"] = serde_json::json!(true);
@@ -73,15 +73,15 @@ mod collaboration_tests {
         assert_eq!(edited["body"][1], base["body"][1]);
         assert_eq!(edited["body"][3], base["body"][3]);
         assert_eq!(edited["professional"], base["professional"]);
-        serde_json::from_value::<contrix_doc_engine::WriterDocument>(edited).unwrap();
+        serde_json::from_value::<syntra_doc_engine::WriterDocument>(edited).unwrap();
     }
 
     #[test]
     fn newly_typed_text_is_valid_engine_content() {
         let base =
-            serde_json::to_value(contrix_doc_engine::WriterDocument::new("New".into())).unwrap();
+            serde_json::to_value(syntra_doc_engine::WriterDocument::new("New".into())).unwrap();
         let saved = writer_content_with_text(&base, "One\nTwo");
-        let doc: contrix_doc_engine::WriterDocument = serde_json::from_value(saved).unwrap();
+        let doc: syntra_doc_engine::WriterDocument = serde_json::from_value(saved).unwrap();
         assert_eq!(doc.body.len(), 2);
         let mut first = plain_writer_run("Hello ");
         first["bold"] = serde_json::json!(true);

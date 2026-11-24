@@ -2,7 +2,7 @@
 //!
 //! Converts a [`WriterDocument`] into a CommonMark-compatible Markdown string.
 
-use contrix_doc_engine::writer::{
+use syntra_doc_engine::writer::{
     Block, Blockquote, CodeBlock, Heading, ImageBlock, List, ListItem, Paragraph, Table, TextRun,
     WriterDocument,
 };
@@ -272,7 +272,7 @@ fn text_run_to_md(run: &TextRun, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contrix_doc_engine::writer::WriterDocument;
+    use syntra_doc_engine::writer::WriterDocument;
 
     #[test]
     fn empty_document() {

@@ -1,11 +1,11 @@
 //! Durable collaboration: the database document is the authoritative snapshot.
 //! An operation and its idempotency record commit together before any ACK.
 use crate::state::AppState;
-use contrix_collab::{OpType, Operation};
-use contrix_core::error::AppError;
 use diesel::prelude::*;
 use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
+use syntra_collab::{OpType, Operation};
+use syntra_core::error::AppError;
 use uuid::Uuid;
 
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -18,7 +18,7 @@ pub struct Snapshot {
 }
 
 pub async fn snapshot(db: &crate::state::DbPool, id: Uuid) -> Result<Snapshot, AppError> {
-    use contrix_core::schema::documents::dsl as d;
+    use syntra_core::schema::documents::dsl as d;
     let mut db = db.clone();
     let (content, version, kind) = d::documents
         .find(id.to_string())
@@ -592,14 +592,14 @@ fn validate_operation_budget(op: &OpType) -> Result<(), AppError> {
 fn validate_content(kind: &str, value: &Value) -> Result<(), AppError> {
     let result = match kind {
         "writer" => {
-            serde_json::from_value::<contrix_doc_engine::WriterDocument>(value.clone()).map(|_| ())
+            serde_json::from_value::<syntra_doc_engine::WriterDocument>(value.clone()).map(|_| ())
         }
-        "calc" => serde_json::from_value::<contrix_doc_engine::Workbook>(value.clone()).map(|_| ()),
+        "calc" => serde_json::from_value::<syntra_doc_engine::Workbook>(value.clone()).map(|_| ()),
         "slides" => {
-            serde_json::from_value::<contrix_doc_engine::Presentation>(value.clone()).map(|_| ())
+            serde_json::from_value::<syntra_doc_engine::Presentation>(value.clone()).map(|_| ())
         }
         "whiteboard" => {
-            serde_json::from_value::<contrix_doc_engine::Whiteboard>(value.clone()).map(|_| ())
+            serde_json::from_value::<syntra_doc_engine::Whiteboard>(value.clone()).map(|_| ())
         }
         _ => return Err(AppError::Validation("Unknown document kind".into())),
     };
@@ -645,11 +645,11 @@ pub fn apply(root: &mut Value, kind: &str, op: &OpType) -> Result<(), AppError> 
         && kind == "writer"
         && path == &["body_text".to_owned()]
     {
-        let old = contrix_doc_engine::writer::writer_content_to_plain(root);
+        let old = syntra_doc_engine::writer::writer_content_to_plain(root);
         if old_value.as_str() != Some(old.as_str()) {
             return Err(conflict());
         }
-        *root = contrix_doc_engine::writer::writer_content_with_text(
+        *root = syntra_doc_engine::writer::writer_content_with_text(
             root,
             new_value.as_str().ok_or_else(invalid)?,
         );

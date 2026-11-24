@@ -1,8 +1,13 @@
-# Contrix Office
+# Syntra Office
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="static/icons/syntra-wordmark-dark.svg">
+  <img src="static/icons/syntra-wordmark.svg" width="112" height="112" alt="Syntra Office">
+</picture>
 
 [English](README.md) | [中文](README_ZH.md)
 
-一个全功能的开源办公套件，完全使用 Rust 构建。Contrix Office 提供文档编辑、电子表格、演示文稿和白板协作功能——全部由高性能 Rust 技术栈驱动。
+一个全功能的开源办公套件，完全使用 Rust 构建。Syntra Office 提供文档编辑、电子表格、演示文稿和白板协作功能——全部由高性能 Rust 技术栈驱动。
 
 ## 功能特性
 
@@ -93,7 +98,7 @@
 - 上传 PDF 后可直接在文件列表打开，支持翻页、缩放、文字选择与查找。加密 PDF 可输入密码阅读，保持只读。
 - 支持新增中文文字、高亮、旋转、调整页序、删除页面和撤销/重做。保存会创建新版本并保留原件，通过 ETag 检测并发修改；修改已有正文时，可转换成独立的私有 Writer 文档。
 - 带文字层的 PDF 使用原生文字提取；扫描件和混合文档由浏览器中打包的中文/英文 OCR 识别，显示进度并可取消。识别结果需要校对，尤其是公式和表格；转换不保证还原 PDF 固定版式或内嵌插图，原件保持不变。
-- Writer、Calc、Slides、Whiteboard 均可导出真正的 PDF，包含中文字体、图片和分页。服务端需安装 Chrome、Chromium 或 Edge；自动查找不足时可用 `CONTRIX_PDF_BROWSER` 指向可执行文件，浏览器沙箱保持启用。Docker 镜像包含 Chromium 并使用非 root 用户运行。
+- Writer、Calc、Slides、Whiteboard 均可导出真正的 PDF，包含中文字体、图片和分页。服务端需安装 Chrome、Chromium 或 Edge；自动查找不足时可用 `SYNTRA_PDF_BROWSER` 指向可执行文件，浏览器沙箱保持启用。Docker 镜像包含 Chromium 并使用非 root 用户运行。
 - 构建浏览器资源需 Node 22.13 以上。`scripts/build-frontend.ps1` 会打包 PDF.js、PDF-LIB、OCR worker/语言数据和 OFL 中文字体，运行时预览与识别不调用外部文档服务或 CDN。单个源文件上限 32 MiB、500 页，一次 OCR 最多识别 50 个扫描页。
 
 已鉴权 API：`GET/PUT /api/v1/files/{id}/pdf`（保存须提供 `If-Match`）、`POST .../pdf/convert`（`expected_etag`，可选 `ocr_pages`）和 `POST .../pdf/restore`（`expected_etag`、`version_number`）。`GET .../pdf?version=0` 下载原件。现有 `/documents/{id}/export/pdf` 和 `/convert` 任务支持 PDF 输出；文字层 PDF 还可通过转换任务生成 DOCX、HTML、Markdown、纯文本或原生 JSON。
@@ -134,7 +139,7 @@
 ## 项目结构
 
 ```
-office/
+syntra/
 ├── Cargo.toml                  # 工作空间根目录
 ├── crates/
 │   ├── core/                   # 共享类型、模型、DTO、配置
@@ -163,8 +168,8 @@ office/
 
 ```bash
 # 克隆仓库
-git clone --recurse-submodules https://github.com/arkret-org/office.git
-cd office
+git clone --recurse-submodules https://github.com/taidge/syntra.git
+cd syntra
 
 # 构建 Glory + Sapid 前端并启动后端
 rustup target add wasm32-unknown-unknown
@@ -173,7 +178,7 @@ pwsh ./scripts/dev.ps1
 
 打开 `http://localhost:3000`，前端和 API 使用同一源。
 构建遵循调用者环境和 Cargo 正常配置，不改写 CARGO_HOME、target 或 TEMP/TMP。
-脚本在当前 workspace 运行 cargo metadata，使用返回的 target_directory 定位产物，前端资源默认在其中的 web 子目录。
+脚本在当前 workspace 运行 cargo metadata，使用返回的 target_directory 定位产物，前端资源默认在其中的 syntra-web 子目录。
 单独构建前端可运行 pwsh ./scripts/build-frontend.ps1，然后运行 pwsh ./scripts/dev.ps1 -SkipFrontendBuild。
 前端资源目录可用 -OutputDirectory 指定；这不改变编译缓存或临时目录。
 运行脚本前需初始化固定版本子模块，并安装与 Cargo.lock 相同版本的 wasm-bindgen-cli。
@@ -212,7 +217,11 @@ Office 导入导出使用标准格式解析；原生自定义部件的无损往�
 
 1. `config/default.toml` — 基础默认值
 2. `config/production.toml` — 生产环境覆盖
-3. 环境变量 — 最高优先级（以 `CONTRIX_` 为前缀）
+3. 环境变量 — 最高优先级（以 `SYNTRA_` 为前缀）
+
+升级时，`SYNTRA_` 变量优先于旧版环境变量。若只有旧版默认的
+SQLite 文件，Syntra Office 会继续在原位置打开它。替换容器时请挂载原有数据卷。
+Prometheus 查询请使用新的 `syntra_` 指标前缀。
 
 限流按 API、`/assets/`、页面与外壳三类分别计算每 IP 的独立配额，
 每类均使用 `[rate_limit].max_requests` 和固定的 `window_seconds` 窗口，
@@ -228,7 +237,7 @@ host = "0.0.0.0"
 port = 3000
 
 [database]
-url = "sqlite://data/contrix.db?mode=rwc"
+url = "sqlite://data/syntra.db?mode=rwc"
 
 [auth]
 jwt_secret = "请在生产环境中更改此值"
@@ -252,8 +261,8 @@ docker compose up -d
 
 # 或在仓库根目录直接构建镜像
 cd ..
-docker build -t contrix-office -f docker/Dockerfile .
-docker run -p 3000:8080 -e JWT_SECRET -v contrix-data:/data contrix-office
+docker build -t syntra -f docker/Dockerfile .
+docker run -p 3000:8080 -e JWT_SECRET -v syntra-data:/data syntra
 ```
 
 ## API 参考
@@ -362,7 +371,7 @@ cargo check --workspace
 cargo build --workspace
 
 # 构建发布版本
-cargo build --release -p contrix-server
+cargo build --release -p syntra-server
 ```
 
 ### 测试
@@ -372,9 +381,9 @@ cargo build --release -p contrix-server
 cargo test --workspace
 
 # 运行特定 crate 的测试
-cargo test -p contrix-doc-engine
-cargo test -p contrix-collab
-cargo test -p contrix-export
+cargo test -p syntra-doc-engine
+cargo test -p syntra-collab
+cargo test -p syntra-export
 ```
 
 ### 代码检查与格式化
@@ -384,7 +393,7 @@ cargo test -p contrix-export
 cargo fmt
 
 # 运行 clippy 检查
-cargo clippy --locked --workspace --all-targets --no-deps --features contrix-frontend/ssr -- -D warnings
+cargo clippy --locked --workspace --all-targets --no-deps --features syntra-frontend/ssr -- -D warnings
 ```
 
 ### 数据库迁移

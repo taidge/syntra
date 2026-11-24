@@ -52,6 +52,6 @@
 ## 验证
 
 - [x] `cargo check --workspace --all-targets` 通过。
-- [x] `cargo test -p contrix-export` 40 个测试通过。
-- [x] `cargo test -p contrix-server` 集成测试通过。
+- [x] `cargo test -p syntra-export` 40 个测试通过。
+- [x] `cargo test -p syntra-server` 集成测试通过。
 - [x] 前端 wasm32 目标编译通过；EN/ZH 字典 JSON 校验通过。

@@ -6,12 +6,12 @@ use salvo::prelude::*;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{ConversionJob, DocumentType, NewConversionJob};
-use contrix_core::schema::conversion_jobs::dsl as cj;
-use contrix_core::schema::documents::dsl as d;
-use contrix_export::ExportFormat;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{ConversionJob, DocumentType, NewConversionJob};
+use syntra_core::schema::conversion_jobs::dsl as cj;
+use syntra_core::schema::documents::dsl as d;
+use syntra_export::ExportFormat;
 
 use crate::handlers::access::load_accessible_file;
 use crate::middleware::auth::get_user_id;
@@ -104,34 +104,34 @@ pub(super) async fn export_content(
         // Perform the export based on doc type and format.
         match (&doc_type, &export_format) {
             (_, ExportFormat::Pdf) => {
-                let printable = contrix_export::pdf::document_to_print_html(&content, &doc_type_str)?;
+                let printable = syntra_export::pdf::document_to_print_html(&content, &doc_type_str)?;
                 crate::services::pdf_renderer::render(&printable.html)
             }
             (DocumentType::Writer, ExportFormat::Html) => {
-                match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
+                match serde_json::from_value::<syntra_doc_engine::WriterDocument>(content) {
                     Ok(doc) => {
-                        let html = contrix_export::html::writer_to_html(&doc);
+                        let html = syntra_export::html::writer_to_html(&doc);
                         Ok(html.into_bytes())
                     }
                     Err(e) => Err(format!("Failed to parse writer document: {e}")),
                 }
             }
             (DocumentType::Writer, ExportFormat::Markdown) => {
-                match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
+                match serde_json::from_value::<syntra_doc_engine::WriterDocument>(content) {
                     Ok(doc) => {
-                        let md = contrix_export::markdown::writer_to_markdown(&doc);
+                        let md = syntra_export::markdown::writer_to_markdown(&doc);
                         Ok(md.into_bytes())
                     }
                     Err(e) => Err(format!("Failed to parse writer document: {e}")),
                 }
             }
             (DocumentType::Writer, ExportFormat::PlainText) => {
-                serde_json::from_value::<contrix_doc_engine::WriterDocument>(content)
+                serde_json::from_value::<syntra_doc_engine::WriterDocument>(content)
                     .map(|document| document.to_plain_text().into_bytes())
                     .map_err(|error| format!("Failed to parse writer document: {error}"))
             }
             (DocumentType::Calc, ExportFormat::Csv) => {
-                match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
+                match serde_json::from_value::<syntra_doc_engine::Workbook>(content) {
                     Ok(mut wb) => {
                         for sheet in &mut wb.sheets { sheet.recalculate(); }
                         if let Some(sheet) = wb.sheets.first() {
@@ -140,7 +140,7 @@ pub(super) async fn export_content(
                             if rows.checked_mul(cols).is_none_or(|cells| cells > 5_000_000) {
                                 return Err("CSV output exceeds dense cell budget; use XLSX for sparse workbooks".into());
                             }
-                            let csv = contrix_export::csv::sheet_to_csv(sheet);
+                            let csv = syntra_export::csv::sheet_to_csv(sheet);
                             Ok(csv.into_bytes())
                         } else {
                             Ok(Vec::new())
@@ -150,23 +150,23 @@ pub(super) async fn export_content(
                 }
             }
             (DocumentType::Writer, ExportFormat::Docx) => {
-                match serde_json::from_value::<contrix_doc_engine::WriterDocument>(content) {
-                    Ok(doc) => contrix_export::docx::writer_to_docx(&doc),
+                match serde_json::from_value::<syntra_doc_engine::WriterDocument>(content) {
+                    Ok(doc) => syntra_export::docx::writer_to_docx(&doc),
                     Err(e) => Err(format!("Failed to parse writer document: {e}")),
                 }
             }
             (DocumentType::Calc, ExportFormat::Xlsx) => {
-                match serde_json::from_value::<contrix_doc_engine::Workbook>(content) {
+                match serde_json::from_value::<syntra_doc_engine::Workbook>(content) {
                     Ok(mut wb) => {
                         for sheet in &mut wb.sheets {sheet.recalculate();}
-                        contrix_export::xlsx::workbook_to_xlsx(&wb)
+                        syntra_export::xlsx::workbook_to_xlsx(&wb)
                     },
                     Err(e) => Err(format!("Failed to parse workbook: {e}")),
                 }
             }
             (DocumentType::Slides, ExportFormat::Pptx) => {
-                match serde_json::from_value::<contrix_doc_engine::Presentation>(content) {
-                    Ok(pres) => contrix_export::pptx::presentation_to_pptx(&pres),
+                match serde_json::from_value::<syntra_doc_engine::Presentation>(content) {
+                    Ok(pres) => syntra_export::pptx::presentation_to_pptx(&pres),
                     Err(e) => Err(format!("Failed to parse presentation: {e}")),
                 }
             }
@@ -215,7 +215,7 @@ mod conversion_worker_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn worker_exports_writer_content_to_html_and_native_package() {
-        let mut document = contrix_doc_engine::WriterDocument::new("Worker export".into());
+        let mut document = syntra_doc_engine::WriterDocument::new("Worker export".into());
         document.add_paragraph("Off-thread conversion content");
         let content = serde_json::to_string(&document).unwrap();
         let html = export_content(
@@ -297,13 +297,13 @@ async fn export_pdf_source(
     let title = file.name.trim_end_matches(".pdf").to_owned();
     if format == ExportFormat::Pdf {
         return run_export_worker(&EXPORT_WORKERS, move || {
-            contrix_export::pdf_import::validate_pdf(&bytes)?;
+            syntra_export::pdf_import::validate_pdf(&bytes)?;
             Ok(bytes)
         })
         .await?;
     }
     let imported = run_export_worker(&EXPORT_WORKERS, move || {
-        contrix_export::pdf_import::pdf_to_writer(&bytes, &title)
+        syntra_export::pdf_import::pdf_to_writer(&bytes, &title)
     })
     .await??;
     let content = serde_json::to_string(&imported.document).map_err(|error| error.to_string())?;
@@ -998,8 +998,8 @@ mod review_conversion_regressions {
     use super::*;
     #[tokio::test]
     async fn csv_exports_formula_results_after_recalculation() {
-        let mut book = contrix_doc_engine::Workbook::new("CSV".into());
-        book.sheets[0].set_cell(0, 0, contrix_doc_engine::calc::CellValue::Number(1.0));
+        let mut book = syntra_doc_engine::Workbook::new("CSV".into());
+        book.sheets[0].set_cell(0, 0, syntra_doc_engine::calc::CellValue::Number(1.0));
         book.sheets[0].set_formula(0, 1, "=A1+2".into());
         let bytes = export_content(
             serde_json::to_string(&book).unwrap(),
@@ -1014,8 +1014,8 @@ mod review_conversion_regressions {
 
     #[tokio::test]
     async fn csv_recalculates_saved_text_errors_and_dependency_chains() {
-        use contrix_doc_engine::calc::CellValue;
-        let mut book = contrix_doc_engine::Workbook::new("Saved results".into());
+        use syntra_doc_engine::calc::CellValue;
+        let mut book = syntra_doc_engine::Workbook::new("Saved results".into());
         let sheet = &mut book.sheets[0];
         sheet.set_cell(0, 0, CellValue::Number(1.0));
         sheet.set_cell(1, 0, CellValue::Number(2.0));
@@ -1045,11 +1045,11 @@ mod review_conversion_regressions {
     }
     #[tokio::test]
     async fn csv_refuses_unbounded_dense_output_but_xlsx_stays_sparse() {
-        let mut book = contrix_doc_engine::Workbook::new("Sparse".into());
+        let mut book = syntra_doc_engine::Workbook::new("Sparse".into());
         book.sheets[0].set_cell(
             1_048_575,
             16_383,
-            contrix_doc_engine::calc::CellValue::Number(1.0),
+            syntra_doc_engine::calc::CellValue::Number(1.0),
         );
         let content = serde_json::to_string(&book).unwrap();
         assert!(
@@ -1084,8 +1084,8 @@ mod imported_download_export_regressions {
     use super::*;
     #[tokio::test]
     async fn imported_models_export_latest_values_as_standard_office_packages() {
-        use contrix_doc_engine::calc::CellValue;
-        let mut workbook = contrix_export::xlsx::xlsx_to_workbook(include_bytes!(
+        use syntra_doc_engine::calc::CellValue;
+        let mut workbook = syntra_export::xlsx::xlsx_to_workbook(include_bytes!(
             "../../../export/tests/fixtures/external-formulas.xlsx"
         ))
         .unwrap();
@@ -1099,7 +1099,7 @@ mod imported_download_export_regressions {
         .await
         .unwrap();
         assert_eq!(&bytes[..2], b"PK");
-        let parsed = contrix_export::xlsx::xlsx_to_workbook(&bytes).unwrap();
+        let parsed = syntra_export::xlsx::xlsx_to_workbook(&bytes).unwrap();
         assert!(matches!(
             parsed.sheets[0].get_cell(0, 1).unwrap().value,
             CellValue::Number(21.0)
@@ -1114,11 +1114,11 @@ mod imported_download_export_regressions {
         assert!(xml.contains("<f>A1+1</f>"));
         assert!(xml.contains("<v>21</v>"));
 
-        let mut slides = contrix_export::pptx::pptx_to_presentation(include_bytes!(
+        let mut slides = syntra_export::pptx::pptx_to_presentation(include_bytes!(
             "../../../export/tests/fixtures/external-slide-order.pptx"
         ))
         .unwrap();
-        if let contrix_doc_engine::slides::SlideElement::TextBox(text) =
+        if let syntra_doc_engine::slides::SlideElement::TextBox(text) =
             &mut slides.slides[0].elements[0]
         {
             text.content[0].text = "Edited imported slide".into();
@@ -1141,10 +1141,10 @@ mod imported_download_export_regressions {
         .unwrap();
         assert!(xml.contains("Edited imported slide"));
 
-        let mut writer = contrix_doc_engine::WriterDocument::new("Imported Writer".into());
+        let mut writer = syntra_doc_engine::WriterDocument::new("Imported Writer".into());
         writer.add_paragraph("Original paragraph");
-        let original = contrix_export::docx::writer_to_docx(&writer).unwrap();
-        let mut imported = contrix_export::docx::docx_to_writer(&original).unwrap();
+        let original = syntra_export::docx::writer_to_docx(&writer).unwrap();
+        let mut imported = syntra_export::docx::docx_to_writer(&original).unwrap();
         imported.add_paragraph("Edited imported paragraph");
         let bytes = export_content(
             serde_json::to_string(&imported).unwrap(),
@@ -1155,9 +1155,9 @@ mod imported_download_export_regressions {
         .await
         .unwrap();
         assert_eq!(&bytes[..2], b"PK");
-        let parsed = contrix_export::docx::docx_to_writer(&bytes).unwrap();
+        let parsed = syntra_export::docx::docx_to_writer(&bytes).unwrap();
         assert!(
-            contrix_doc_engine::writer::writer_content_to_plain(
+            syntra_doc_engine::writer::writer_content_to_plain(
                 &serde_json::to_value(parsed).unwrap()
             )
             .contains("Edited imported paragraph")

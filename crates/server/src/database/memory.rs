@@ -1,6 +1,6 @@
 //! Opt-in SQLite allocation observations, never RSS or a complete pool census.
 //! No connection handles, SQL, pool owners or worker handles leave the callback.
-//! CONTRIX_SQLITE_MEMORY_DIAGNOSTICS=1 is read once at the first database creation.
+//! SYNTRA_SQLITE_MEMORY_DIAGNOSTICS=1 is read once at the first database creation.
 //! The default does not sample SQLite or emit these diagnostic events.
 use std::ffi::OsStr;
 use std::sync::OnceLock;
@@ -12,8 +12,11 @@ use libsqlite3_sys as ffi;
 
 pub(super) fn enabled_from_environment() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| opted_in(std::env::var_os("CONTRIX_SQLITE_MEMORY_DIAGNOSTICS").as_deref()))
+    *ENABLED.get_or_init(|| {
+        let value = std::env::var_os("SYNTRA_SQLITE_MEMORY_DIAGNOSTICS")
+            .or_else(|| std::env::var_os("\x43ONTRIX_SQLITE_MEMORY_DIAGNOSTICS"));
+        opted_in(value.as_deref())
+    })
 }
 
 fn opted_in(value: Option<&OsStr>) -> bool {

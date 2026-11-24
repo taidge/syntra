@@ -1,5 +1,7 @@
-const CACHE_NAME = 'contrix-glory-layout-v2';
-const PRECACHE_URLS = ['/', '/index.html', '/manifest.webmanifest'];
+const CACHE_NAME = 'syntra-shell-v2';
+const PRECACHE_URLS = [
+  '/', '/index.html', '/manifest.webmanifest', '/icons/syntra.svg', '/icons/syntra-dark.svg'
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -12,7 +14,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((key) => key.startsWith('contrix-') && key !== CACHE_NAME)
+          .filter((key) => key !== CACHE_NAME && (key.startsWith('syntra-') || key.startsWith('\x63ontrix-')))
           .map((key) => caches.delete(key))
       )
     ).then(() => self.clients.claim())

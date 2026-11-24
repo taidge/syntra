@@ -5,10 +5,10 @@
 //! metadata for at most 2049 rows is read; payloads are not materialized into Rust values.
 use std::time::Duration;
 
-use contrix_core::error::AppError;
 use diesel::connection::DefaultLoadingMode;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Text};
+use syntra_core::error::AppError;
 
 use crate::database::telemetry::{
     TransactionStage, immediate_transaction as observed_immediate_transaction,

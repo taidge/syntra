@@ -47,7 +47,7 @@ controlled. The raw artifact path identifies the complete original sample set.
 ## Formula work and sparse XLSX export
 
 ```powershell
-cargo test --locked --release -p contrix-server --test capacity_benchmarks -- --ignored --nocapture --test-threads=1
+cargo test --locked --release -p syntra-server --test capacity_benchmarks -- --ignored --nocapture --test-threads=1
 ```
 
 The ignored test measures 30 samples for each of 100/1000/5000 independent
@@ -66,16 +66,16 @@ SigV4 credential, rejection of an incorrect secret, binary byte equality, HEAD,
 UTF-8/space/plus/percent/fragment/query characters in keys, missing-object reads,
 deletion and idempotent deletion. It creates only a fresh UUID prefix.
 
-Pass `OFFICE_S3_ENDPOINT`, `OFFICE_S3_BUCKET`, `OFFICE_S3_ACCESS_KEY`,
-`OFFICE_S3_SECRET_KEY` and `OFFICE_S3_REGION` to the test process. Do not place
+Pass `SYNTRA_S3_ENDPOINT`, `SYNTRA_S3_BUCKET`, `SYNTRA_S3_ACCESS_KEY`,
+`SYNTRA_S3_SECRET_KEY` and `SYNTRA_S3_REGION` to the test process. Do not place
 credentials in tracked source, shell history, screenshots or reports. For a
 loopback fixture on a machine whose system proxy intercepts localhost, set
 `NO_PROXY=127.0.0.1,localhost` only in that child test process's environment.
 The application S3 client retains the caller's normal proxy behavior.
 
 ```text
-cargo test --locked -p contrix-server --test real_s3_acceptance -- --ignored --nocapture --test-threads=1
-cargo test --locked -p contrix-server --test maintenance_regressions live_s3_maintenance -- --ignored --nocapture --test-threads=1
+cargo test --locked -p syntra-server --test real_s3_acceptance -- --ignored --nocapture --test-threads=1
+cargo test --locked -p syntra-server --test maintenance_regressions live_s3_maintenance -- --ignored --nocapture --test-threads=1
 ```
 
 `scripts/garage-fixture.py` can launch an official Garage Linux binary with an
@@ -114,13 +114,13 @@ Linux without PowerShell, the core native gate is:
 
 ```sh
 cargo metadata --no-deps --format-version 1
-cargo test --locked --workspace --features contrix-frontend/ssr
-cargo clippy --locked --workspace --all-targets --no-deps --features contrix-frontend/ssr -- -D warnings
-cargo check --locked -p contrix-frontend --lib --target wasm32-unknown-unknown
+cargo test --locked --workspace --features syntra-frontend/ssr
+cargo clippy --locked --workspace --all-targets --no-deps --features syntra-frontend/ssr -- -D warnings
+cargo check --locked -p syntra-frontend --lib --target wasm32-unknown-unknown
 ```
 
 For a container image already built with an eligible Docker builder, run
-`./scripts/test-package.ps1 -Image contrix-office -BrowserTests`. It starts the
+`./scripts/test-package.ps1 -Image syntra -BrowserTests`. It starts the
 production image on a loopback port with an isolated volume and checks assets,
 browser saving, persistence after SIGKILL, and WebSocket replay.
 

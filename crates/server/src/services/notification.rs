@@ -2,8 +2,8 @@ use chrono::Utc;
 use horme::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::models::NewNotification;
-use contrix_core::schema::notifications::dsl as n;
+use syntra_core::models::NewNotification;
+use syntra_core::schema::notifications::dsl as n;
 
 use crate::services::NotificationBus;
 

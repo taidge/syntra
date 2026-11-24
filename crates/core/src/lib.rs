@@ -1,7 +1,7 @@
-//! # contrix-core
+//! # syntra-core
 //!
 //! Shared types, models, data-transfer objects, configuration structures,
-//! and error types used across all crates in the Contrix Office workspace.
+//! and error types used across all crates in the syntra workspace.
 
 pub mod config;
 pub mod dto;

@@ -553,7 +553,7 @@ pub struct PresentationTheme {
 impl Default for PresentationTheme {
     fn default() -> Self {
         Self {
-            name: "Contrix Light".to_string(),
+            name: "syntra Light".to_string(),
             primary_color: "#2563EB".to_string(),
             secondary_color: "#0F172A".to_string(),
             accent_colors: vec![

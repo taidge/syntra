@@ -262,7 +262,7 @@ async fn multi_megabyte_document_saves_downloads_and_rejects_oversized_content_a
         .create_document(&token, "Large document", "writer", None)
         .await;
     let version = created["data"]["version"].as_i64().unwrap();
-    let content = contrix_doc_engine::writer::writer_content_with_text(
+    let content = syntra_doc_engine::writer::writer_content_with_text(
         &created["data"]["content"],
         &"x".repeat(2 * 1024 * 1024),
     );
@@ -301,7 +301,7 @@ async fn multi_megabyte_document_saves_downloads_and_rejects_oversized_content_a
     );
 
     let excessive =
-        json!({"padding":"x".repeat(contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 1)});
+        json!({"padding":"x".repeat(syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES + 1)});
     let rejected = json_response(
         server
             .client
@@ -390,11 +390,11 @@ async fn realistic_megabyte_chunks_retry_and_complete_without_duplicate_billing(
     .await;
     assert_eq!(
         session["data"]["max_chunk_size"],
-        contrix_core::dto::MAX_UPLOAD_CHUNK_BYTES
+        syntra_core::dto::MAX_UPLOAD_CHUNK_BYTES
     );
     assert_eq!(
         session["data"]["max_chunk_count"],
-        contrix_core::dto::MAX_UPLOAD_CHUNKS
+        syntra_core::dto::MAX_UPLOAD_CHUNKS
     );
     let id = session["data"]["id"].as_str().unwrap();
     let bytes: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();

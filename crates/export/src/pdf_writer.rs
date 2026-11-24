@@ -1,6 +1,6 @@
 use super::*;
-use contrix_doc_engine::writer::*;
 use std::collections::HashMap;
+use syntra_doc_engine::writer::*;
 
 pub(super) fn render(content: &Value) -> Result<PrintDocument, String> {
     let document: WriterDocument = serde_json::from_value(content.clone())

@@ -5,10 +5,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::FileLock;
-use contrix_core::schema::file_locks::dsl as fl;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::FileLock;
+use syntra_core::schema::file_locks::dsl as fl;
 
 use crate::handlers::access::load_accessible_file;
 use crate::middleware::auth::get_user_id;

@@ -1,9 +1,9 @@
-"""Read Contrix's standard Office output with independent Python readers.
+"""Read syntra's standard Office output with independent Python readers.
 
 Requires openpyxl and python-pptx (known-good local versions: 3.1.5 / 1.0.2).
 First run the office_fixture_smoke Rust example with a workspace output folder.
 Usage: python crates/export/tests/verify_office_readers.py <output-dir>
-Neither reader consults Contrix customXml. Tests assert standard parts' content.
+Neither reader consults syntra customXml. Tests assert standard parts' content.
 """
 import sys
 import json

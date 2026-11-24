@@ -39,7 +39,7 @@ pub async fn for_response(
     let Ok(permit) = CAPACITY.clone().try_acquire_owned() else {
         return content;
     };
-    use contrix_core::schema::file_versions::dsl as fv;
+    use syntra_core::schema::file_versions::dsl as fv;
     let source = fv::file_versions
         .filter(fv::file_id.eq(file_id))
         .filter(fv::version_number.eq(0))
@@ -74,7 +74,7 @@ pub async fn for_response(
     let original = match tokio::task::spawn_blocking(move || {
         // Keep the permit alive even if the request is cancelled during parsing.
         let _permit = permit;
-        contrix_export::docx::docx_to_writer(&bytes)
+        syntra_export::docx::docx_to_writer(&bytes)
             .and_then(|document| serde_json::to_value(document).map_err(|error| error.to_string()))
     })
     .await

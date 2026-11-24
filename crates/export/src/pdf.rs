@@ -184,15 +184,15 @@ mod tests {
 
     #[test]
     fn print_document_rejects_network_images_and_escapes_document_content() {
-        let mut document = contrix_doc_engine::WriterDocument::new("<script>文稿</script>".into());
-        document.body.push(contrix_doc_engine::writer::Block::Image(
-            contrix_doc_engine::writer::ImageBlock {
+        let mut document = syntra_doc_engine::WriterDocument::new("<script>文稿</script>".into());
+        document.body.push(syntra_doc_engine::writer::Block::Image(
+            syntra_doc_engine::writer::ImageBlock {
                 id: uuid::Uuid::new_v4(),
                 url: "http://127.0.0.1/private".into(),
                 alt_text: "test".into(),
                 width: None,
                 height: None,
-                alignment: contrix_doc_engine::writer::Alignment::Left,
+                alignment: syntra_doc_engine::writer::Alignment::Left,
             },
         ));
         assert!(
@@ -203,10 +203,10 @@ mod tests {
         document.body.clear();
         document
             .body
-            .push(contrix_doc_engine::writer::Block::Paragraph(
-                contrix_doc_engine::writer::Paragraph {
+            .push(syntra_doc_engine::writer::Block::Paragraph(
+                syntra_doc_engine::writer::Paragraph {
                     id: uuid::Uuid::new_v4(),
-                    runs: vec![contrix_doc_engine::writer::TextRun::plain(
+                    runs: vec![syntra_doc_engine::writer::TextRun::plain(
                         "<script>alert(1)</script> 中文",
                     )],
                     alignment: Default::default(),
@@ -228,21 +228,21 @@ mod tests {
         for (kind, content) in [
             (
                 "writer",
-                serde_json::to_value(contrix_doc_engine::WriterDocument::new("文稿".into()))
+                serde_json::to_value(syntra_doc_engine::WriterDocument::new("文稿".into()))
                     .unwrap(),
             ),
             (
                 "calc",
-                serde_json::to_value(contrix_doc_engine::Workbook::new("工作簿".into())).unwrap(),
+                serde_json::to_value(syntra_doc_engine::Workbook::new("工作簿".into())).unwrap(),
             ),
             (
                 "slides",
-                serde_json::to_value(contrix_doc_engine::Presentation::new("演示文稿".into()))
+                serde_json::to_value(syntra_doc_engine::Presentation::new("演示文稿".into()))
                     .unwrap(),
             ),
             (
                 "whiteboard",
-                serde_json::to_value(contrix_doc_engine::Whiteboard::new("白板".into())).unwrap(),
+                serde_json::to_value(syntra_doc_engine::Whiteboard::new("白板".into())).unwrap(),
             ),
         ] {
             let printed = document_to_print_html(&content, kind).unwrap();

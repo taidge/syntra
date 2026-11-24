@@ -17,6 +17,6 @@ runs:
       shell: pwsh
       run: |
         . ./scripts/workspace.ps1
-        $metadata = Get-OfficeWorkspaceMetadata
+        $metadata = Get-SyntraWorkspaceMetadata
         "target=$($metadata.target_directory)" >> $env:GITHUB_OUTPUT
-        "OFFICE_TARGET_DIRECTORY=$($metadata.target_directory)" >> $env:GITHUB_ENV
+        "SYNTRA_TARGET_DIRECTORY=$($metadata.target_directory)" >> $env:GITHUB_ENV

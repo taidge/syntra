@@ -5,15 +5,15 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{
+use syntra_core::dto::{
     AddGroupMemberRequest, ApiResponse, CreateGroupRequest, GroupMemberResponse, GroupResponse,
     UpdateGroupRequest,
 };
-use contrix_core::error::AppError;
-use contrix_core::models::{Group, NewGroup, NewGroupMember};
-use contrix_core::schema::group_members::dsl as gm;
-use contrix_core::schema::groups::dsl as g;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::error::AppError;
+use syntra_core::models::{Group, NewGroup, NewGroupMember};
+use syntra_core::schema::group_members::dsl as gm;
+use syntra_core::schema::groups::dsl as g;
+use syntra_core::schema::users::dsl as u;
 
 use crate::middleware::auth::get_user_id;
 

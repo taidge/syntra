@@ -7,14 +7,14 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{File, NewDocument, NewFile, NewFileReadStatus, NewFileTag};
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::file_read_status::dsl as frs;
-use contrix_core::schema::file_tags::dsl as ft;
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::tags::dsl as t;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{File, NewDocument, NewFile, NewFileReadStatus, NewFileTag};
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::file_read_status::dsl as frs;
+use syntra_core::schema::file_tags::dsl as ft;
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::tags::dsl as t;
 
 use crate::handlers::access::{load_accessible_file, load_accessible_target_folder};
 use crate::middleware::auth::get_user_id;

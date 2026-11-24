@@ -1,6 +1,6 @@
 use super::*;
-use contrix_doc_engine::calc::*;
-use contrix_doc_engine::slides::{ChartData, Dataset};
+use syntra_doc_engine::calc::*;
+use syntra_doc_engine::slides::{ChartData, Dataset};
 
 pub(super) fn render(content: &Value) -> Result<PrintDocument, String> {
     let mut workbook: Workbook = serde_json::from_value(content.clone())

@@ -2,9 +2,9 @@
 // Explicit selection controls and Fill actions cover spreadsheet range editing.
 // Browser gestures also support double-click, F2, and typed-character inline edits.
 //
-// These tests assume a contrix-server is already running at http://localhost:3000
+// These tests assume a syntra-server is already running at http://localhost:3000
 // (it serves both the JSON API and the Glory + Sapid single-page app). Start it with
-// `cargo run -p contrix-server` from the workspace root before invoking
+// `cargo run -p syntra-server` from the workspace root before invoking
 // `npx playwright test calc.ui`. The playwright.config.ts `webServer` block
 // will reuse the existing server when one is detected.
 
@@ -14,7 +14,7 @@ const APP_BASE = (process.env.API_URL || 'http://localhost:3000').replace(/\/$/,
 const API_BASE = `${APP_BASE}/api/v1`;
 
 // Must match `AUTH_STORAGE_KEY` in crates/frontend/src/state.rs.
-const AUTH_STORAGE_KEY = 'contrix.auth';
+const AUTH_STORAGE_KEY = 'syntra.auth';
 
 interface CalcFixture {
     id: string;

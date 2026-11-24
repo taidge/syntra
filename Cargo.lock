@@ -495,7 +495,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "contrix-collab"
+name = "syntra-collab"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -508,7 +508,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "contrix-core"
+name = "syntra-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -521,7 +521,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "contrix-doc-engine"
+name = "syntra-doc-engine"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -532,13 +532,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "contrix-export"
+name = "syntra-export"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "calamine",
  "chrono",
- "contrix-doc-engine",
+ "syntra-doc-engine",
  "image",
  "lopdf",
  "quick-xml 0.41.0",
@@ -551,12 +551,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "contrix-frontend"
+name = "syntra-frontend"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
- "contrix-doc-engine",
+ "syntra-doc-engine",
  "gloo-timers",
  "glory",
  "js-sys",
@@ -573,7 +573,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "contrix-server"
+name = "syntra-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -581,10 +581,10 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
- "contrix-collab",
- "contrix-core",
- "contrix-doc-engine",
- "contrix-export",
+ "syntra-collab",
+ "syntra-core",
+ "syntra-doc-engine",
+ "syntra-export",
  "deadpool",
  "diesel",
  "diesel-async",

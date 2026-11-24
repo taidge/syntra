@@ -4,14 +4,14 @@ use salvo::prelude::*;
 use uuid::Uuid;
 
 use chrono::Utc;
-use contrix_core::dto::{AdminStats, ApiResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::NewUser;
-use contrix_core::schema::activity_logs::dsl as a;
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::sessions::dsl as sess;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::dto::{AdminStats, ApiResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::NewUser;
+use syntra_core::schema::activity_logs::dsl as a;
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::sessions::dsl as sess;
+use syntra_core::schema::users::dsl as u;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 

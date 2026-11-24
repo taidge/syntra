@@ -2,13 +2,13 @@
 mod common;
 
 use common::TestServer;
-use contrix_core::models::{Document, File, FileLock, FileVersion, Share, Version};
-use contrix_core::schema::{
+use diesel::prelude::*;
+use serde_json::{Value, json};
+use syntra_core::models::{Document, File, FileLock, FileVersion, Share, Version};
+use syntra_core::schema::{
     documents::dsl as d, file_locks::dsl as locks, file_versions::dsl as fv, files::dsl as f,
     shares::dsl as shares, versions::dsl as v,
 };
-use diesel::prelude::*;
-use serde_json::{Value, json};
 
 struct Actor {
     role: &'static str,

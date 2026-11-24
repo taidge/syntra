@@ -1,8 +1,13 @@
-# Contrix Office
+# Syntra Office
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="static/icons/syntra-wordmark-dark.svg">
+  <img src="static/icons/syntra-wordmark.svg" width="112" height="112" alt="Syntra Office">
+</picture>
 
 [English](README.md) | [中文](README_ZH.md)
 
-A full-featured, open-source office suite built entirely in Rust. Contrix Office provides document editing, spreadsheets, presentations, and whiteboard collaboration — all powered by a high-performance Rust stack.
+A full-featured, open-source office suite built entirely in Rust. Syntra Office provides document editing, spreadsheets, presentations, and whiteboard collaboration — all powered by a high-performance Rust stack.
 
 ## Features
 
@@ -93,7 +98,7 @@ A full-featured, open-source office suite built entirely in Rust. Contrix Office
 - Upload a PDF and open it directly from Files. The local viewer supports page navigation, zoom, selectable text and search, including password-protected reading.
 - Add text (including Chinese), highlight areas, rotate, reorder or delete pages, undo changes and save a new version. Saves require the current ETag and editor permission; the original remains downloadable. To rewrite existing body text, convert the PDF to a separate private Writer document.
 - Text-layer PDFs convert natively. Scanned and mixed PDFs use bundled English/Chinese OCR in the browser, with progress and cancellation. Review recognized text, especially formulas and tables; conversion does not reproduce the PDF's fixed page layout or embedded illustrations.
-- Writer, Calc, Slides and Whiteboard export real PDFs with embedded images, Chinese fonts and page layout. Server printing requires an installed Chrome, Chromium or Edge; set `CONTRIX_PDF_BROWSER` to an executable when automatic discovery is insufficient. Browser sandboxing stays enabled. The Docker image includes Chromium and runs as a non-root user.
+- Writer, Calc, Slides and Whiteboard export real PDFs with embedded images, Chinese fonts and page layout. Server printing requires an installed Chrome, Chromium or Edge; set `SYNTRA_PDF_BROWSER` to an executable when automatic discovery is insufficient. Browser sandboxing stays enabled. The Docker image includes Chromium and runs as a non-root user.
 - Build browser assets with Node 22.13 or newer. PDF.js, PDF-LIB, OCR workers/languages and an OFL CJK font are bundled by `scripts/build-frontend.ps1`; runtime viewing and OCR do not use an external document service or CDN. Processing limits are 32 MiB and 500 pages per source, with at most 50 scanned pages in one OCR conversion.
 
 The authenticated PDF API is `GET/PUT /api/v1/files/{id}/pdf` (use `If-Match` for saves), `POST .../pdf/convert` (`expected_etag`, optional `ocr_pages`) and `POST .../pdf/restore` (`expected_etag`, `version_number`). `GET .../pdf?version=0` returns the original. Existing `/documents/{id}/export/pdf` and `/convert` jobs support PDF output; text-layer PDF sources also support conversion jobs to DOCX, HTML, Markdown, text or native JSON.
@@ -134,7 +139,7 @@ The authenticated PDF API is `GET/PUT /api/v1/files/{id}/pdf` (use `If-Match` fo
 ## Project Structure
 
 ```
-office/
+syntra/
 ├── Cargo.toml                  # Workspace root
 ├── crates/
 │   ├── core/                   # Shared types, models, DTOs, config
@@ -163,8 +168,8 @@ office/
 
 ```powershell
 # Clone the repository
-git clone --recurse-submodules https://github.com/arkret-org/office.git
-cd office
+git clone --recurse-submodules https://github.com/taidge/syntra.git
+cd syntra
 
 # Build the Glory + Sapid browser app, then start the backend
 rustup target add wasm32-unknown-unknown
@@ -173,7 +178,7 @@ pwsh ./scripts/dev.ps1
 
 Open `http://localhost:3000`. The server serves the API and browser app from the same origin.
 Builds respect the caller's environment and normal Cargo configuration. Scripts do not redirect CARGO_HOME, target, or TEMP/TMP.
-They discover artifacts with cargo metadata in this workspace; generated browser assets default to its target_directory/web.
+They discover artifacts with cargo metadata in this workspace; generated browser assets default to its target_directory/syntra-web.
 Build separately with pwsh ./scripts/build-frontend.ps1, then pwsh ./scripts/dev.ps1 -SkipFrontendBuild.
 -OutputDirectory selects browser asset output without changing compiler caches or temporary directories.
 Initialize the pinned submodules and install wasm-bindgen-cli matching Cargo.lock before running the scripts.
@@ -247,7 +252,11 @@ Configuration is loaded from layered sources:
 
 1. `config/default.toml` — Base defaults
 2. `config/production.toml` — Production overrides
-3. Environment variables — Highest priority (prefixed with `CONTRIX_`)
+3. Environment variables — Highest priority (prefixed with `SYNTRA_`)
+
+On upgrade, `SYNTRA_` values take precedence over the legacy environment variables. If only the old default SQLite file exists, Syntra Office continues to
+open it in place. Keep the existing storage volume mounted when replacing a
+container. Prometheus queries should use the new `syntra_` metric prefix.
 
 Rate limits use independent per-IP budgets for API endpoints, `/assets/`, and
 page/shell requests. Each uses `[rate_limit].max_requests` within its fixed
@@ -265,7 +274,7 @@ host = "0.0.0.0"
 port = 3000
 
 [database]
-url = "sqlite://data/contrix.db?mode=rwc"
+url = "sqlite://data/syntra.db?mode=rwc"
 
 [auth]
 jwt_secret = "change-me-in-production"
@@ -289,8 +298,8 @@ docker compose up -d
 
 # Or build the image directly from the repository root
 cd ..
-docker build -t contrix-office -f docker/Dockerfile .
-docker run -p 3000:8080 -e JWT_SECRET -v contrix-data:/data contrix-office
+docker build -t syntra -f docker/Dockerfile .
+docker run -p 3000:8080 -e JWT_SECRET -v syntra-data:/data syntra
 ```
 
 ## API Reference
@@ -399,7 +408,7 @@ cargo check --workspace
 cargo build --workspace
 
 # Build release
-cargo build --release -p contrix-server
+cargo build --release -p syntra-server
 ```
 
 ### Test
@@ -409,9 +418,9 @@ cargo build --release -p contrix-server
 cargo test --workspace
 
 # Run tests for a specific crate
-cargo test -p contrix-doc-engine
-cargo test -p contrix-collab
-cargo test -p contrix-export
+cargo test -p syntra-doc-engine
+cargo test -p syntra-collab
+cargo test -p syntra-export
 ```
 
 ### Lint & Format
@@ -421,7 +430,7 @@ cargo test -p contrix-export
 cargo fmt
 
 # Run clippy
-cargo clippy --locked --workspace --all-targets --no-deps --features contrix-frontend/ssr -- -D warnings
+cargo clippy --locked --workspace --all-targets --no-deps --features syntra-frontend/ssr -- -D warnings
 ```
 
 ### Database Migrations

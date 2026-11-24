@@ -9,19 +9,19 @@ use crate::middleware::request_observability::{
 };
 use crate::state::DbPool;
 use chrono::Utc;
-use contrix_core::error::AppError;
-use contrix_core::models::{
-    Document, File, FileLock, NewFileLock, NewOperationLogEntry, NewVersion,
-};
-use contrix_core::schema::{
-    documents::dsl as d, file_locks::dsl as fl, files::dsl as f, room_members::dsl as rm,
-    versions::dsl as v,
-};
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Text};
 use futures_util::StreamExt;
 use std::collections::HashSet;
 use std::sync::Arc;
+use syntra_core::error::AppError;
+use syntra_core::models::{
+    Document, File, FileLock, NewFileLock, NewOperationLogEntry, NewVersion,
+};
+use syntra_core::schema::{
+    documents::dsl as d, file_locks::dsl as fl, files::dsl as f, room_members::dsl as rm,
+    versions::dsl as v,
+};
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use uuid::Uuid;
 
@@ -59,7 +59,7 @@ pub fn authorize_room(
     user: &str,
     role: &str,
 ) -> Result<(), AppError> {
-    use contrix_core::schema::rooms::dsl as r;
+    use syntra_core::schema::rooms::dsl as r;
     let owner = r::rooms
         .find(room)
         .select(r::owner_id)
@@ -832,7 +832,7 @@ pub async fn commit_document_with_wopi_authorization(
 }
 
 /// Hash the request before OT; timestamps are transport metadata, not identity.
-pub fn operation_request_hash(operation: &contrix_collab::Operation) -> Result<String, AppError> {
+pub fn operation_request_hash(operation: &syntra_collab::Operation) -> Result<String, AppError> {
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(&(operation.base_version, &operation.op_type))
         .map_err(|error| AppError::Validation(error.to_string()))?;
@@ -891,7 +891,7 @@ pub async fn operation_receipt(
     db: &DbPool,
     document: &str,
     user: &str,
-    operation: &contrix_collab::Operation,
+    operation: &syntra_collab::Operation,
     request_hash: &str,
 ) -> Result<Option<i32>, AppError> {
     if operation.user_id.to_string() != user {
@@ -921,7 +921,7 @@ pub async fn commit_document_operation(
     user: &str,
     expected_version: i32,
     content: String,
-    operation: &contrix_collab::Operation,
+    operation: &syntra_collab::Operation,
 ) -> Result<i32, AppError> {
     let request_hash = operation_request_hash(operation)?;
     commit_document_operation_with_request(
@@ -945,7 +945,7 @@ pub async fn commit_document_operation_with_request(
     user: &str,
     expected_version: i32,
     content: String,
-    operation: &contrix_collab::Operation,
+    operation: &syntra_collab::Operation,
     request_hash: &str,
 ) -> Result<i32, AppError> {
     commit_document_inner(
@@ -974,10 +974,10 @@ pub async fn commit_document_operation_with_effects(
     user: &str,
     expected_version: i32,
     content: String,
-    operation: &contrix_collab::Operation,
+    operation: &syntra_collab::Operation,
     request_hash: &str,
-    effects: &[contrix_collab::OpType],
-    original: &contrix_collab::Operation,
+    effects: &[syntra_collab::OpType],
+    original: &syntra_collab::Operation,
 ) -> Result<i32, AppError> {
     commit_document_operation_with_effects_and_credential(
         db,
@@ -1003,10 +1003,10 @@ pub async fn commit_document_operation_with_effects_and_credential(
     user: &str,
     expected_version: i32,
     content: String,
-    operation: &contrix_collab::Operation,
+    operation: &syntra_collab::Operation,
     request_hash: &str,
-    effects: &[contrix_collab::OpType],
-    original: &contrix_collab::Operation,
+    effects: &[syntra_collab::OpType],
+    original: &syntra_collab::Operation,
     credential: Option<&crate::middleware::auth::AuthenticatedCredential>,
 ) -> Result<i32, AppError> {
     if original.id != operation.id
@@ -1050,9 +1050,9 @@ async fn commit_document_inner(
     content: String,
     label: Option<String>,
     token: Option<String>,
-    operation: Option<contrix_collab::Operation>,
+    operation: Option<syntra_collab::Operation>,
     request_hash: Option<String>,
-    effects: Option<(Vec<contrix_collab::OpType>, contrix_collab::Operation)>,
+    effects: Option<(Vec<syntra_collab::OpType>, syntra_collab::Operation)>,
     credential: Option<CommitCredential>,
     committed: Option<oneshot::Sender<i32>>,
 ) -> Result<i32, AppError> {
@@ -1131,7 +1131,7 @@ async fn commit_document_inner(
     let new_path = storage
         .save_file(
             &owner,
-            &format!("{}.contrix.json", original.id),
+            &format!("{}.syntra.json", original.id),
             content.as_bytes(),
         )
         .await?;
@@ -1219,7 +1219,7 @@ async fn commit_document_inner(
                 replace_file_quota(conn, &file.owner_id, &file.path, file.size, size)?;
                 enqueue_gc(conn, &file.path)?;
                 if let (Some(operation), Some(op_id)) = (operation, operation_id) {
-                    use contrix_core::schema::operation_log::dsl as ol;
+                    use syntra_core::schema::operation_log::dsl as ol;
                     let mut data = serde_json::to_value(&operation)
                         .map_err(|error| AppError::Validation(error.to_string()))?;
                     if let Some((effects, original)) = effects {

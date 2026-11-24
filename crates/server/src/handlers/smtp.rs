@@ -4,10 +4,10 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, SmtpSettingsRequest, SmtpSettingsResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::{NewSmtpSettings, SmtpSettings};
-use contrix_core::schema::smtp_settings::dsl as smtp;
+use syntra_core::dto::{ApiResponse, SmtpSettingsRequest, SmtpSettingsResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::{NewSmtpSettings, SmtpSettings};
+use syntra_core::schema::smtp_settings::dsl as smtp;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 
@@ -140,7 +140,7 @@ pub async fn update_smtp(req: &mut Request, depot: &mut Depot, res: &mut Respons
         from_name: body
             .from_name
             .clone()
-            .unwrap_or_else(|| "Contrix Office".into()),
+            .unwrap_or_else(|| "Syntra Office".into()),
         use_tls: body.use_tls.unwrap_or(true),
         updated_by: uid,
         updated_at: now,
@@ -230,7 +230,7 @@ pub async fn test_smtp(depot: &mut Depot, res: &mut Response) {
         crate::services::EmailService::send(
             &pool,
             &to,
-            "Contrix Office SMTP test",
+            "Syntra Office SMTP test",
             "<p>This is a test email confirming your SMTP settings work.</p>",
         )
         .await

@@ -4,7 +4,7 @@ port = 3000
 cors_origins = ["http://localhost:8080", "http://localhost:3000"]
 
 [database]
-url = "sqlite://data/contrix.db?mode=rwc"
+url = "sqlite://data/syntra.db?mode=rwc"
 max_connections = 5
 checkout_timeout_ms = 3000
 operation_timeout_ms = 15000
@@ -23,7 +23,7 @@ base_path = "data/files"
 max_upload_size_mb = 100
 default_quota_mb = 5120
 # backend = "s3"
-# s3_bucket = "contrix-files"
+# s3_bucket = "syntra-files"
 # s3_region = "us-east-1"
 # s3_access_key = ""
 # s3_secret_key = ""

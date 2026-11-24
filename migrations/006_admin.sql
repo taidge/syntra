@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS branding_settings (
     id TEXT PRIMARY KEY NOT NULL,
     logo_url TEXT,
     favicon_url TEXT,
-    app_name TEXT NOT NULL DEFAULT 'Contrix Office',
+    app_name TEXT NOT NULL DEFAULT 'Syntra Office',
     primary_color TEXT,
     custom_css TEXT,
     updated_by TEXT NOT NULL REFERENCES users(id),
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS smtp_settings (
     username TEXT,
     password TEXT,
     from_email TEXT NOT NULL,
-    from_name TEXT NOT NULL DEFAULT 'Contrix Office',
+    from_name TEXT NOT NULL DEFAULT 'Syntra Office',
     use_tls INTEGER NOT NULL DEFAULT 1,
     updated_by TEXT NOT NULL REFERENCES users(id),
     updated_at TEXT NOT NULL

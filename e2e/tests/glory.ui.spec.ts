@@ -44,7 +44,7 @@ test.describe('Glory application flows @ui', () => {
     await expect(page).toHaveURL(/\/dashboard$/);
     await expect(page.getByRole('heading', { name: 'Dashboard', exact: true })).toBeVisible();
 
-    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('contrix.auth') || '{}'));
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('syntra.auth') || '{}'));
     expect(stored.token).toBeTruthy();
     expect(stored.user.username).toBe(username);
     const accountResponse = await request.get('/api/v1/auth/me', {
@@ -120,7 +120,7 @@ test.describe('Glory application flows @ui', () => {
       // Embedded browsers can suppress native dialogs. File actions must still work.
       window.prompt = () => null;
       window.confirm = () => false;
-      localStorage.setItem('contrix.auth', JSON.stringify({
+      localStorage.setItem('syntra.auth', JSON.stringify({
         token: auth.token,
         user: {
           id: auth.userId,
@@ -258,7 +258,7 @@ test.describe('Glory application flows @ui', () => {
     const user = await registerUser(request, uniqueUsername(), uniqueEmail(), 'GloryTest@12345');
     const { response, body } = await createDocument(request, user.token, 'Protected Glory document', 'writer');
     expect(response.status()).toBe(201);
-    await page.addInitScript(() => localStorage.removeItem('contrix.auth'));
+    await page.addInitScript(() => localStorage.removeItem('syntra.auth'));
     await page.goto('/writer/' + body.data.id);
     await expect(page).toHaveURL(/\/login$/);
     await expect(page.getByRole('heading', { name: 'Sign In', exact: true })).toBeVisible();
@@ -269,7 +269,7 @@ test.describe('Glory application flows @ui', () => {
     for (const path of ['/missing-glory-route', '/calc/not-a-document-id']) {
       await page.goto(path);
       await expect(page.locator('.not-found')).toHaveText(/Page not found/);
-      await expect(page.locator('.not-found').getByRole('link', { name: 'Contrix Office' })).toHaveAttribute('href', '/');
+      await expect(page.locator('.not-found').getByRole('link', { name: 'Syntra Office' })).toHaveAttribute('href', '/');
       await expect(page).toHaveURL(new RegExp(path + '$'));
     }
   });

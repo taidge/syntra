@@ -1,7 +1,7 @@
 //! Reproducible opt-in measurements. These establish evidence, not machine-independent SLOs.
-//! cargo test --release -p contrix-server --test capacity_benchmarks -- --ignored --nocapture --test-threads=1
-use contrix_doc_engine::calc::{CellValue, Sheet};
+//! cargo test --release -p syntra-server --test capacity_benchmarks -- --ignored --nocapture --test-threads=1
 use std::time::Instant;
+use syntra_doc_engine::calc::{CellValue, Sheet};
 
 fn distribution(mut samples: Vec<f64>) -> serde_json::Value {
     samples.sort_by(f64::total_cmp);
@@ -50,7 +50,7 @@ fn formula_diamond_dependencies_and_sparse_export_baseline() {
     // Identical nonempty-cell counts, radically different bounding rectangles.
     let mut near_sparse_stats = None;
     for (last_row, last_col) in [(999, 9), (1_048_575, 16_383)] {
-        let mut workbook = contrix_doc_engine::Workbook::new("Sparse export".into());
+        let mut workbook = syntra_doc_engine::Workbook::new("Sparse export".into());
         for index in 0..1_000 {
             workbook.sheets[0].set_cell(index, 0, CellValue::Number(f64::from(index)));
         }
@@ -60,8 +60,8 @@ fn formula_diamond_dependencies_and_sparse_export_baseline() {
         let mut export_stats = None;
         for _ in 0..30 {
             let start = Instant::now();
-            let (bytes, stats) = contrix_export::xlsx::workbook_to_xlsx_with_stats(&workbook)
-                .expect("sparse export");
+            let (bytes, stats) =
+                syntra_export::xlsx::workbook_to_xlsx_with_stats(&workbook).expect("sparse export");
             samples.push(start.elapsed().as_secs_f64() * 1_000.0);
             output_bytes = bytes.len();
             assert_eq!(stats.emitted_cells, 1001);
@@ -69,7 +69,7 @@ fn formula_diamond_dependencies_and_sparse_export_baseline() {
                 assert_eq!(stats, previous, "cell events are stable across samples");
             }
             export_stats = Some(stats);
-            let restored = contrix_export::xlsx::xlsx_to_workbook(&bytes).expect("reimport");
+            let restored = syntra_export::xlsx::xlsx_to_workbook(&bytes).expect("reimport");
             assert!(
                 matches!(restored.sheets[0].get_cell(last_row,last_col).map(|cell| &cell.value), Some(CellValue::Text(value)) if value=="edge")
             );

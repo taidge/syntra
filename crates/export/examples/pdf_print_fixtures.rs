@@ -1,8 +1,8 @@
 //! Generate independently inspectable HTML print fixtures for all four editors.
-//! Usage: cargo run -p contrix-export --example pdf_print_fixtures -- OUT_DIR [CJK_TTF]
+//! Usage: cargo run -p syntra-export --example pdf_print_fixtures -- OUT_DIR [CJK_TTF]
 use base64::{Engine, engine::general_purpose::STANDARD};
-use contrix_doc_engine::{calc as c, slides as s, whiteboard as b, writer as w};
 use std::{io::Cursor, path::PathBuf};
+use syntra_doc_engine::{calc as c, slides as s, whiteboard as b, writer as w};
 use uuid::Uuid;
 
 fn paragraph(text: &str) -> w::Block {
@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut writer = w::WriterDocument::new("PDF 中文排版验证".into());
-    writer.professional.header = "Contrix Office · 文档页眉".into();
+    writer.professional.header = "syntra · 文档页眉".into();
     writer.professional.footer = "保留文字、图片与表格".into();
     writer.professional.page_numbers = true;
     writer.body.push(w::Block::Heading(w::Heading {
@@ -232,7 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("slides", serde_json::to_value(presentation)?),
         ("whiteboard", serde_json::to_value(board)?),
     ] {
-        let mut printed = contrix_export::pdf::document_to_print_html(&model, kind)?;
+        let mut printed = syntra_export::pdf::document_to_print_html(&model, kind)?;
         if let Some(font) = &font {
             printed.html = printed
                 .html

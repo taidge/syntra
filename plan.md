@@ -1,4 +1,4 @@
-# Contrix Office - Full-Featured Office Suite
+# Syntra Office - Full-Featured Office Suite
 
 ## Architecture Overview
 
@@ -335,7 +335,7 @@ PUT    /api/v1/admin/settings
 ### Development
 ```bash
 # Backend
-cargo run -p contrix-server
+cargo run -p syntra-server
 
 # Frontend (dev server with hot reload)
 pwsh ./scripts/dev.ps1
@@ -350,7 +350,7 @@ docker-compose up
 cargo build --release
 
 # Docker
-docker build -t contrix-office .
+docker build -t syntra .
 docker-compose -f docker-compose.prod.yml up -d
 ```
 

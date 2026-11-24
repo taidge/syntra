@@ -32,7 +32,7 @@ impl UserRole {
     }
 }
 
-/// A registered user of the Contrix Office platform.
+/// A registered user of the syntra platform.
 #[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::users)]
 pub struct User {
@@ -133,6 +133,15 @@ pub enum DocumentType {
 }
 
 impl DocumentType {
+    pub fn native_mime_type(&self) -> &'static str {
+        match self {
+            Self::Writer => "application/vnd.syntra.writer",
+            Self::Calc => "application/vnd.syntra.calc",
+            Self::Slides => "application/vnd.syntra.slides",
+            Self::Whiteboard => "application/vnd.syntra.whiteboard",
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             DocumentType::Writer => "writer",

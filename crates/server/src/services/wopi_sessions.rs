@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Duration, Utc};
-use contrix_core::error::AppError;
-use contrix_core::schema::{sessions::dsl as s, users::dsl as u};
 use diesel::prelude::*;
 use horme::{OptionalExtension, RunQueryDsl};
 use sha2::{Digest, Sha256};
+use syntra_core::error::AppError;
+use syntra_core::schema::{sessions::dsl as s, users::dsl as u};
 use uuid::Uuid;
 
 use crate::middleware::auth::JwtClaims;
@@ -117,15 +117,15 @@ impl WopiSession {
     fn authorized_source_in_transaction(
         &self,
         conn: &mut diesel::SqliteConnection,
-    ) -> Result<contrix_core::models::File, AppError> {
+    ) -> Result<syntra_core::models::File, AppError> {
         crate::middleware::auth::validate_credential_in_transaction(
             conn,
             &self.credential(),
             &salvo::http::Method::POST,
             &format!("/api/v1/wopi/files/{}", self.file_id),
         )?;
-        let source = diesel::RunQueryDsl::first::<contrix_core::models::File>(
-            contrix_core::schema::files::table.find(&self.file_id),
+        let source = diesel::RunQueryDsl::first::<syntra_core::models::File>(
+            syntra_core::schema::files::table.find(&self.file_id),
             conn,
         )?;
         crate::services::persistence::authorize(conn, &source, &self.user_id, "editor")?;
@@ -136,7 +136,7 @@ impl WopiSession {
     /// was read. A relative overwrite also keeps its target's separate fence.
     pub fn write_authorization(
         &self,
-        source: &contrix_core::models::File,
+        source: &syntra_core::models::File,
         lock_token: Option<&str>,
     ) -> Result<WopiWriteAuthorization, AppError> {
         if source.id != self.file_id {

@@ -199,7 +199,7 @@ fn merge_presentation(
     });
     object.entry("theme").or_insert_with(|| {
         serde_json::json!({
-            "name":"Contrix Light", "primary_color":"#2563EB", "secondary_color":"#0F172A",
+            "name":"syntra Light", "primary_color":"#2563EB", "secondary_color":"#0F172A",
             "accent_colors":["#2563EB","#7C3AED","#059669","#D97706","#DC2626","#0891B2"],
             "heading_font":"Aptos Display", "body_font":"Aptos"
         })
@@ -379,7 +379,7 @@ fn set_presentation_theme(content: &mut serde_json::Value, name: &str) {
             serde_json::json!({"name":"Editorial","primary_color":"#B91C1C","secondary_color":"#292524","accent_colors":["#B91C1C","#C2410C","#A16207","#4D7C0F","#0F766E","#1D4ED8"],"heading_font":"Georgia","body_font":"Aptos"})
         }
         _ => {
-            serde_json::json!({"name":"Contrix Light","primary_color":"#2563EB","secondary_color":"#0F172A","accent_colors":["#2563EB","#7C3AED","#059669","#D97706","#DC2626","#0891B2"],"heading_font":"Aptos Display","body_font":"Aptos"})
+            serde_json::json!({"name":"syntra Light","primary_color":"#2563EB","secondary_color":"#0F172A","accent_colors":["#2563EB","#7C3AED","#059669","#D97706","#DC2626","#0891B2"],"heading_font":"Aptos Display","body_font":"Aptos"})
         }
     };
     if let Some(object) = content.as_object_mut() {
@@ -446,7 +446,7 @@ mod model_tests {
             Some("Fade")
         );
         assert_eq!(hydrate_presentation(&content)[0].body, "Revenue grew");
-        serde_json::from_value::<contrix_doc_engine::Presentation>(content).unwrap();
+        serde_json::from_value::<syntra_doc_engine::Presentation>(content).unwrap();
     }
 
     #[test]
@@ -1231,7 +1231,7 @@ pub fn Slides(_scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
                                 .theme(crate::components::ui::theme())
                                 .name("Presentation theme")
                                 .default_value(Some("current".into()))
-                                .options([sapid::select_option("current", "Contrix Light")])
+                                .options([sapid::select_option("current", "syntra Light")])
                                 .enabled(false),
                             col().class("slide-appearance-controls").fill((
                                 text().class("property-label").content("Background color"),
@@ -1378,7 +1378,7 @@ fn slide_objects(session: EditorSession, current: Cage<usize>) -> impl Widget {
                 sapid::button().theme(crate::components::ui::theme()).label("Insert image").on_press(move||{let mut value=merge_presentation(&image.content.get(),&hydrate_presentation(&image.content.get()),&image.name.get());append_slide_element(&mut value,current.get(),json!({"type":"Image","id":uuid::Uuid::new_v4(),"url":url.get(),"alt_text":"Slide image","x":300.,"y":300.,"width":640.,"height":360.,"rotation":0.}));image.edit(value);}),
                 sapid::button().theme(crate::components::ui::theme()).label("Insert chart").on_press(move||{let mut value=merge_presentation(&chart.content.get(),&hydrate_presentation(&chart.content.get()),&chart.name.get());append_slide_element(&mut value,current.get(),json!({"type":"Chart","id":uuid::Uuid::new_v4(),"chart_type":"Bar","x":800.,"y":400.,"width":800.,"height":400.,"data":{"labels":["A","B","C"],"datasets":[{"name":"Series 1","values":[12.,24.,18.],"color":"#2563eb"}]}}));chart.edit(value);}),
                 sapid::button().theme(crate::components::ui::theme()).label("Animate first object").on_press(move||{let mut value=animation.content.get();add_default_animation(&mut value,current.get());animation.edit(value);}),
-                sapid::native_select("presentation-theme").theme(crate::components::ui::theme()).name("Theme").options(["Contrix Light","Midnight","Editorial"].map(|key|sapid::select_option(key,key))).on_value_change(move|value|if let Some(value)=value{let mut next=theme.content.get();set_presentation_theme(&mut next,&value);theme.edit(next);})
+                sapid::native_select("presentation-theme").theme(crate::components::ui::theme()).name("Theme").options(["syntra Light","Midnight","Editorial"].map(|key|sapid::select_option(key,key))).on_value_change(move|value|if let Some(value)=value{let mut next=theme.content.get();set_presentation_theme(&mut next,&value);theme.edit(next);})
             )),
             text().content("Canonical presentation JSON retains positions, images, charts, animations and theme metadata."),
             sapid::textarea().theme(crate::components::ui::theme()).name("Presentation JSON").rows(10).value(source).on_value_change(move|value|source.revise(|current|*current=value)),
@@ -1420,7 +1420,7 @@ mod glory_roundtrip_tests {
             saved["slides"][0]["custom_metadata"],
             base["slides"][0]["custom_metadata"]
         );
-        serde_json::from_value::<contrix_doc_engine::Presentation>(saved).unwrap();
+        serde_json::from_value::<syntra_doc_engine::Presentation>(saved).unwrap();
     }
 }
 

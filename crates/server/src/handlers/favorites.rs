@@ -4,11 +4,11 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, FavoriteRequest, FileResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::{File, NewFavorite};
-use contrix_core::schema::favorites::dsl as fav;
-use contrix_core::schema::files::dsl as f;
+use syntra_core::dto::{ApiResponse, FavoriteRequest, FileResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::{File, NewFavorite};
+use syntra_core::schema::favorites::dsl as fav;
+use syntra_core::schema::files::dsl as f;
 
 use crate::middleware::auth::get_user_id;
 

@@ -1,4 +1,4 @@
-//! A small font-free Office icon set. Geometry uses the same 24-unit canvas,
+//! A small font-free syntra icon set. Geometry uses the same 24-unit canvas,
 //! rounded 1.8-unit outlines, and inherits its visible color through .ui-icon.
 use glory::prelude::*;
 use glory::render::{
@@ -8,7 +8,6 @@ use glory::ui::graphic;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
-    Office,
     Home,
     Folder,
     Document,
@@ -116,13 +115,6 @@ fn circle(path: &mut Vec<Path>, x: f64, y: f64, radius: f64) {
 fn geometry(kind: Icon) -> Vec<Path> {
     let mut p = Vec::new();
     match kind {
-        Icon::Office => {
-            rect(&mut p, 7., 3., 13., 17.);
-            line(&mut p, &[(4., 7.), (4., 22.), (17., 22.)]);
-            for y in [8., 12., 16.] {
-                line(&mut p, &[(10., y), (17., y)]);
-            }
-        }
         Icon::Home => {
             line(&mut p, &[(3., 10.), (12., 3.), (21., 10.)]);
             line(

@@ -4,7 +4,7 @@
 //! output includes inline styles derived from the document's formatting
 //! properties so it can be viewed in any browser without external CSS.
 
-use contrix_doc_engine::writer::{
+use syntra_doc_engine::writer::{
     Block, Blockquote, CodeBlock, Heading, ImageBlock, List, ListItem, Paragraph, Table, TextRun,
     WriterDocument,
 };
@@ -257,7 +257,7 @@ fn escape_html(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contrix_doc_engine::writer::WriterDocument;
+    use syntra_doc_engine::writer::WriterDocument;
 
     #[test]
     fn empty_document_produces_valid_html() {

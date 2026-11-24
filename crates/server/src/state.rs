@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use contrix_collab::CollabManager;
-use contrix_core::config::AppConfig;
+use syntra_collab::CollabManager;
+use syntra_core::config::AppConfig;
 
 use crate::services::AiService;
 use crate::services::NotificationBus;

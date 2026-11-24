@@ -125,9 +125,9 @@ def main():
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     environment = {key: value for key, value in os.environ.items()
-                   if not key.upper().startswith("CONTRIX_") and key.upper() not in ("APP_ENV", "JWT_SECRET")}
-    environment.update(CONTRIX_ENV="development", CONTRIX_SERVER_PORT=str(port),
-                       CONTRIX_DATABASE_URL="sqlite://data/benchmark.db", RUST_LOG="warn")
+                   if not key.upper().startswith(("SYNTRA_", "\x43ONTRIX_")) and key.upper() not in ("APP_ENV", "JWT_SECRET")}
+    environment.update(SYNTRA_ENV="development", SYNTRA_SERVER_PORT=str(port),
+                       SYNTRA_DATABASE_URL="sqlite://data/benchmark.db", RUST_LOG="warn")
     result = {"schema": 1, "started_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "binary": str(source), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "binary_mtime_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(source.stat().st_mtime)),

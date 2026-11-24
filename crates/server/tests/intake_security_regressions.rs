@@ -329,12 +329,12 @@ async fn credentials_changed_during_create_body_cannot_create_or_charge_a_docume
 
 async fn metadata_snapshot(server: &TestServer) -> Value {
     server.db.run(|conn| {
-        use contrix_core::{
+        use syntra_core::{
             models::{Document, File, FileReadStatus, FileTag, UploadSession},
             schema::{documents, file_read_status, file_tags, files, upload_sessions, users},
         };
         use diesel::prelude::*;
-        conn.transaction::<_, contrix_core::error::AppError, _>(|conn| {
+        conn.transaction::<_, syntra_core::error::AppError, _>(|conn| {
             Ok(json!({
                 "files": files::table.order(files::id).load::<File>(conn)?,
                 "documents": documents::table.order(documents::id).load::<Document>(conn)?,
@@ -830,8 +830,8 @@ async fn removed_room_uploader_cannot_replay_a_completion_receipt_for_current_me
 
 #[tokio::test]
 async fn committed_revocation_or_scope_downgrade_prevents_a_later_write_transaction() {
-    use contrix_core::error::AppError;
-    use contrix_server::middleware::auth::{
+    use syntra_core::error::AppError;
+    use syntra_server::middleware::auth::{
         AuthenticatedCredential, hash_token, validate_credential_in_transaction,
     };
     for use_key in [false, true] {

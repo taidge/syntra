@@ -26,7 +26,7 @@ test('Writer imports inherited DOCX fonts, indentation and Chinese numbering @ui
   await page.addInitScript(auth => {
     localStorage.setItem('locale', 'en');
     localStorage.setItem('theme', 'dark');
-    localStorage.setItem('contrix.auth', JSON.stringify({ token: auth.token, user: {
+    localStorage.setItem('syntra.auth', JSON.stringify({ token: auth.token, user: {
       id: auth.userId, username: auth.username, email: auth.email, role: 'editor',
     } }));
   }, user);
@@ -89,7 +89,7 @@ test('Writer preserves paper, typography and inline block order while editing @u
   await page.addInitScript(auth => {
     localStorage.setItem('locale', 'en');
     localStorage.setItem('theme', 'dark');
-    localStorage.setItem('contrix.auth', JSON.stringify({ token: auth.token, user: {
+    localStorage.setItem('syntra.auth', JSON.stringify({ token: auth.token, user: {
       id: auth.userId, username: auth.username, email: auth.email, role: 'editor',
     } }));
   }, user);

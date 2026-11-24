@@ -423,7 +423,7 @@ pub fn Admin(scope: Scope, auth: Cage<AuthState>) -> impl Widget {
             )),
             sapid::dialog("admin-create-user")
                 .theme(theme())
-                .class("office-modal")
+                .class("syntra-modal")
                 .title(crate::i18n::t("admin.add_user"))
                 .close_label(crate::i18n::t("common.close"))
                 .close_content(|| text().kind(TextKind::Inline).content("×"))

@@ -1,10 +1,11 @@
 [package]
-name = "contrix-core"
+name = "syntra-core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+repository.workspace = true
 license.workspace = true
-description = "Shared types, models, and DTOs for Contrix Office"
+description = "Shared types, models, and DTOs for syntra"
 
 [features]
 async-db = ["dep:horme"]

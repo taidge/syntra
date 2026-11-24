@@ -1,9 +1,9 @@
-//! # contrix-doc-engine
+//! # syntra-doc-engine
 //!
-//! Document processing models and operations for the Contrix Office suite.
+//! Document processing models and operations for the syntra suite.
 //!
 //! This crate provides the core data structures for the four document types
-//! supported by Contrix Office:
+//! supported by syntra:
 //!
 //! - **Writer** — rich text documents (similar to Word / Google Docs)
 //! - **Calc** — spreadsheets (similar to Excel / Google Sheets)

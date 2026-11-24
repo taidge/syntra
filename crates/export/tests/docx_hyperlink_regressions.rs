@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};
 
-use contrix_doc_engine::writer::{
+use quick_xml::{Reader, events::Event};
+use syntra_doc_engine::writer::{
     Alignment, Block, DocumentNote, List, ListItem, Paragraph, Spacing, Table, TableCell, TableRow,
     TextRun, WriterDocument,
 };
-use contrix_export::docx::{docx_to_writer, writer_to_docx};
-use quick_xml::{Reader, events::Event};
+use syntra_export::docx::{docx_to_writer, writer_to_docx};
 use uuid::Uuid;
 use zip::{
     ZipArchive,
@@ -59,7 +59,7 @@ fn without_native_parts(bytes: &[u8]) -> Vec<u8> {
     for index in 0..input.len() {
         let mut file = input.by_index(index).unwrap();
         let name = file.name().unwrap().into_owned();
-        if name.starts_with("customXml/") || name.contains("contrix") {
+        if name.starts_with("customXml/") || name.contains("syntra") {
             continue;
         }
         output

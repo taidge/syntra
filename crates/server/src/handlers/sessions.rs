@@ -1,11 +1,11 @@
 use chrono::Utc;
-use contrix_core::dto::{ApiResponse, SessionResponse};
-use contrix_core::error::AppError;
-use contrix_core::schema::sessions::dsl as s;
 use diesel::prelude::*;
 use horme::OptionalExtension;
 use horme::RunQueryDsl;
 use salvo::prelude::*;
+use syntra_core::dto::{ApiResponse, SessionResponse};
+use syntra_core::error::AppError;
+use syntra_core::schema::sessions::dsl as s;
 
 use crate::middleware::auth::{get_user_id, hash_token};
 

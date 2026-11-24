@@ -1,16 +1,16 @@
 use std::{sync::Arc, time::Duration};
 
-use contrix_collab::CollabManager;
-use contrix_core::config::AppConfig;
-use contrix_server::routes::create_router;
-use contrix_server::services::{NotificationBus, StorageBackend, WopiSessionStore};
-use contrix_server::state::{AppState, DbPool};
 use diesel::connection::SimpleConnection;
 use figment::providers::{Format, Toml};
 use reqwest::{Response, StatusCode};
 use salvo::conn::Acceptor;
 use salvo::prelude::*;
 use serde_json::{Value, json};
+use syntra_collab::CollabManager;
+use syntra_core::config::AppConfig;
+use syntra_server::routes::create_router;
+use syntra_server::services::{NotificationBus, StorageBackend, WopiSessionStore};
+use syntra_server::state::{AppState, DbPool};
 
 const LIMIT: u32 = 3;
 
@@ -41,7 +41,7 @@ impl LimitedServer {
         config.rate_limit.trust_forwarded_headers = trust_forwarded_headers;
         config.database.url = directory
             .path()
-            .join("office.sqlite")
+            .join("syntra.sqlite")
             .to_string_lossy()
             .into();
         config.database.max_connections = 2;
@@ -51,7 +51,7 @@ impl LimitedServer {
         let operation_timeout = Duration::from_millis(config.database.operation_timeout_ms);
         let db = DbPool::connect(&config.database).unwrap();
         db.run_startup_migrations(|conn| {
-            contrix_server::migrations::run_directory(
+            syntra_server::migrations::run_directory(
                 conn,
                 &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
             )

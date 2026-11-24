@@ -3,11 +3,11 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::{FileProperty, NewFileProperty};
-use contrix_core::schema::file_properties::dsl as fp;
-use contrix_core::schema::files::dsl as f;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::{FileProperty, NewFileProperty};
+use syntra_core::schema::file_properties::dsl as fp;
+use syntra_core::schema::files::dsl as f;
 
 use crate::middleware::auth::get_user_id;
 
@@ -133,7 +133,7 @@ pub async fn set_property(req: &mut Request, depot: &mut Depot, res: &mut Respon
         .db
         .run(move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
-                let file = diesel::RunQueryDsl::first::<contrix_core::models::File>(
+                let file = diesel::RunQueryDsl::first::<syntra_core::models::File>(
                     f::files.find(&file_id_param),
                     conn,
                 )?;
@@ -195,7 +195,7 @@ pub async fn delete_property(req: &mut Request, depot: &mut Depot, res: &mut Res
         .db
         .run(move |conn| {
             conn.immediate_transaction::<_, AppError, _>(|conn| {
-                let file = diesel::RunQueryDsl::first::<contrix_core::models::File>(
+                let file = diesel::RunQueryDsl::first::<syntra_core::models::File>(
                     f::files.find(&file_id_param),
                     conn,
                 )?;

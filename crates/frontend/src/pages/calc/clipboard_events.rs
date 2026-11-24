@@ -3,7 +3,8 @@
 use super::*;
 use wasm_bindgen::{JsCast, closure::Closure};
 
-const WORKBOOK_MIME: &str = "application/x-contrix-calc-cells+json";
+const WORKBOOK_MIME: &str = "application/x-syntra-calc-cells+json";
+const LEGACY_WORKBOOK_MIME: &str = "application/x-\x63ontrix-calc-cells+json";
 const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
 type ClipboardResult<T> = std::result::Result<T, String>;
 
@@ -553,6 +554,11 @@ pub(super) fn install(scope: &Scope, ed: Editor) {
                 if kind == "paste" {
                     let plain = data.get_data("text/plain").unwrap_or_default();
                     let internal = data.get_data(WORKBOOK_MIME).unwrap_or_default();
+                    let internal = if internal.is_empty() {
+                        data.get_data(LEGACY_WORKBOOK_MIME).unwrap_or_default()
+                    } else {
+                        internal
+                    };
                     let internal = if internal.is_empty() {
                         cached(&plain)
                     } else {

@@ -6,8 +6,8 @@ use salvo::websocket::{Message, WebSocket, WebSocketUpgrade};
 use tokio::sync::broadcast;
 use tokio::time::interval;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
 
 use crate::middleware::auth::{
     AuthenticatedCredential, get_credential, get_user_id, validate_credential,

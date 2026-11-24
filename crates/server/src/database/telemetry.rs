@@ -4,13 +4,13 @@
 //! No SQL formatting, extra SQL, business IDs or allocation payloads are read.
 //! SQL callbacks copy into bounded slots; only the pool monitor emits logs.
 use super::memory;
-use contrix_core::error::AppError;
 use std::sync::atomic::{
     AtomicBool, AtomicU64,
     Ordering::{Acquire, Relaxed},
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use syntra_core::error::AppError;
 
 /// Intent is supplied by known call sites, never inferred from SQL text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

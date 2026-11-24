@@ -3,7 +3,7 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use contrix_core::error::AppError;
+use syntra_core::error::AppError;
 
 // Bound Argon2's simultaneous memory/CPU use. A worker retains its permit even
 // if its HTTP caller is cancelled, so abandoned work cannot overrun this limit.

@@ -1,7 +1,7 @@
 import { defineConfig } from '@playwright/test';
 import { join } from 'node:path';
 
-const artifacts = process.env.CONTRIX_E2E_ARTIFACTS || process.cwd();
+const artifacts = process.env.SYNTRA_E2E_ARTIFACTS || process.cwd();
 
 export default defineConfig({
   testDir: './tests',
@@ -36,8 +36,8 @@ export default defineConfig({
   // Optionally start the server before tests
   webServer: process.env.CI || process.env.E2E_EXTERNAL_SERVER ? undefined : {
     command: process.platform === 'win32'
-      ? 'cd .. && cargo run -p contrix-server'
-      : 'cd .. && cargo run -p contrix-server',
+      ? 'cd .. && cargo run -p syntra-server'
+      : 'cd .. && cargo run -p syntra-server',
     url: 'http://localhost:3000/api/v1/auth/me',
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,

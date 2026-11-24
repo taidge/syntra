@@ -33,6 +33,7 @@ pub const MIGRATION_FILES: &[&str] = &[
     "026_storage_maintenance.sql",
     "027_operation_history_retention.sql",
     "028_trash_deletion_batches.sql",
+    "029_syntra_branding.sql",
 ];
 
 #[derive(Clone, Copy, PartialEq)]

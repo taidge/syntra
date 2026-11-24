@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use image::imageops::FilterType;
 
-use contrix_core::error::AppError;
+use syntra_core::error::AppError;
 
 use crate::services::StorageBackend;
 

@@ -5,14 +5,14 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{
+use syntra_core::dto::{
     ApiResponse, CreateTemplateRequest, DocumentResponse, TemplateResponse, UpdateTemplateRequest,
 };
-use contrix_core::error::AppError;
-use contrix_core::models::{DocumentType, NewDocument, NewFile, NewTemplate, Template};
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::templates::dsl as tmpl;
+use syntra_core::error::AppError;
+use syntra_core::models::{DocumentType, NewDocument, NewFile, NewTemplate, Template};
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::templates::dsl as tmpl;
 
 use crate::middleware::auth::get_user_id;
 
@@ -37,15 +37,6 @@ fn template_to_response(row: Template) -> TemplateResponse {
         created_by: row.created_by.parse().unwrap_or_default(),
         created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
         updated_at: row.updated_at.parse().unwrap_or_else(|_| Utc::now()),
-    }
-}
-
-fn mime_for_doc_type(dt: &DocumentType) -> &'static str {
-    match dt {
-        DocumentType::Writer => "application/vnd.contrix.writer",
-        DocumentType::Calc => "application/vnd.contrix.calc",
-        DocumentType::Slides => "application/vnd.contrix.slides",
-        DocumentType::Whiteboard => "application/vnd.contrix.whiteboard",
     }
 }
 
@@ -535,14 +526,14 @@ pub async fn create_document_from_template(
     let file_id_val = Uuid::new_v4();
     let doc_id_val = Uuid::new_v4();
     let now = Utc::now();
-    let path_val = format!("/{}.contrix", doc_name);
+    let path_val = format!("/{}.syntra", doc_name);
 
     // Create the file record.
     let new_file = NewFile {
         id: file_id_val.to_string(),
         name: doc_name.clone(),
         path: path_val,
-        mime_type: Some(mime_for_doc_type(&doc_type).to_string()),
+        mime_type: Some(doc_type.native_mime_type().into()),
         size: content_str.len() as i64,
         owner_id: uid.clone(),
         parent_id: body.parent_id,

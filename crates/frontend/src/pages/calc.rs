@@ -997,8 +997,8 @@ fn format_number_default(n: f64) -> String {
 // Legacy arithmetic scenarios exercise the shared engine used by the browser.
 #[cfg(test)]
 mod eval {
-    use contrix_doc_engine::calc::{CellValue, Sheet};
     use std::collections::HashMap;
+    use syntra_doc_engine::calc::{CellValue, Sheet};
     #[derive(Debug, PartialEq)]
     pub enum EvalError {
         Cycle,
@@ -1247,7 +1247,7 @@ mod eval_tests {
     #[test]
     fn editor_cells_are_accepted_by_the_export_engine() {
         let mut content =
-            serde_json::to_value(contrix_doc_engine::Workbook::new("Book".into())).unwrap();
+            serde_json::to_value(syntra_doc_engine::Workbook::new("Book".into())).unwrap();
         let style = super::CellStyle {
             bold: true,
             ..Default::default()
@@ -1256,7 +1256,7 @@ mod eval_tests {
             [{"row":0,"col":0},{"value":{"type":"Text","value":"Header"},"formula":null,"format":super::style_to_json(&style)}],
             [{"row":1,"col":0},{"value":{"type":"Number","value":42.0},"formula":null}]
         ]);
-        let workbook: contrix_doc_engine::Workbook = serde_json::from_value(content).unwrap();
+        let workbook: syntra_doc_engine::Workbook = serde_json::from_value(content).unwrap();
         assert!(workbook.sheets[0].get_cell(0, 0).unwrap().format.bold);
         let roundtrip = serde_json::to_value(workbook).unwrap();
         assert_eq!(hydrate_workbook(&roundtrip).1[&(0, 1, 0)], "42");

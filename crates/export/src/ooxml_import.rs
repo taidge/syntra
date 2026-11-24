@@ -331,9 +331,6 @@ pub fn model_budget(model: &impl serde::Serialize) -> Result<(), String> {
             Ok(())
         }
     }
-    serde_json::to_writer(
-        Budget(contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES),
-        model,
-    )
-    .map_err(|e| e.to_string())
+    serde_json::to_writer(Budget(syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES), model)
+        .map_err(|e| e.to_string())
 }

@@ -2,18 +2,18 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::Utc;
-use contrix_core::error::AppError;
-use contrix_core::schema::api_keys::dsl as ak;
 use diesel::prelude::*;
 use diesel::sql_types::{Integer, Nullable, Text};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use syntra_core::error::AppError;
+use syntra_core::schema::api_keys::dsl as ak;
 
 use crate::state::AppState;
-use contrix_core::schema::sessions::dsl as s;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::schema::sessions::dsl as s;
+use syntra_core::schema::users::dsl as u;
 
 /// JWT claims embedded in every access token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +56,7 @@ pub async fn validate_credential(
     state: &AppState,
     credential: &AuthenticatedCredential,
     path: &str,
-) -> Result<(), contrix_core::error::AppError> {
+) -> Result<(), syntra_core::error::AppError> {
     validate_credential_for_request(state, credential, &salvo::http::Method::GET, path).await
 }
 
@@ -68,7 +68,7 @@ pub async fn validate_credential_for_request(
     credential: &AuthenticatedCredential,
     method: &salvo::http::Method,
     path: &str,
-) -> Result<(), contrix_core::error::AppError> {
+) -> Result<(), syntra_core::error::AppError> {
     let (credential, method, path) = (credential.clone(), method.clone(), path.to_owned());
     state
         .db
@@ -88,8 +88,8 @@ pub fn validate_credential_in_transaction(
     credential: &AuthenticatedCredential,
     method: &salvo::http::Method,
     path: &str,
-) -> Result<(), contrix_core::error::AppError> {
-    use contrix_core::error::AppError;
+) -> Result<(), syntra_core::error::AppError> {
+    use syntra_core::error::AppError;
     if credential
         .expires_at
         .is_some_and(|expiry| expiry <= Utc::now())

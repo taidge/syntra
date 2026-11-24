@@ -9,7 +9,7 @@ services:
       - app-data:/data
     environment:
       RUST_LOG: info
-      CONTRIX_ENV: production
+      SYNTRA_ENV: production
       JWT_SECRET: ${JWT_SECRET:?Set a strong JWT_SECRET of at least 32 bytes}
     restart: unless-stopped
 

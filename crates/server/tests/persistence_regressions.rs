@@ -1,8 +1,8 @@
 #[allow(dead_code)]
 mod common;
 use common::TestServer;
-use contrix_server::services::{StorageBackend, StorageService, persistence};
 use serde_json::{Value, json};
+use syntra_server::services::{StorageBackend, StorageService, persistence};
 
 /// A loopback S3 transport, not an alternate persistence implementation. Holding
 /// PUT responses fixes the window between the real save preflight and its CAS.
@@ -117,12 +117,12 @@ async fn persistence_snapshot(server: &TestServer, id: &str) -> Value {
     server
         .db
         .run(move |conn| {
-            use contrix_core::{
+            use diesel::prelude::*;
+            use syntra_core::{
                 models::{Document, File, Version},
                 schema::{documents, files, users, versions},
             };
-            use diesel::prelude::*;
-            conn.transaction::<_, contrix_core::error::AppError, _>(|conn| {
+            conn.transaction::<_, syntra_core::error::AppError, _>(|conn| {
                 let document = documents::table.find(id).first::<Document>(conn)?;
                 let file = files::table.find(&document.file_id).first::<File>(conn)?;
                 let history = versions::table
@@ -150,7 +150,7 @@ async fn inventory_paths(server: &TestServer) -> std::collections::BTreeSet<Stri
         .db
         .run(|conn| {
             use diesel::RunQueryDsl;
-            Ok::<_, contrix_core::error::AppError>(
+            Ok::<_, syntra_core::error::AppError>(
                 diesel::sql_query("SELECT path FROM blob_inventory")
                     .load::<Path>(conn)?
                     .into_iter()
@@ -209,7 +209,7 @@ async fn setup() -> (TestServer, String, String) {
 /// A valid legacy no-op log entry can carry unknown JSON metadata. This lets
 /// retention tests hit the byte boundary exactly without sending an invalid
 /// oversized websocket message or allocating a large current document.
-fn operation_log_with_size(operation: &contrix_collab::Operation, size: usize) -> String {
+fn operation_log_with_size(operation: &syntra_collab::Operation, size: usize) -> String {
     let mut value = serde_json::to_value(operation).unwrap();
     value["legacy_fixture_padding"] = json!("");
     let overhead = serde_json::to_string(&value).unwrap().len();
@@ -229,7 +229,7 @@ async fn seed_two_legacy_operations(
 ) {
     let (document, user) = (document.to_owned(), user.to_owned());
     server.db.run(move |conn| {
-        use contrix_core::{error::AppError, models::{Document, NewOperationLogEntry, NewVersion}, schema::{documents::dsl as d, operation_log::dsl as ol, versions::dsl as v}};
+        use syntra_core::{error::AppError, models::{Document, NewOperationLogEntry, NewVersion}, schema::{documents::dsl as d, operation_log::dsl as ol, versions::dsl as v}};
         use diesel::{prelude::*, sql_types::{BigInt, Integer, Text}};
         conn.immediate_transaction::<_, AppError, _>(|conn| {
             let row = d::documents.find(&document).first::<Document>(conn)?;
@@ -238,7 +238,7 @@ async fn seed_two_legacy_operations(
             let client = uuid::Uuid::new_v4();
             let now = chrono::Utc::now().to_rfc3339();
             for (counter, size) in [(1_u64, first_size), (2, last_size)] {
-                let operation = contrix_collab::Operation::new(uuid::Uuid::parse_str(&user).unwrap(), client, counter, contrix_collab::OpType::Replace {
+                let operation = syntra_collab::Operation::new(uuid::Uuid::parse_str(&user).unwrap(), client, counter, syntra_collab::OpType::Replace {
                     path: vec![], old_value: content.clone(), new_value: content.clone(),
                 }).with_base_version(counter);
                 let id = format!("{document}:{client}:{counter}");
@@ -276,15 +276,15 @@ async fn operation_history_commit_enforces_exact_32_mib_newest_suffix() {
             .create_document(&token, "byte boundary", "writer", None)
             .await;
         let initial = document(&server, &token, &id).await["content"].clone();
-        let content = contrix_doc_engine::writer::writer_content_with_text(
+        let content = syntra_doc_engine::writer::writer_content_with_text(
             &initial,
             "byte retention committed",
         );
-        let operation = contrix_collab::Operation::new(
+        let operation = syntra_collab::Operation::new(
             uuid::Uuid::parse_str(&user).unwrap(),
             uuid::Uuid::new_v4(),
             1,
-            contrix_collab::OpType::Replace {
+            syntra_collab::OpType::Replace {
                 path: vec![],
                 old_value: initial,
                 new_value: content.clone(),
@@ -395,15 +395,15 @@ async fn operation_history_future_row_conflicts_without_partial_metadata_commit(
     let old_blob = server.state.storage.read_file(&old_path).await.unwrap();
     let initial: Value =
         serde_json::from_str(before["document"]["content"].as_str().unwrap()).unwrap();
-    let content = contrix_doc_engine::writer::writer_content_with_text(
+    let content = syntra_doc_engine::writer::writer_content_with_text(
         &initial,
         "Must not commit past future log",
     );
-    let operation = contrix_collab::Operation::new(
+    let operation = syntra_collab::Operation::new(
         uuid::Uuid::parse_str(&user).unwrap(),
         uuid::Uuid::new_v4(),
         1,
-        contrix_collab::OpType::Replace {
+        syntra_collab::OpType::Replace {
             path: vec![],
             old_value: initial,
             new_value: content.clone(),
@@ -421,7 +421,7 @@ async fn operation_history_future_row_conflicts_without_partial_metadata_commit(
     )
     .await
     .unwrap_err();
-    assert!(matches!(error, contrix_core::error::AppError::Conflict(_)));
+    assert!(matches!(error, syntra_core::error::AppError::Conflict(_)));
     assert_eq!(persistence_snapshot(&server, &id).await, before);
     #[derive(diesel::QueryableByName)]
     struct Count {
@@ -949,8 +949,8 @@ async fn exclusive_locks_and_revoked_creator_acl_apply_to_document_writes() {
 
 #[tokio::test]
 async fn expired_lock_takeover_contends_and_fences_the_previous_token() {
-    use contrix_core::{models::FileLock, schema::file_locks::dsl as fl};
     use diesel::{connection::SimpleConnection, prelude::*};
+    use syntra_core::{models::FileLock, schema::file_locks::dsl as fl};
     let (server, token, owner) = setup().await;
     let (_, peer_body) = server
         .register("takeover", "takeover@example.test", "Takeover!2026")
@@ -1015,7 +1015,7 @@ async fn expired_lock_takeover_contends_and_fences_the_previous_token() {
                 entered.send(()).unwrap();
                 wait.recv_timeout(std::time::Duration::from_secs(5))
                     .unwrap();
-                Ok::<_, contrix_core::error::AppError>(())
+                Ok::<_, syntra_core::error::AppError>(())
             })
             .await
             .unwrap();
@@ -1322,11 +1322,11 @@ async fn operation_commit_is_idempotent_but_rejects_id_collisions_across_authors
     let storage = StorageBackend::Local(StorageService::new(
         server._temp_dir.path().join("files").to_str().unwrap(),
     ));
-    let operation = contrix_collab::Operation::new(
+    let operation = syntra_collab::Operation::new(
         owner.parse().unwrap(),
         uuid::Uuid::new_v4(),
         1,
-        contrix_collab::operation::OpType::Replace {
+        syntra_collab::operation::OpType::Replace {
             path: vec!["writer".into()],
             old_value: json!({}),
             new_value: json!({"text":"operation"}),
@@ -1377,7 +1377,7 @@ async fn operation_commit_is_idempotent_but_rejects_id_collisions_across_authors
         .is_err()
     );
     let mut forged_payload = operation.clone();
-    forged_payload.op_type = contrix_collab::operation::OpType::Replace {
+    forged_payload.op_type = syntra_collab::operation::OpType::Replace {
         path: vec!["writer".into()],
         old_value: json!({}),
         new_value: json!({"text":"forged"}),
@@ -1399,7 +1399,7 @@ async fn operation_commit_is_idempotent_but_rejects_id_collisions_across_authors
     // a legitimate retry after OT and after transformed history compaction.
     let mut original = operation.clone();
     original.id.counter = 2;
-    original.op_type = contrix_collab::OpType::Insert {
+    original.op_type = syntra_collab::OpType::Insert {
         path: vec!["text".into()],
         index: 0,
         content: "x".into(),
@@ -1407,7 +1407,7 @@ async fn operation_commit_is_idempotent_but_rejects_id_collisions_across_authors
     let original_hash = persistence::operation_request_hash(&original).unwrap();
     let mut transformed = original.clone();
     transformed.base_version = 2;
-    transformed.op_type = contrix_collab::OpType::Insert {
+    transformed.op_type = syntra_collab::OpType::Insert {
         path: vec!["text".into()],
         index: 1,
         content: "x".into(),
@@ -1481,9 +1481,9 @@ async fn operation_commit_is_idempotent_but_rejects_id_collisions_across_authors
 #[tokio::test]
 async fn imported_original_survives_document_saves_and_is_collected_only_after_purge() {
     let (server, token, owner) = setup().await;
-    let mut writer = contrix_doc_engine::WriterDocument::new("Original".into());
+    let mut writer = syntra_doc_engine::WriterDocument::new("Original".into());
     writer.add_paragraph("Keep original OOXML bytes");
-    let original = contrix_export::docx::writer_to_docx(&writer).unwrap();
+    let original = syntra_export::docx::writer_to_docx(&writer).unwrap();
     let response = server
         .client
         .post(server.url("/api/v1/files/upload"))
@@ -1694,7 +1694,7 @@ async fn wait_for_gc(server: &TestServer, path: &str) {
             let queued = server
                 .db
                 .run(move |conn| {
-                    Ok::<_, contrix_core::error::AppError>(
+                    Ok::<_, syntra_core::error::AppError>(
                         diesel::RunQueryDsl::get_result::<Count>(
                             diesel::sql_query(
                                 "SELECT COUNT(*) AS total FROM storage_gc WHERE path = ?",
@@ -1737,7 +1737,7 @@ async fn dropping_an_unpolled_staged_commit_cleans_the_object_without_sql() {
     .unwrap();
     let path = staged.path.clone();
     assert_eq!(storage.read_file(&path).await.unwrap(), b"staged");
-    let never_polled = staged.commit(|_| -> Result<(), contrix_core::error::AppError> {
+    let never_polled = staged.commit(|_| -> Result<(), syntra_core::error::AppError> {
         panic!("unpolled transaction must never execute")
     });
     drop(never_polled);
@@ -1797,7 +1797,7 @@ async fn cancelling_a_staged_s3_write_retains_capacity_until_the_real_worker_ret
             .unwrap();
     });
     let storage = std::sync::Arc::new(StorageBackend::S3(
-        contrix_server::services::s3_storage::S3Storage::new(
+        syntra_server::services::s3_storage::S3Storage::new(
             "bucket",
             "us-east-1",
             "test-access",

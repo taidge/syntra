@@ -25,7 +25,8 @@ fn highlight(title: &'static str, description: &'static str) -> impl Widget {
 pub fn Home(_scope: Scope, _auth: Cage<AuthState>) -> impl Widget {
     view().class("landing-page").fill((
         view().class("hero").fill(view().class("hero-content").fill((
-            heading("Welcome to Contrix Office").class("hero-title"),
+            syntra_mark("hero-brand-icon"),
+            heading("Welcome to Syntra Office").class("hero-title"),
             text().kind(TextKind::Paragraph).class("hero-subtitle").content("A full-featured office suite built entirely in Rust. Create documents, spreadsheets, presentations, and whiteboards -- all from your browser."),
             view().class("hero-buttons").fill((anchor("Sign In", "/login").class("btn btn-primary btn-lg"), anchor("Sign Up", "/register").class("btn btn-secondary btn-lg"))),
         ))),
@@ -44,8 +45,8 @@ pub fn Home(_scope: Scope, _auth: Cage<AuthState>) -> impl Widget {
             highlight("Self-Hosted", "Your data stays on your servers. Deploy with Docker in minutes and keep full control of your documents."),
         )),
         view().class("landing-footer").fill((
-            text().kind(TextKind::Paragraph).content("Contrix Office - Open Source Office Suite"),
-            view().class("footer-links").fill((anchor("GitHub", "https://github.com/contrix-org/office"), label(" | "), anchor("Documentation", "#"), label(" | "), anchor("License: MIT / Apache-2.0", "#"))),
+            text().kind(TextKind::Paragraph).content("Syntra Office - Open Source Office Suite"),
+            view().class("footer-links").fill((anchor("GitHub", "https://github.com/taidge/syntra"), label(" | "), anchor("Documentation", "#"), label(" | "), anchor("License: MIT / Apache-2.0", "#"))),
         )),
     ))
 }

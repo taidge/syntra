@@ -8,12 +8,12 @@ use horme::RunQueryDsl;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::error::AppError;
-use contrix_core::models::{File, FileLock, NewFile, NewFileLock};
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::file_locks::dsl as fl;
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::error::AppError;
+use syntra_core::models::{File, FileLock, NewFile, NewFileLock};
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::file_locks::dsl as fl;
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::users::dsl as u;
 
 use crate::handlers::access::{authorize_file_access, load_accessible_file};
 use crate::services::StorageBackend;
@@ -158,10 +158,12 @@ fn wopi_lock_expiry() -> String {
 
 fn doc_kind_from_mime(mime_type: Option<&str>) -> &'static str {
     match mime_type.unwrap_or_default() {
-        mime if mime.contains("contrix.calc") => "calc",
-        mime if mime.contains("contrix.slides") => "slides",
-        mime if mime.contains("contrix.whiteboard") => "whiteboard",
-        mime if mime.contains("contrix.writer") => "writer",
+        mime if mime.contains("syntra.calc") || mime.contains("\x63ontrix.calc") => "calc",
+        mime if mime.contains("syntra.slides") || mime.contains("\x63ontrix.slides") => "slides",
+        mime if mime.contains("syntra.whiteboard") || mime.contains("\x63ontrix.whiteboard") => {
+            "whiteboard"
+        }
+        mime if mime.contains("syntra.writer") || mime.contains("\x63ontrix.writer") => "writer",
         _ => "document",
     }
 }
@@ -626,7 +628,7 @@ pub async fn wopi_discovery(req: &mut Request, res: &mut Response) {
         r#"<?xml version="1.0" encoding="utf-8"?>
 <wopi-discovery>
   <net-zone name="external-http">
-    <app name="Contrix Writer" favIconUrl="{base_url}/favicon.ico">
+    <app name="Syntra Writer" favIconUrl="{base_url}/favicon.ico">
       <action name="view" default="true" ext="doc" urlsrc="{writer_view}?wopisrc=WOPI_SOURCE&amp;"/>
       <action name="edit" default="true" ext="doc" requires="locks,update" urlsrc="{writer_edit}?wopisrc=WOPI_SOURCE&amp;"/>
       <action name="view" ext="docx" urlsrc="{writer_view}?wopisrc=WOPI_SOURCE&amp;"/>
@@ -641,7 +643,7 @@ pub async fn wopi_discovery(req: &mut Request, res: &mut Response) {
       <action name="mobileView" ext="docx" urlsrc="{writer_view}?mobile=1&amp;wopisrc=WOPI_SOURCE&amp;"/>
       <action name="mobileEdit" ext="docx" requires="locks,update" urlsrc="{writer_edit}?mobile=1&amp;wopisrc=WOPI_SOURCE&amp;"/>
     </app>
-    <app name="Contrix Calc" favIconUrl="{base_url}/favicon.ico">
+    <app name="Syntra Calc" favIconUrl="{base_url}/favicon.ico">
       <action name="view" default="true" ext="xls" urlsrc="{calc_view}?wopisrc=WOPI_SOURCE&amp;"/>
       <action name="edit" default="true" ext="xls" requires="locks,update" urlsrc="{calc_edit}?wopisrc=WOPI_SOURCE&amp;"/>
       <action name="view" ext="xlsx" urlsrc="{calc_view}?wopisrc=WOPI_SOURCE&amp;"/>
@@ -654,7 +656,7 @@ pub async fn wopi_discovery(req: &mut Request, res: &mut Response) {
       <action name="mobileView" ext="xlsx" urlsrc="{calc_view}?mobile=1&amp;wopisrc=WOPI_SOURCE&amp;"/>
       <action name="mobileEdit" ext="xlsx" requires="locks,update" urlsrc="{calc_edit}?mobile=1&amp;wopisrc=WOPI_SOURCE&amp;"/>
     </app>
-    <app name="Contrix Slides" favIconUrl="{base_url}/favicon.ico">
+    <app name="Syntra Slides" favIconUrl="{base_url}/favicon.ico">
       <action name="view" default="true" ext="ppt" urlsrc="{slides_view}?wopisrc=WOPI_SOURCE&amp;"/>
       <action name="edit" default="true" ext="ppt" requires="locks,update" urlsrc="{slides_edit}?wopisrc=WOPI_SOURCE&amp;"/>
       <action name="view" ext="pptx" urlsrc="{slides_view}?wopisrc=WOPI_SOURCE&amp;"/>
@@ -727,11 +729,11 @@ pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Resp
         _ => "/documents",
     };
     let title = match doc_kind.as_str() {
-        "writer" => "Contrix Writer",
-        "calc" => "Contrix Calc",
-        "slides" => "Contrix Slides",
-        "whiteboard" => "Contrix Whiteboard",
-        _ => "Contrix Document",
+        "writer" => "Syntra Writer",
+        "calc" => "Syntra Calc",
+        "slides" => "Syntra Slides",
+        "whiteboard" => "Syntra Whiteboard",
+        _ => "Syntra Document",
     };
     let incoming_access_token = if let Some(token) = req.query::<String>("access_token") {
         token
@@ -837,7 +839,7 @@ pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Resp
       <div class="pulse"></div>
       <h1>{title}</h1>
       <p>{status_message}...</p>
-      <a id="fallback" class="fallback" href="/files">Open Contrix</a>
+      <a id="fallback" class="fallback" href="/files">Open Syntra Office</a>
       <div class="meta" id="meta">WOPISrc: {display_wopi_src}</div>
     </main>
     <script nonce="{script_nonce}">
@@ -882,7 +884,7 @@ pub async fn wopi_host_page(req: &mut Request, depot: &mut Depot, res: &mut Resp
 
         const target = `${{routePrefix}}/${{encodeURIComponent(fileId)}}`;
         if (wopiSessionToken) {{
-          sessionStorage.setItem("contrix.wopi", JSON.stringify({{
+          sessionStorage.setItem("syntra.wopi", JSON.stringify({{
             token: wopiSessionToken,
             file_id: fileId
           }}));

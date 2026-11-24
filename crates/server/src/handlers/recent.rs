@@ -1,12 +1,12 @@
 use chrono::Utc;
-use contrix_core::dto::{ApiResponse, FileResponse};
-use contrix_core::error::AppError;
-use contrix_core::models::File;
-use contrix_core::schema::files::dsl as f;
-use contrix_core::schema::recent_files::dsl as rf;
 use diesel::prelude::*;
 use horme::RunQueryDsl;
 use salvo::prelude::*;
+use syntra_core::dto::{ApiResponse, FileResponse};
+use syntra_core::error::AppError;
+use syntra_core::models::File;
+use syntra_core::schema::files::dsl as f;
+use syntra_core::schema::recent_files::dsl as rf;
 
 use crate::middleware::auth::get_user_id;
 

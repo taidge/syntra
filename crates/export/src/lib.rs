@@ -1,6 +1,6 @@
-//! # contrix-export
+//! # syntra-export
 //!
-//! Document export and import engine for Contrix Office.
+//! Document export and import engine for syntra.
 //!
 //! Provides converters from the internal doc-engine models to common formats
 //! such as HTML, Markdown, CSV, and plain text.
@@ -11,11 +11,11 @@ pub mod error;
 pub mod format;
 pub mod html;
 pub mod markdown;
-pub mod pdf;
-pub mod pdf_import;
 mod native_package;
 mod ooxml;
 mod ooxml_import;
+pub mod pdf;
+pub mod pdf_import;
 pub mod pptx;
 pub mod xlsx;
 

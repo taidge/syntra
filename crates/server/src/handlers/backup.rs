@@ -2,8 +2,8 @@ use chrono::Utc;
 use salvo::prelude::*;
 use uuid::Uuid;
 
-use contrix_core::dto::{ApiResponse, BackupResponse};
-use contrix_core::error::AppError;
+use syntra_core::dto::{ApiResponse, BackupResponse};
+use syntra_core::error::AppError;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 use crate::services::database_backup;

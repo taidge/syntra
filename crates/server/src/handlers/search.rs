@@ -4,11 +4,11 @@ use diesel::sql_types::{Bool, Text};
 use horme::RunQueryDsl;
 use salvo::prelude::*;
 
-use contrix_core::dto::{ApiResponse, SearchResponse, SearchResult};
-use contrix_core::error::AppError;
-use contrix_core::models::DocumentType;
-use contrix_core::schema::documents::dsl as d;
-use contrix_core::schema::files::dsl as f;
+use syntra_core::dto::{ApiResponse, SearchResponse, SearchResult};
+use syntra_core::error::AppError;
+use syntra_core::models::DocumentType;
+use syntra_core::schema::documents::dsl as d;
+use syntra_core::schema::files::dsl as f;
 
 use crate::middleware::auth::get_user_id;
 

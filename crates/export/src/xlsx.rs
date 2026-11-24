@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Write};
 
 use calamine::{Data, Reader, Xlsx};
-use contrix_doc_engine::calc::{
+use serde::{Deserialize, Serialize};
+use syntra_doc_engine::calc::{
     Cell, CellRef, CellValue, ConditionalFormat, ConditionalRule, DataValidation, MergedRange,
     NamedRange, PivotTable, Sheet, SheetChart, SheetChartType, ValidationRule, Workbook,
     WorkbookMetadata,
 };
-use serde::{Deserialize, Serialize};
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 #[path = "xlsx_import.rs"]
@@ -180,7 +180,7 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
     let mut buf = Cursor::new(Vec::new());
     let mut zip = ZipWriter::new(&mut buf);
     let options = SimpleFileOptions::default();
-    let mut points_remaining = contrix_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
+    let mut points_remaining = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
     for chart in wb.sheets.iter().flat_map(|s| &s.charts) {
         let range_points = |start: &CellRef, end: &CellRef| -> usize {
             if start.row > end.row
@@ -231,7 +231,7 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/customXml/contrix-workbook.json" ContentType="application/json"/>
+  <Override PartName="/customXml/syntra-workbook.json" ContentType="application/json"/>
   <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
   <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
   <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>"#,
@@ -446,13 +446,13 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
                 .map_err(|e| e.to_string())?;
         }
     }
-    zip.start_file("customXml/contrix-workbook.json", options)
+    zip.start_file("customXml/syntra-workbook.json", options)
         .map_err(|e| e.to_string())?;
     serde_json::to_writer(&mut zip, &NativeWorkbook::from_with_stats(wb, &mut stats))
         .map_err(|e| e.to_string())?;
 
     zip.finish().map_err(|e| e.to_string())?;
-    let bytes = crate::native_package::seal(buf.into_inner(), "customXml/contrix-workbook.json")?;
+    let bytes = crate::native_package::seal(buf.into_inner(), "customXml/syntra-workbook.json")?;
     Ok((bytes, stats))
 }
 
@@ -680,7 +680,7 @@ fn sheet_to_xml(
     xml
 }
 
-fn differential_format_xml(format: &contrix_doc_engine::calc::CellFormat) -> String {
+fn differential_format_xml(format: &syntra_doc_engine::calc::CellFormat) -> String {
     let mut xml = String::from("<dxf>");
     if format.bold
         || format.italic
@@ -766,7 +766,7 @@ fn conditional_rule_xml(rule: &ConditionalRule) -> (&'static str, String, String
     }
 }
 
-fn data_validation_xml(validation: &contrix_doc_engine::calc::DataValidation) -> String {
+fn data_validation_xml(validation: &syntra_doc_engine::calc::DataValidation) -> String {
     let range = format!(
         "{}:{}",
         validation.range_start.to_a1(),
@@ -851,7 +851,7 @@ fn drawing_relationships_xml(sheet: &Sheet, chart_offset: usize) -> String {
 }
 
 fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet, stats: &mut XlsxExportStats) -> String {
-    use contrix_doc_engine::slides::{ChartData, ChartType, Dataset, SlideChart};
+    use syntra_doc_engine::slides::{ChartData, ChartType, Dataset, SlideChart};
     fn values(
         sheet: &Sheet,
         start: &CellRef,
@@ -944,7 +944,7 @@ fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet, stats: &mut XlsxExportStat
         ))
     }
     // Keep standard range bindings as well as cached values, so Office refreshes
-    // an imported chart after the user changes cells outside Contrix.
+    // an imported chart after the user changes cells outside syntra.
     let mut offset = 0;
     for source in &chart.series_sources {
         let Some(start) = xml[offset..].find("<c:ser>").map(|i| i + offset) else {
@@ -1000,7 +1000,11 @@ fn escape_xml(s: &str) -> String {
 /// Parse a `.xlsx` byte vector into a [`Workbook`].
 pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
     crate::ooxml::validate(bytes)?;
-    if let Some(model) = crate::native_package::read(bytes, "customXml/contrix-workbook.json")
+    let native_paths = [
+        "customXml/syntra-workbook.json",
+        "customXml/\x63ontrix-workbook.json",
+    ];
+    if let Some(model) = crate::native_package::read(bytes, &native_paths)
         && let Ok(workbook) = serde_json::from_value::<NativeWorkbook>(model)
     {
         return Ok(workbook.into());
@@ -1095,8 +1099,8 @@ fn data_to_cell_value(data: &Data) -> Option<CellValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contrix_doc_engine::calc::{CellRef, CellValue, MergedRange, Workbook};
     use std::io::Read;
+    use syntra_doc_engine::calc::{CellRef, CellValue, MergedRange, Workbook};
     use zip::ZipArchive;
 
     #[test]
@@ -1289,7 +1293,7 @@ mod tests {
 
     #[test]
     fn spreadsheet_tools_are_emitted_and_round_trip() {
-        use contrix_doc_engine::calc::{
+        use syntra_doc_engine::calc::{
             ConditionalFormat, DataValidation, NamedRange, SheetChart, SheetChartType,
             ValidationRule,
         };
@@ -1298,7 +1302,7 @@ mod tests {
         wb.sheets[0].frozen_rows = 1;
         wb.sheets[0].frozen_cols = 1;
         wb.sheets[0].set_cell(0, 0, CellValue::Number(12.0));
-        let format = contrix_doc_engine::calc::CellFormat {
+        let format = syntra_doc_engine::calc::CellFormat {
             bg_color: Some("#FEE2E2".into()),
             ..Default::default()
         };

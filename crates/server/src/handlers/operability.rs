@@ -12,7 +12,7 @@ fn openapi_document() -> serde_json::Value {
     let mut document = serde_json::json!({
         "openapi": "3.1.0",
         "info": {
-            "title": "Contrix Office API",
+            "title": "Syntra Office API",
             "version": env!("CARGO_PKG_VERSION"),
             "description": "Document storage, collaborative editing, conversion and administration API"
         },

@@ -6,10 +6,10 @@ use salvo::prelude::*;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use contrix_core::dto::ApiResponse;
-use contrix_core::error::AppError;
-use contrix_core::models::NewApiKey;
-use contrix_core::schema::api_keys::dsl as ak;
+use syntra_core::dto::ApiResponse;
+use syntra_core::error::AppError;
+use syntra_core::models::NewApiKey;
+use syntra_core::schema::api_keys::dsl as ak;
 
 use crate::middleware::auth::{get_user_id, normalize_api_key_permissions};
 

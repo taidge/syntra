@@ -2,9 +2,9 @@ use diesel::prelude::*;
 use horme::RunQueryDsl;
 use salvo::prelude::*;
 
-use contrix_core::dto::{ApiResponse, QuotaResponse, UpdateQuotaRequest};
-use contrix_core::error::AppError;
-use contrix_core::schema::users::dsl as u;
+use syntra_core::dto::{ApiResponse, QuotaResponse, UpdateQuotaRequest};
+use syntra_core::error::AppError;
+use syntra_core::schema::users::dsl as u;
 
 use crate::middleware::auth::{get_user_id, get_user_role};
 

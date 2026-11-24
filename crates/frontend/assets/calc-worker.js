@@ -1,4 +1,4 @@
-import init, { calculate_workbook_formulas } from './contrix_frontend.js';
+import init, { calculate_workbook_formulas } from './syntra_frontend.js';
 
 self.onmessage = async ({ data: [id, bytes] }) => {
     try {
