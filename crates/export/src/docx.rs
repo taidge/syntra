@@ -796,6 +796,29 @@ fn table_to_xml(
     xml.push_str("<w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"000000\"/>");
     xml.push_str("<w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"000000\"/>");
     xml.push_str("</w:tblBorders></w:tblPr>");
+    // Standard readers use tblGrid to address cells, even for auto-sized tables.
+    let columns = table
+        .rows
+        .iter()
+        .map(|row| row.cells.len())
+        .max()
+        .unwrap_or(0)
+        .max(table.column_widths.len());
+    xml.push_str("<w:tblGrid>");
+    for column in 0..columns {
+        match table
+            .column_widths
+            .get(column)
+            .filter(|w| w.is_finite() && **w > 0.0)
+        {
+            Some(width) => xml.push_str(&format!(
+                r#"<w:gridCol w:w="{}"/>"#,
+                (width * 15.).round() as u32
+            )),
+            None => xml.push_str("<w:gridCol/>"),
+        }
+    }
+    xml.push_str("</w:tblGrid>");
     for row in &table.rows {
         xml.push_str("<w:tr>");
         for cell in &row.cells {
@@ -2460,13 +2483,32 @@ fn parse_table(
 ) -> Result<Block, String> {
     context.table_depth += 1;
     let mut buf = Vec::new();
-    let mut rows: Vec<TableRow> = Vec::new();
+    let mut rows = Vec::new();
+    let mut column_widths = Vec::new();
+    let mut in_grid = false;
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                if e.local_name().as_ref() == b"tr" {
-                    rows.push(parse_row(reader, numbering, images, links, context)?);
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"tr" => {
+                rows.push(parse_row(reader, numbering, images, links, context)?);
+            }
+            // A tracked grid change contains a second, historical grid.
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"tblGridChange" => {
+                reader
+                    .read_to_end(e.name())
+                    .map_err(|e| format!("xml parse table grid change: {e}"))?;
+            }
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"tblGrid" => in_grid = true,
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"tblGrid" => in_grid = false,
+            Ok(Event::Start(e) | Event::Empty(e))
+                if in_grid && e.local_name().as_ref() == b"gridCol" =>
+            {
+                if column_widths.len() >= 10_000 {
+                    return Err("DOCX table has too many grid columns".into());
                 }
+                let twips = attr_val(&e, b"w")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                column_widths.push(twips as f32 / 15.);
             }
             Ok(Event::End(e)) if e.local_name().as_ref() == b"tbl" => break,
             Ok(Event::Eof) => break,
@@ -2475,10 +2517,8 @@ fn parse_table(
         }
         buf.clear();
     }
-    let column_widths = rows
-        .first()
-        .map(|r| vec![0.0; r.cells.len()])
-        .unwrap_or_default();
+    let columns = rows.iter().map(|row| row.cells.len()).max().unwrap_or(0);
+    column_widths.resize(column_widths.len().max(columns), 0.);
     context.table_depth -= 1;
     Ok(Block::Table(Table {
         id: Uuid::new_v4(),

@@ -250,3 +250,26 @@ fn docx_document_grid_scales_auto_spacing_but_respects_overrides_and_table_cells
             < 0.0001
     );
 }
+
+#[test]
+fn standard_table_grid_preserves_measured_and_automatic_columns() {
+    let grid = r#"<w:tblGrid><w:gridCol w:w="1500"/><w:gridCol/><w:tblGridChange w:id="1"><w:tblGrid><w:gridCol w:w="750"/></w:tblGrid></w:tblGridChange></w:tblGrid>"#;
+    for imported_grid in [grid, ""] {
+        let source = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl>{imported_grid}<w:tr><w:tc><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        );
+        let bytes = replace_parts(&[("word/document.xml", &source)]);
+        let writer = docx_to_writer(&bytes).unwrap();
+        let exported = writer_to_docx(&writer).unwrap();
+        let xml = part(&exported, "word/document.xml");
+        let grid = xml
+            .split_once("<w:tblGrid>")
+            .unwrap()
+            .1
+            .split_once("</w:tblGrid>")
+            .unwrap()
+            .0;
+        assert_eq!(grid.matches("<w:gridCol").count(), 2);
+        assert_eq!(grid.contains(r#"w:w="1500""#), source.contains("1500"));
+    }
+}
