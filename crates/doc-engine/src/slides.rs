@@ -259,6 +259,7 @@ pub enum SlideElement {
     Image(SlideImage),
     Shape(Shape),
     Chart(SlideChart),
+    Table(SlideTable),
     Video(SlideVideo),
     Group(ElementGroup),
 }
@@ -348,6 +349,30 @@ pub enum ShapeType {
     CurvedLine,
 }
 
+/// Normalized rightArrow preset vertices with the DrawingML default
+/// adjustment: the arrowhead is half the shape height, bounded by its width.
+pub fn default_right_arrow_points(width: f64, height: f64) -> Vec<(f64, f64)> {
+    if !width.is_finite() || !height.is_finite() {
+        return Vec::new();
+    }
+    let width = width.max(0.);
+    let head = (height.max(0.) / 2.).min(width);
+    let shoulder = if width > 0. {
+        (width - head) / width
+    } else {
+        0.
+    };
+    vec![
+        (0., 0.25),
+        (shoulder, 0.25),
+        (shoulder, 0.),
+        (1., 0.5),
+        (shoulder, 1.),
+        (shoulder, 0.75),
+        (0., 0.75),
+    ]
+}
+
 /// A chart embedded on a slide.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlideChart {
@@ -376,6 +401,156 @@ pub enum ChartType {
 pub struct ChartData {
     pub labels: Vec<String>,
     pub datasets: Vec<Dataset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<ChartPresentation>,
+}
+
+/// Native chart presentation, kept separate from numeric data for recalculation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ChartPresentation {
+    pub title: Option<String>,
+    pub show_legend: bool,
+    pub legend_position: String,
+    pub labels: ChartLabels,
+    pub category_axis: ChartAxis,
+    pub value_axis: ChartAxis,
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
+    pub title_font_size: Option<f32>,
+    pub point_colors: Vec<Vec<Option<String>>>,
+    pub vary_colors: bool,
+    pub horizontal: bool,
+    pub grouping: Option<String>,
+    pub gap_width: Option<f32>,
+    pub first_slice_angle: Option<f32>,
+    pub hole_size: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ChartLabels {
+    pub show_value: bool,
+    pub show_percent: bool,
+    pub show_category: bool,
+    pub show_series: bool,
+    pub position: String,
+    pub number_format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ChartAxis {
+    pub title: Option<String>,
+    pub minimum: Option<f64>,
+    pub maximum: Option<f64>,
+    pub major_unit: Option<f64>,
+    pub hidden: bool,
+    pub number_format: Option<String>,
+    pub major_gridlines: bool,
+    pub grid_color: Option<String>,
+    pub grid_width: Option<f32>,
+}
+
+/// A DrawingML table retains a rectangular grid and explicit merged cells.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlideTable {
+    pub id: Uuid,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub rotation: f32,
+    pub column_widths: Vec<f32>,
+    pub row_heights: Vec<f32>,
+    pub cells: Vec<SlideTableCell>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlideTableCell {
+    pub row: usize,
+    pub column: usize,
+    pub row_span: usize,
+    pub column_span: usize,
+    pub content: Vec<SlideTextRun>,
+    pub background_color: Option<String>,
+    pub text_layout: SlideTextLayout,
+    #[serde(default)]
+    pub borders: TableCellBorders,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct TableCellBorders {
+    pub top: Option<SlideBorder>,
+    pub right: Option<SlideBorder>,
+    pub bottom: Option<SlideBorder>,
+    pub left: Option<SlideBorder>,
+}
+
+/// Project native table cells onto the slide without discarding the grid model.
+/// Rotation is around the table's centre, rather than each cell's original centre.
+pub fn table_render_cells(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Ok(table) = serde_json::from_value::<SlideTable>(value.clone()) else {
+        return Vec::new();
+    };
+    if table.column_widths.len() > 1000
+        || table.row_heights.len() > 1000
+        || table.cells.len() > 50000
+    {
+        return Vec::new();
+    }
+    let mut columns = vec![0.0f32];
+    let mut rows = vec![0.0f32];
+    for width in &table.column_widths {
+        columns.push(columns.last().copied().unwrap_or(0.) + width.max(0.));
+    }
+    for height in &table.row_heights {
+        rows.push(rows.last().copied().unwrap_or(0.) + height.max(0.));
+    }
+    let sx = table.width / columns.last().copied().unwrap_or(1.).max(0.01);
+    let sy = table.height / rows.last().copied().unwrap_or(1.).max(0.01);
+    let angle = table.rotation.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    let (cx, cy) = (table.x + table.width / 2., table.y + table.height / 2.);
+    table.cells.iter().filter_map(|cell|{
+        let (left,top)=(*columns.get(cell.column)?,*rows.get(cell.row)?);
+        let right=*columns.get(cell.column.saturating_add(cell.column_span.max(1)).min(columns.len()-1))?;
+        let bottom=*rows.get(cell.row.saturating_add(cell.row_span.max(1)).min(rows.len()-1))?;
+        let (width,height)=((right-left)*sx,(bottom-top)*sy);
+        let (mx,my)=(table.x+left*sx+width/2.-cx,table.y+top*sy+height/2.-cy);
+        Some(serde_json::json!({"type":"TextBox","id":format!("{}-{}-{}",table.id,cell.row,cell.column),"x":cx+mx*cos-my*sin-width/2.,"y":cy+mx*sin+my*cos-height/2.,"width":width,"height":height,"rotation":table.rotation,"content":cell.content,"background_color":cell.background_color,"border":null,"padding":0.,"text_layout":cell.text_layout,"cell_borders":cell.borders}))
+    }).collect()
+}
+
+pub fn table_borders_svg(
+    value: &serde_json::Value,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> String {
+    let mut svg = String::new();
+    for (edge, (x1, y1, x2, y2)) in [
+        ("top", (x, y, x + width, y)),
+        ("right", (x + width, y, x + width, y + height)),
+        ("bottom", (x, y + height, x + width, y + height)),
+        ("left", (x, y, x, y + height)),
+    ] {
+        let border = &value["cell_borders"][edge];
+        let Some(color) = border["color"].as_str().filter(|s| {
+            s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        }) else {
+            continue;
+        };
+        let stroke = border["width"]
+            .as_f64()
+            .filter(|n| n.is_finite())
+            .unwrap_or(1.)
+            .clamp(0., 1000.);
+        svg.push_str(&format!("<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\" stroke=\"{color}\" stroke-width=\"{stroke}\"/>"));
+    }
+    svg
 }
 
 /// A single series within a chart.
@@ -629,6 +804,15 @@ fn elements_contain_text(elements: &[SlideElement], lower_query: &str) -> bool {
             SlideElement::Group(group) if elements_contain_text(&group.elements, lower_query) => {
                 return true;
             }
+            SlideElement::Table(table)
+                if table
+                    .cells
+                    .iter()
+                    .flat_map(|cell| &cell.content)
+                    .any(|run| run.text.to_lowercase().contains(lower_query)) =>
+            {
+                return true;
+            }
             _ => {}
         }
     }
@@ -642,6 +826,16 @@ fn elements_contain_text(elements: &[SlideElement], lower_query: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn right_arrow_default_head_depends_on_height_instead_of_width() {
+        let wide = default_right_arrow_points(310., 90.);
+        assert!((wide[2].0 * 310. - 265.).abs() < 1e-9);
+        let square = default_right_arrow_points(100., 100.);
+        assert_eq!(square[2], (0.5, 0.));
+        let tall = default_right_arrow_points(90., 310.);
+        assert_eq!(tall[2], (0., 0.));
+    }
 
     fn make_sample_presentation() -> Presentation {
         let mut pres = Presentation::new("Test Pres".into());

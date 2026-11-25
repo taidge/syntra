@@ -14,6 +14,7 @@ const paragraph = () => ({type:'Paragraph', id:freshId(), runs:[], alignment:'Le
   spacing:{before:0, after:8, line_height:1.15}});
 const renderedBlocks = new WeakMap();
 const generatedBlocks = new WeakMap();
+const lineBoxes = new WeakMap();
 
 function imageSource(value) {
   if (typeof value !== 'string') return null;
@@ -28,20 +29,33 @@ function applyRunStyle(element, run) {
   element.style.fontWeight = run.bold ? '700' : '400';
   element.style.fontStyle = run.italic ? 'italic' : 'normal';
   element.style.textDecoration = [run.underline && 'underline', run.strikethrough && 'line-through'].filter(Boolean).join(' ') || 'none';
-  if (typeof run.font_family === 'string' && run.font_family.trim()) element.style.fontFamily = run.font_family;
+  if (typeof run.font_family === 'string' && run.font_family.trim()) element.style.fontFamily = `${run.font_family}, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`;
   if (run.font_size != null) element.style.fontSize = `${finite(run.font_size, 12, 1, 400)}pt`;
   element.style.color = typeof run.color === 'string' && CSS.supports('color', run.color) ? run.color : '#000000';
   if (typeof run.background_color === 'string' && CSS.supports('color', run.background_color)) element.style.backgroundColor = run.background_color;
   if (run.superscript) element.style.verticalAlign = 'super';
   else if (run.subscript) element.style.verticalAlign = 'sub';
 }
-function appendRuns(parent, runs) {
+function styleLineRun(element, run, line, metrics) {
+  if (!line || run.superscript || run.subscript) return;
+  const family = String(run.font_family || line.family), key = family.trim().replace(/^['"]|['"]$/g,'').toLowerCase();
+  const metric = metrics?.[key] || metrics?.[family];
+  if (!metric) return;
+  const size = finite(run.font_size,line.size,1,1000);
+  const browserBaseline = metric.ascent*size+(line.line-(metric.ascent+metric.descent)*size)/2;
+  element.style.verticalAlign = 'top';
+  element.style.position = 'relative';
+  element.style.top = `${finite(line.baseline-browserBaseline,0,-8000,8000)}pt`;
+  element.style.lineHeight = 'inherit';
+}
+function appendRuns(parent, runs, metrics = {}) {
   for (const [index, run] of (Array.isArray(runs) ? runs : []).entries()) {
     const element = document.createElement(safeLink(run.link) ? 'a' : 'span');
     element.className = 'writer-surface-run';
     element.dataset.writerRun = String(index);
     if (safeLink(run.link)) element.href = run.link;
     applyRunStyle(element, run);
+    styleLineRun(element,run,lineBoxes.get(parent),metrics);
     element.textContent = String(run.text ?? '');
     parent.append(element);
   }
@@ -57,9 +71,35 @@ function formatMap(model) {
   }
   return result;
 }
-function blockStyle(element, block, formats) {
+function officeLineBox(runs, spacing, format, metrics) {
+  if (format.line_height_at_least || !metrics || !Object.keys(metrics).length) return null;
+  let selected = null, descent = 0;
+  for (const run of runs || []) {
+    if (!run.text) continue;
+    if (!run.font_family) return null;
+    const family = String(run.font_family), key = family.trim().replace(/^['"]|['"]$/g,'').toLowerCase();
+    const metric = metrics[key] || metrics[family];
+    if (!metric) return null;
+    if (![metric.ascent,metric.descent,metric.line_gap].every(value => Number.isFinite(value) && value >= 0 && value <= 4)) return null;
+    if (run.font_size != null && !Number.isFinite(Number(run.font_size))) return null;
+    const size = finite(run.font_size,12,1,1000);
+    const rawAscent = Math.round(metric.ascent*size*20), rawDescent = Math.round(metric.descent*size*20), gap = Math.round(metric.line_gap*size*20);
+    const height = (metric.cjk ? Math.floor((rawAscent+rawDescent)*127/100) : rawAscent+rawDescent)+gap;
+    const ascent = (metric.cjk ? Math.floor(rawAscent*127/100) : rawAscent)+gap;
+    descent = Math.max(descent,height-ascent);
+    if (!selected || ascent > selected.ascent) selected = {ascent,family,size};
+  }
+  if (!selected) return null;
+  spacing = format.spacing || spacing || {};
+  const exact = Number(format.line_height_pt);
+  const line = format.line_height_pt != null && Number.isFinite(exact) && exact > 0 ? finite(exact,14,1,1000)
+    : Math.min(1000, Math.max(20,Math.floor((selected.ascent+descent)*Math.round(finite(spacing.line_height,1.15,.5,10)*240)/240))/20);
+  const baseline = Math.min(line,Math.max(0,format.line_height_pt != null && Number.isFinite(exact) && exact > 0 ? selected.ascent/20 : (selected.ascent+line*20-selected.ascent-descent)/20));
+  return {...selected,line,baseline};
+}
+function blockStyle(element, block, formats, metrics = {}) {
   const format = formats.get(String(block.id)) || {};
-  const spacing = block.spacing || {};
+  const spacing = format.spacing || block.spacing || {};
   element.style.marginTop = `${finite(spacing.before, 0, 0, 1000)}pt`;
   element.style.marginBottom = `${finite(spacing.after, 8, 0, 1000)}pt`;
   element.style.lineHeight = format.line_height_pt != null
@@ -70,39 +110,68 @@ function blockStyle(element, block, formats) {
   element.style.marginRight = `${finite(format.right_indent_pt)}pt`;
   if (format.first_line_indent_chars != null) element.style.textIndent = `${finite(format.first_line_indent_chars)}em`;
   else element.style.textIndent = `${finite(format.first_line_indent_pt)}pt`;
+  const lineBox = officeLineBox(block.runs,spacing,format,metrics);
+  lineBoxes.set(element,lineBox);
+  if (lineBox) {
+    element.style.fontFamily = lineBox.family;
+    element.style.fontSize = `${lineBox.size}pt`;
+    element.style.lineHeight = `${lineBox.line}pt`;
+  }
   if (format.numbering_label) {
     const label = document.createElement('span');
     label.dataset.writerNumbering = 'true';
     label.contentEditable = 'false';
     label.className = 'writer-numbering-label';
     label.textContent = `${format.numbering_label} `;
+    if (lineBox) styleLineRun(label,{font_family:lineBox.family,font_size:lineBox.size},lineBox,metrics);
     element.append(label);
   }
 }
-function renderListItems(parent, items) {
-  for (const item of items || []) {
+function renderListItems(parent, items, metrics) {
+  const imported = (items || []).some(item => item.layout);
+  if (imported) { parent.style.paddingLeft = '0'; parent.style.margin = '0'; }
+  for (const [index, item] of (items || []).entries()) {
     const li = document.createElement('li');
     li.className = 'writer-surface-list-item';
     const text = document.createElement('div');
     text.dataset.writerListText = 'true';
-    appendRuns(text, item.runs);
+    if (item.layout) {
+      li.style.listStyle = 'none';
+      const format = item.layout.format || {};
+      const runs = item.layout.label_font_family ? [...(item.runs || []),{text:format.numbering_label,font_family:item.layout.label_font_family,font_size:item.layout.label_font_size}] : item.runs;
+      blockStyle(text, {id:format.block_id, spacing:item.layout.spacing,runs}, new Map([[String(format.block_id),format]]),metrics);
+      if (!text.style.fontSize && item.runs?.[0]?.font_size != null) text.style.fontSize = `${finite(item.runs[0].font_size,12,1,400)}pt`;
+      if (format.contextual_spacing && items[index + 1]?.layout?.format?.contextual_spacing) text.style.marginBottom = '0pt';
+      const marker = text.querySelector('[data-writer-numbering]');
+      if (marker && item.layout.label_font_family) marker.style.fontFamily = item.layout.label_font_family;
+      if (marker && item.layout.label_font_family) {
+        if (item.layout.label_font_size != null) marker.style.fontSize = `${finite(item.layout.label_font_size,12,1,1000)}pt`;
+        styleLineRun(marker,{font_family:item.layout.label_font_family,font_size:item.layout.label_font_size},lineBoxes.get(text),metrics);
+      }
+      if (marker && format.first_line_indent_pt < 0) {
+        marker.style.display = 'inline-block';
+        marker.style.width = `${-format.first_line_indent_pt}pt`;
+        marker.style.textIndent = '0';
+      }
+    }
+    appendRuns(text, item.runs,metrics);
     li.append(text);
     if (item.children?.length) {
       const nested = document.createElement(parent.tagName.toLowerCase());
-      renderListItems(nested, item.children);
+      renderListItems(nested, item.children,metrics);
       li.append(nested);
     }
     parent.append(li);
   }
 }
-function renderBlock(block, formats, depth = 0, index = null) {
+function renderBlock(block, formats, depth = 0, index = null, metrics = {}) {
   if (depth > 32) return document.createTextNode('Document nesting limit reached');
   let element;
   switch (block.type) {
     case 'Paragraph': case 'Heading': {
       element = document.createElement(block.type === 'Heading' ? `h${finite(block.level, 1, 1, 6)}` : 'p');
-      blockStyle(element, block, formats);
-      appendRuns(element, block.runs);
+      blockStyle(element, block, formats, metrics);
+      appendRuns(element, block.runs, metrics);
       if (formats.get(String(block.id))?.line_height_at_least) {
         // A minimum is the paragraph strut; each run also contributes its natural line box.
         for (const run of element.children) run.style.lineHeight = 'normal';
@@ -112,11 +181,24 @@ function renderBlock(block, formats, depth = 0, index = null) {
     }
     case 'List':
       element = document.createElement(block.ordered ? 'ol' : 'ul');
-      renderListItems(element, block.items);
+      renderListItems(element, block.items,metrics);
       break;
     case 'Table': {
       element = document.createElement('table');
       element.className = 'writer-surface-table';
+      const widths = (block.column_widths || []).map(width => finite(width, 0, 0, 10000));
+      const total = widths.reduce((sum, width) => sum + width, 0);
+      if (total > 0) {
+        const columns = document.createElement('colgroup');
+        for (const width of widths) {
+          const column = document.createElement('col');
+          column.style.width = `${width / total * 100}%`;
+          columns.append(column);
+        }
+        element.style.width = `${total}px`;
+        element.style.tableLayout = 'fixed';
+        element.append(columns);
+      }
       const tbody = document.createElement('tbody');
       for (const row of block.rows || []) {
         const tr = document.createElement('tr');
@@ -124,8 +206,12 @@ function renderBlock(block, formats, depth = 0, index = null) {
           const td = document.createElement('td');
           td.colSpan = finite(cell.col_span, 1, 1, 100);
           td.rowSpan = finite(cell.row_span, 1, 1, 100);
+          if (cell.layout) {
+            td.style.verticalAlign = ({Top:'top',Center:'middle',Bottom:'bottom'})[cell.layout.vertical_alignment] || 'top';
+            td.style.padding = (cell.layout.padding || [0,5.4,0,5.4]).map(v=>`${finite(v,0,0,1000)}pt`).join(' ');
+          }
           if (cell.background_color && CSS.supports('color', cell.background_color)) td.style.backgroundColor = cell.background_color;
-          for (const [index, nested] of (cell.blocks || []).entries()) td.append(renderBlock(nested, formats, depth + 1, index));
+          for (const [index, nested] of (cell.blocks || []).entries()) td.append(renderBlock(nested, formats, depth + 1, index,metrics));
           if (!td.childNodes.length) td.append(document.createElement('p'));
           tr.append(td);
         }
@@ -146,6 +232,7 @@ function renderBlock(block, formats, depth = 0, index = null) {
         if (block.width != null) image.style.width = `${finite(block.width, 100, 1, 10000)}px`;
         if (block.height != null) image.style.height = `${finite(block.height, 100, 1, 10000)}px`;
         image.style.maxWidth = '100%';
+        image.style.display = 'inline-block';
         element.append(image);
       } else {
         element.className = 'writer-image-placeholder';
@@ -159,7 +246,7 @@ function renderBlock(block, formats, depth = 0, index = null) {
       break;
     case 'Blockquote':
       element = document.createElement('blockquote');
-      for (const [index, nested] of (block.blocks || []).entries()) element.append(renderBlock(nested, formats, depth + 1, index));
+      for (const [index, nested] of (block.blocks || []).entries()) element.append(renderBlock(nested, formats, depth + 1, index,metrics));
       break;
     case 'HorizontalRule': element = document.createElement('hr'); element.contentEditable = 'false'; break;
     case 'PageBreak':
@@ -272,7 +359,7 @@ function readBlocks(container, originals, seen = new Set(), depth = 0, formatCop
       if (node.nodeValue) result.push({...paragraph(), runs:[plainRun(node.nodeValue)]});
       continue;
     }
-    if (!isElement(node) || node.dataset.writerNumbering) continue;
+    if (!isElement(node) || node.dataset.writerNumbering || node.dataset.writerDecoration) continue;
     const id = node.dataset.writerBlockId;
     const original = generatedBlocks.get(node) || byId.get(id) || originals?.[Number(node.dataset.writerBlockIndex)];
     const rendered = renderedBlocks.get(node);
@@ -360,6 +447,80 @@ function restoreOffsets(root, offsets) {
   try { document.getSelection()?.setBaseAndExtent(anchor, a, focus, f); } catch (_) { /* changed structure */ }
 }
 
+// Page furniture stays outside contenteditable and out of the save model.
+// Hard breaks occupy the remainder of the physical page instead of looking
+// like an ordinary empty paragraph. Re-measure after fonts and images load.
+function layoutPages(surface) {
+  if (!surface.root || !surface.model || surface.destroyed) return;
+  const paper = surface.root.closest('.writer-page');
+  if (!paper) return;
+  const settings = surface.model.page_settings || {};
+  const px = 96 / 25.4;
+  const height = finite(settings.height_mm, 297, 30, 2000) * px;
+  const top = finite(settings.margin_top, 25.4, 0, 500) * px;
+  const bottom = finite(settings.margin_bottom, 25.4, 0, 500) * px;
+  for (const gap of surface.root.querySelectorAll('[data-writer-decoration="gap"]')) gap.remove();
+  const origin = paper.getBoundingClientRect().top;
+  for (const block of Array.from(surface.root.children)) {
+    if (block.classList.contains('writer-page-break')) {
+      block.style.height = '0px';
+      const y = block.getBoundingClientRect().top - origin;
+      const nextPage = Math.floor(Math.max(0, y - top) / height) + 1;
+      block.style.height = `${Math.max(0, nextPage * height + top - y)}px`;
+    } else {
+      const rect = block.getBoundingClientRect();
+      const y = rect.top - origin;
+      const page = Math.floor(Math.max(0, y - top) / height);
+      const end = (page + 1) * height - bottom;
+      // Keep a normal block together when it fits one page. Very long
+      // paragraphs/tables remain editable and can naturally span pages.
+      if (y + rect.height > end + 1 && rect.height <= height - top - bottom && y > page * height + top + 1) {
+        const gap = document.createElement('div');
+        gap.dataset.writerDecoration = 'gap';
+        gap.contentEditable = 'false';
+        gap.setAttribute('aria-hidden', 'true');
+        gap.style.height = `${(page + 1) * height + top - y}px`;
+        block.before(gap);
+      }
+    }
+  }
+  const last = surface.root.lastElementChild;
+  const contentEnd = last ? last.getBoundingClientRect().bottom - origin : top;
+  const count = Math.min(500, Math.max(1, Math.ceil((contentEnd + bottom - .5) / height)));
+  paper.style.minHeight = `${height * count}px`;
+  let furniture = paper.querySelector(':scope > .writer-page-furniture');
+  if (!furniture) {
+    furniture = document.createElement('div');
+    furniture.className = 'writer-page-furniture';
+    furniture.contentEditable = 'false';
+    furniture.setAttribute('aria-hidden', 'true');
+    paper.append(furniture);
+  }
+  furniture.replaceChildren();
+  const layout = surface.model.professional || {};
+  for (let index = 0; index < count; index++) {
+    const page = document.createElement('div');
+    page.className = 'writer-physical-page';
+    page.style.top = `${index * height}px`;
+    page.style.height = `${height}px`;
+    if (!(index === 0 && layout.different_first_page)) {
+      for (const [kind, value] of [['header', layout.header], ['footer', `${layout.footer || ''}${layout.page_numbers ? `  ${index + 1}` : ''}`]]) {
+        if (!value) continue;
+        const item = document.createElement('div');
+        item.className = `writer-page-${kind}`;
+        item.textContent = value;
+        const alignment = String(layout[`${kind}_alignment`] || 'Center').toLowerCase();
+        item.style.textAlign = ['left', 'center', 'right', 'justify'].includes(alignment) ? alignment : 'center';
+        item.style.left = `${finite(settings.margin_left, 25.4, 0, 500)}mm`;
+        item.style.right = `${finite(settings.margin_right, 25.4, 0, 500)}mm`;
+        item.style[kind === 'header' ? 'top' : 'bottom'] = `${Math.max(2, (kind === 'header' ? top : bottom) / px * .4)}mm`;
+        page.append(item);
+      }
+    }
+    furniture.append(page);
+  }
+}
+
 export function createWriterSurface(selector, changed) {
   const surface = {selector, changed, root:null, model:null, signature:'', enabled:false, destroyed:false,
     frame:0, selection:null, composing:false, wholeReplacement:false, pendingPlainDOM:null};
@@ -368,6 +529,10 @@ export function createWriterSurface(selector, changed) {
     if (surface.root && selection?.rangeCount && surface.root.contains(selection.anchorNode) && surface.root.contains(selection.focusNode)) {
       surface.selection = selection.getRangeAt(0).cloneRange();
     }
+  };
+  surface.layout = () => {
+    cancelAnimationFrame(surface.layoutFrame);
+    surface.layoutFrame = requestAnimationFrame(() => layoutPages(surface));
   };
   surface.emit = () => {
     if (!surface.root || !surface.model || !surface.enabled || surface.composing) return;
@@ -410,6 +575,7 @@ export function createWriterSurface(selector, changed) {
       surface.model = next; surface.signature = signature;
       surface.changed(JSON.stringify(next));
     }
+    surface.layout();
     surface.remember();
   };
   surface.beforeInput = event => {
@@ -451,6 +617,8 @@ export function createWriterSurface(selector, changed) {
     surface.root.addEventListener('compositionstart', surface.startComposition);
     surface.root.addEventListener('compositionend', surface.endComposition);
     document.addEventListener('selectionchange', surface.remember);
+    window.addEventListener('resize', surface.layout);
+    surface.root.addEventListener('load', surface.layout, true);
     surface.render();
   };
   surface.render = () => {
@@ -459,7 +627,7 @@ export function createWriterSurface(selector, changed) {
     const formats = formatMap(surface.model);
     surface.renderModel = clone(surface.model);
     const fragment = document.createDocumentFragment();
-    for (const [index, block] of (surface.model.body || []).entries()) fragment.append(renderBlock(block, formats, 0, index));
+    for (const [index, block] of (surface.model.body || []).entries()) fragment.append(renderBlock(block, formats, 0, index,surface.model.professional?.font_metrics));
     if (!fragment.childNodes.length) fragment.append(renderBlock(paragraph(), formats));
     surface.root.replaceChildren(fragment);
     surface.root.contentEditable = String(surface.enabled);
@@ -472,6 +640,8 @@ export function createWriterSurface(selector, changed) {
       'margin-bottom':finite(settings.margin_bottom, 25.4, 0, 500), 'margin-left':finite(settings.margin_left, 25.4, 0, 500),
     })) page.style.setProperty(`--writer-${name}`, `${value}mm`);
     restoreOffsets(surface.root, offsets);
+    surface.layout();
+    document.fonts.ready.then(surface.layout);
     surface.remember();
   };
   surface.frame = requestAnimationFrame(surface.mount);
@@ -571,8 +741,12 @@ export function formatWriterSurface(surface, serialized) {
 export function destroyWriterSurface(surface) {
   surface.destroyed = true;
   cancelAnimationFrame(surface.frame);
+  cancelAnimationFrame(surface.layoutFrame);
+  window.removeEventListener('resize', surface.layout);
   document.removeEventListener('selectionchange', surface.remember);
   if (surface.root) {
+    surface.root.removeEventListener('load', surface.layout, true);
+    surface.root.closest('.writer-page')?.querySelector(':scope > .writer-page-furniture')?.remove();
     surface.root.removeEventListener('beforeinput', surface.beforeInput);
     surface.root.removeEventListener('input', surface.emit);
     surface.root.removeEventListener('paste', surface.paste);

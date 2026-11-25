@@ -68,6 +68,19 @@ pub struct List {
 pub struct ListItem {
     pub runs: Vec<TextRun>,
     pub children: Vec<ListItem>,
+    /// Imported list paragraphs have spacing/indentation just like body text.
+    /// Old native lists retain their existing default appearance.
+    #[serde(default)]
+    pub layout: Option<ListItemLayout>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ListItemLayout {
+    pub spacing: Spacing,
+    pub format: ParagraphFormat,
+    pub label_font_family: Option<String>,
+    pub label_font_size: Option<f32>,
 }
 
 /// A table (rows × columns).
@@ -89,6 +102,24 @@ pub struct TableCell {
     pub col_span: u32,
     pub row_span: u32,
     pub background_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<TableCellLayout>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TableCellLayout {
+    /// Top, right, bottom, left cell margins in points. None inherits the table.
+    pub padding: [Option<f32>; 4],
+    #[serde(default)]
+    pub vertical_alignment: CellVerticalAlignment,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum CellVerticalAlignment {
+    #[default]
+    Top,
+    Center,
+    Bottom,
 }
 
 /// An inline/block image.
@@ -231,12 +262,28 @@ pub struct Style {
 /// trip through DOCX.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfessionalLayout {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asia_language: Option<String>,
+    /// Compatibility revision of an external DOCX import. Old saved models
+    /// default to zero and may recover layout from their retained original.
+    #[serde(default)]
+    pub docx_import_revision: u8,
+    /// Measured font line metrics used by Office proportional line spacing.
+    /// Empty for older/native documents, which retain their existing defaults.
+    #[serde(default)]
+    pub font_metrics: std::collections::BTreeMap<String, FontMetrics>,
     /// Layout details not represented by the compact legacy paragraph model.
     /// Entries refer to stable block identities and remain optional in old JSON.
     #[serde(default)]
     pub paragraph_formats: Vec<ParagraphFormat>,
     pub header: String,
     pub footer: String,
+    #[serde(default)]
+    pub header_alignment: Option<Alignment>,
+    #[serde(default)]
+    pub footer_alignment: Option<Alignment>,
     pub page_numbers: bool,
     pub different_first_page: bool,
     pub sections: Vec<DocumentSection>,
@@ -261,6 +308,286 @@ pub struct ParagraphFormat {
     pub line_height_at_least: bool,
     pub numbering_label: Option<String>,
     pub alignment: Option<Alignment>,
+    pub contextual_spacing: Option<bool>,
+    /// Headings do not carry the legacy Paragraph's Spacing record.
+    pub spacing: Option<Spacing>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontMetrics {
+    pub ascent: f32,
+    pub descent: f32,
+    pub line_gap: f32,
+    /// OS/2 reports CP932/936/949/950; Word compatibility expands the font's
+    /// ascent and height to 127% before adding its external leading.
+    pub cjk: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FontLineBox {
+    pub font_family: String,
+    pub font_size: f32,
+    pub line_height_pt: f32,
+    pub baseline_pt: f32,
+}
+
+/// Resolve Office auto line spacing using font metrics, in integer twips.
+/// Explicit/exact line spacing wins. No metrics means the legacy renderer
+/// remains in charge, instead of guessing an arbitrary font-height ratio.
+pub fn office_line_box(
+    runs: &[TextRun],
+    spacing: Spacing,
+    format: Option<&ParagraphFormat>,
+    metrics: &std::collections::BTreeMap<String, FontMetrics>,
+) -> Option<FontLineBox> {
+    if metrics.is_empty() || format.is_some_and(|format| format.line_height_at_least) {
+        return None;
+    }
+    let mut selected: Option<(u64, String, f32)> = None;
+    let mut max_descent = 0;
+    for run in runs {
+        if run.text.is_empty() {
+            continue;
+        }
+        let family = run.font_family.as_deref()?;
+        let raw_size = run.font_size.unwrap_or(12.);
+        if !raw_size.is_finite() {
+            return None;
+        }
+        let size = raw_size.clamp(1., 1000.);
+        let normalized = family.trim().trim_matches(['\'', '"']).to_lowercase();
+        let metric = metrics.get(&normalized).or_else(|| metrics.get(family))?;
+        if ![metric.ascent, metric.descent, metric.line_gap]
+            .iter()
+            .all(|value| value.is_finite() && (0. ..=4.).contains(value))
+        {
+            return None;
+        }
+        let ascent = (metric.ascent * size * 20.).round() as u64;
+        let descent = (metric.descent * size * 20.).round() as u64;
+        let gap = (metric.line_gap * size * 20.).round() as u64;
+        let height = if metric.cjk {
+            (ascent + descent) * 127 / 100
+        } else {
+            ascent + descent
+        } + gap;
+        let ascent = if metric.cjk {
+            ascent * 127 / 100
+        } else {
+            ascent
+        } + gap;
+        max_descent = max_descent.max(height - ascent);
+        if selected
+            .as_ref()
+            .is_none_or(|(current, _, _)| ascent > *current)
+        {
+            selected = Some((ascent, family.to_owned(), size));
+        }
+    }
+    let (ascent, font_family, font_size) = selected?;
+    let height = ascent + max_descent;
+    let spacing = format.and_then(|format| format.spacing).unwrap_or(spacing);
+    let exact = format
+        .and_then(|format| format.line_height_pt)
+        .filter(|value| value.is_finite() && *value > 0.)
+        .map(|value| value.clamp(1., 1000.));
+    let line_height_pt = exact.unwrap_or_else(|| {
+        let multiplier = if spacing.line_height.is_finite() {
+            spacing.line_height.clamp(0.5, 10.)
+        } else {
+            1.15
+        };
+        let units = (multiplier * 240.).round() as u64;
+        ((height * units / 240).max(20) as f32 / 20.).min(1000.)
+    });
+    let baseline_pt = if exact.is_some() {
+        ascent as f32 / 20.
+    } else {
+        (ascent as f32 + line_height_pt * 20. - height as f32) / 20.
+    }
+    .clamp(0., line_height_pt);
+    Some(FontLineBox {
+        font_family,
+        font_size,
+        line_height_pt,
+        baseline_pt,
+    })
+}
+
+/// Drawing runs are top-aligned to the shared line box so browser font struts
+/// cannot enlarge its height. Their relative offset restores one common Office
+/// baseline without moving the line boxes or changing wrapping.
+pub fn office_run_offset(
+    run: &TextRun,
+    line: &FontLineBox,
+    metrics: &std::collections::BTreeMap<String, FontMetrics>,
+) -> Option<f32> {
+    let family = run.font_family.as_deref()?;
+    let normalized = family.trim().trim_matches(['\'', '"']).to_lowercase();
+    let metric = metrics.get(&normalized).or_else(|| metrics.get(family))?;
+    if ![metric.ascent, metric.descent]
+        .iter()
+        .all(|v| v.is_finite() && (0. ..=4.).contains(v))
+    {
+        return None;
+    }
+    let size = run.font_size.unwrap_or(line.font_size);
+    if !size.is_finite() {
+        return None;
+    }
+    let size = size.clamp(1., 1000.);
+    let browser_baseline =
+        metric.ascent * size + (line.line_height_pt - (metric.ascent + metric.descent) * size) / 2.;
+    Some((line.baseline_pt - browser_baseline).clamp(-8000., 8000.))
+}
+
+#[cfg(test)]
+mod office_font_line_tests {
+    use super::*;
+    fn metrics() -> std::collections::BTreeMap<String, FontMetrics> {
+        [
+            (
+                "simsun".into(),
+                FontMetrics {
+                    ascent: 220. / 256.,
+                    descent: 36. / 256.,
+                    line_gap: 36. / 256.,
+                    cjk: true,
+                },
+            ),
+            (
+                "times new roman".into(),
+                FontMetrics {
+                    ascent: 1825. / 2048.,
+                    descent: 443. / 2048.,
+                    line_gap: 87. / 2048.,
+                    cjk: false,
+                },
+            ),
+        ]
+        .into()
+    }
+    fn run(text: &str, family: &str) -> TextRun {
+        TextRun {
+            text: text.into(),
+            font_family: Some(family.into()),
+            font_size: Some(12.),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn office_auto_spacing_uses_twips_and_per_run_ascent_descent_maxima() {
+        let spacing = Spacing {
+            before: 0.,
+            after: 6.,
+            line_height: 1.2,
+        };
+        assert_eq!(
+            office_line_box(&[run("中文", "SimSun")], spacing, None, &metrics())
+                .unwrap()
+                .line_height_pt,
+            20.25
+        );
+        assert_eq!(
+            office_line_box(&[run("中文", "SimSun")], spacing, None, &metrics())
+                .unwrap()
+                .baseline_pt,
+            18.1
+        );
+        assert_eq!(
+            office_line_box(
+                &[run("Latin", "Times New Roman")],
+                spacing,
+                None,
+                &metrics()
+            )
+            .unwrap()
+            .line_height_pt,
+            16.55
+        );
+        assert_eq!(
+            office_line_box(
+                &[run("中文", "SimSun"), run("1.", "Times New Roman")],
+                spacing,
+                None,
+                &metrics()
+            )
+            .unwrap()
+            .line_height_pt,
+            20.8
+        );
+        let exact = ParagraphFormat {
+            line_height_pt: Some(20.),
+            ..Default::default()
+        };
+        assert_eq!(
+            office_line_box(&[run("中文", "SimSun")], spacing, Some(&exact), &metrics())
+                .unwrap()
+                .line_height_pt,
+            20.
+        );
+        assert_eq!(
+            office_line_box(&[run("中文", "SimSun")], spacing, Some(&exact), &metrics())
+                .unwrap()
+                .baseline_pt,
+            14.75
+        );
+    }
+    #[test]
+    fn unknown_native_and_invalid_metric_data_use_the_legacy_fallback() {
+        let run = run("中文", "SimSun");
+        assert!(
+            office_line_box(
+                &[run.clone()],
+                Spacing::default(),
+                None,
+                &Default::default()
+            )
+            .is_none()
+        );
+        for value in [-1., 5., f32::INFINITY, f32::NAN] {
+            let mut metrics = metrics();
+            metrics.get_mut("simsun").unwrap().ascent = value;
+            assert!(office_line_box(&[run.clone()], Spacing::default(), None, &metrics).is_none());
+        }
+        let huge = ParagraphFormat {
+            line_height_pt: Some(1e30),
+            ..Default::default()
+        };
+        assert_eq!(
+            office_line_box(&[run], Spacing::default(), Some(&huge), &metrics())
+                .unwrap()
+                .line_height_pt,
+            1000.
+        );
+    }
+
+    #[test]
+    fn symbol_bullet_with_cjk_text_keeps_the_office_line_box() {
+        let mut metrics = metrics();
+        metrics.insert(
+            "symbol".into(),
+            FontMetrics {
+                ascent: 1.00537109375,
+                descent: 0.2197265625,
+                line_gap: 0.,
+                cjk: false,
+            },
+        );
+        let line = office_line_box(
+            &[run("中文", "SimSun"), run("•", "Symbol")],
+            Spacing {
+                before: 0.,
+                after: 6.,
+                line_height: 1.2,
+            },
+            None,
+            &metrics,
+        )
+        .unwrap();
+        assert_eq!(line.line_height_pt, 20.85);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,0 +1,178 @@
+{
+  "SimSun": {
+    "ascent": 0.859375,
+    "descent": 0.140625,
+    "line_gap": 0.140625,
+    "cjk": true,
+    "units_per_em": 256,
+    "source_file": "simsun.ttc",
+    "postscript_name": "SimSun"
+  },
+  "NSimSun": {
+    "ascent": 0.859375,
+    "descent": 0.140625,
+    "line_gap": 0.140625,
+    "cjk": true,
+    "units_per_em": 256,
+    "source_file": "simsun.ttc",
+    "postscript_name": "NSimSun"
+  },
+  "SimHei": {
+    "ascent": 0.859375,
+    "descent": 0.140625,
+    "line_gap": 0.140625,
+    "cjk": true,
+    "units_per_em": 256,
+    "source_file": "simhei.ttf",
+    "postscript_name": "SimHei"
+  },
+  "Microsoft YaHei": {
+    "ascent": 1.05810546875,
+    "descent": 0.26171875,
+    "line_gap": 0,
+    "cjk": true,
+    "units_per_em": 2048,
+    "source_file": "msyh.ttc",
+    "postscript_name": "MicrosoftYaHei"
+  },
+  "Microsoft YaHei UI": {
+    "ascent": 1.015625,
+    "descent": 0.25439453125,
+    "line_gap": 0,
+    "cjk": true,
+    "units_per_em": 2048,
+    "source_file": "msyh.ttc",
+    "postscript_name": "MicrosoftYaHeiUI"
+  },
+  "Microsoft JhengHei": {
+    "ascent": 1.07568359375,
+    "descent": 0.25439453125,
+    "line_gap": 0,
+    "cjk": true,
+    "units_per_em": 2048,
+    "source_file": "msjh.ttc",
+    "postscript_name": "MicrosoftJhengHeiRegular"
+  },
+  "Microsoft JhengHei UI": {
+    "ascent": 1.015625,
+    "descent": 0.25439453125,
+    "line_gap": 0,
+    "cjk": true,
+    "units_per_em": 2048,
+    "source_file": "msjh.ttc",
+    "postscript_name": "MicrosoftJhengHeiUIRegular"
+  },
+  "FangSong": {
+    "ascent": 0.859375,
+    "descent": 0.140625,
+    "line_gap": 0.140625,
+    "cjk": true,
+    "units_per_em": 256,
+    "source_file": "simfang.ttf",
+    "postscript_name": "FangSong"
+  },
+  "KaiTi": {
+    "ascent": 0.859375,
+    "descent": 0.140625,
+    "line_gap": 0.140625,
+    "cjk": true,
+    "units_per_em": 256,
+    "source_file": "simkai.ttf",
+    "postscript_name": "KaiTi"
+  },
+  "Times New Roman": {
+    "ascent": 0.89111328125,
+    "descent": 0.21630859375,
+    "line_gap": 0.04248046875,
+    "cjk": false,
+    "units_per_em": 2048,
+    "source_file": "times.ttf",
+    "postscript_name": "TimesNewRomanPSMT"
+  },
+  "Arial": {
+    "ascent": 0.9052734375,
+    "descent": 0.2119140625,
+    "line_gap": 0.03271484375,
+    "cjk": false,
+    "units_per_em": 2048,
+    "source_file": "arial.ttf",
+    "postscript_name": "ArialMT"
+  },
+  "Calibri": {
+    "ascent": 0.75,
+    "descent": 0.25,
+    "line_gap": 0.220703125,
+    "cjk": false,
+    "units_per_em": 2048,
+    "source_file": "calibri.ttf",
+    "postscript_name": "Calibri"
+  },
+  "Cambria": {
+    "ascent": 0.9501953125,
+    "descent": 0.22216796875,
+    "line_gap": 0,
+    "cjk": false,
+    "units_per_em": 2048,
+    "source_file": "cambria.ttc",
+    "postscript_name": "Cambria"
+  },
+  "Cambria Math": {
+    "ascent": 0.77783203125,
+    "descent": 0.22216796875,
+    "line_gap": 0.17236328125,
+    "cjk": false,
+    "units_per_em": 2048,
+    "source_file": "cambria.ttc",
+    "postscript_name": "CambriaMath"
+  },
+  "Segoe UI": {
+    "ascent": 1.0791015625,
+    "descent": 0.2509765625,
+    "line_gap": 0,
+    "cjk": false,
+    "units_per_em": 2048,
+    "source_file": "segoeui.ttf",
+    "postscript_name": "SegoeUI"
+  },
+  "Symbol": {
+    "ascent": 1.00537109375,
+    "descent": 0.2197265625,
+    "line_gap": 0,
+    "cjk": false,
+    "source_file": "symbol.ttf"
+  },
+  "Wingdings": {
+    "ascent": 0.89892578125,
+    "descent": 0.2109375,
+    "line_gap": 0,
+    "cjk": false,
+    "source_file": "wingding.ttf"
+  },
+  "MS Gothic": {
+    "ascent": 0.859375,
+    "descent": 0.140625,
+    "line_gap": 0,
+    "cjk": true,
+    "units_per_em": 256,
+    "source_file": "msgothic.ttc",
+    "postscript_name": "MS-Gothic"
+  },
+  "MS UI Gothic": {
+    "ascent": 0.859375,
+    "descent": 0.140625,
+    "line_gap": 0,
+    "cjk": true,
+    "units_per_em": 256,
+    "source_file": "msgothic.ttc",
+    "postscript_name": "MS-UIGothic"
+  },
+  "MS PGothic": {
+    "ascent": 0.859375,
+    "descent": 0.140625,
+    "line_gap": 0,
+    "cjk": true,
+    "units_per_em": 256,
+    "source_file": "msgothic.ttc",
+    "postscript_name": "MS-PGothic"
+  }
+}

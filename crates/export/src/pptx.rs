@@ -12,14 +12,18 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use syntra_doc_engine::slides::{
     ChartType, ElementGroup, Presentation, Shape, ShapeType, Slide, SlideChart, SlideElement,
-    SlideImage, SlideTextRun, SlideVideo, TextBox,
+    SlideImage, SlideTable, SlideTextLayout, SlideTextRun, SlideVideo, TableCellBorders, TextBox,
 };
 use uuid::Uuid;
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
+#[path = "pptx_chart_style.rs"]
+mod chart_style;
 #[path = "pptx_import.rs"]
 pub(crate) mod external_import;
+#[path = "pptx_table.rs"]
+mod table_export;
 
 const MAX_MEDIA_BYTES: usize = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES * 3 / 4;
 
@@ -42,6 +46,7 @@ struct SlideResources {
 
 /// Convert a [`Presentation`] to a `.pptx` byte vector (ZIP archive with Open XML).
 pub fn presentation_to_pptx(pres: &Presentation) -> Result<Vec<u8>, String> {
+    table_export::validate_tables(pres)?;
     crate::ooxml_import::model_budget(pres)?;
     let to_emu = |pixels: f32| -> Result<i64, String> {
         if !pixels.is_finite() || pixels <= 0.0 || pixels > 100_000.0 {
@@ -202,6 +207,9 @@ pub fn presentation_to_pptx(pres: &Presentation) -> Result<Vec<u8>, String> {
         zip.start_file(format!("ppt/slides/slide{}.xml", i + 1), options)
             .map_err(|e| e.to_string())?;
         let xml = slide_to_xml(slide, slide_resources);
+        if xml.len() as u64 > crate::ooxml::MAX_PART_BYTES {
+            return Err("Native slide XML exceeds the Office part expansion budget".into());
+        }
         write!(zip, "{}", xml).map_err(|e| e.to_string())?;
 
         if !slide.notes.is_empty() {
@@ -265,12 +273,13 @@ fn collect_slide_resources(
         chart_index: &mut usize,
     ) {
         for element in elements {
-            let runs = match element {
-                SlideElement::TextBox(t) => Some(t.content.as_slice()),
-                SlideElement::Shape(s) => s.text.as_deref(),
-                _ => None,
+            let runs: Vec<&SlideTextRun> = match element {
+                SlideElement::TextBox(t) => t.content.iter().collect(),
+                SlideElement::Shape(s) => s.text.iter().flatten().collect(),
+                SlideElement::Table(t) => t.cells.iter().flat_map(|c| &c.content).collect(),
+                _ => Vec::new(),
             };
-            for run in runs.into_iter().flatten() {
+            for run in runs {
                 if let Some(url) = run
                     .link
                     .as_ref()
@@ -340,7 +349,7 @@ fn collect_slide_resources(
                     media_index,
                     chart_index,
                 ),
-                SlideElement::TextBox(_) | SlideElement::Shape(_) => {}
+                SlideElement::TextBox(_) | SlideElement::Shape(_) | SlideElement::Table(_) => {}
             }
         }
     }
@@ -520,6 +529,7 @@ fn element_to_xml(
         SlideElement::Image(value) => value.id,
         SlideElement::Shape(value) => value.id,
         SlideElement::Chart(value) => value.id,
+        SlideElement::Table(value) => value.id,
         SlideElement::Video(value) => value.id,
         SlideElement::Group(value) => value.id,
     };
@@ -533,6 +543,7 @@ fn element_to_xml(
         SlideElement::Chart(value) => {
             chart_to_xml(value, resources.charts.get(&value.id), sp_id, xml)
         }
+        SlideElement::Table(value) => table_export::table_to_xml(value, sp_id, resources, xml),
         SlideElement::Video(value) => {
             video_to_xml(value, resources.videos.get(&value.id), sp_id, xml)
         }
@@ -721,6 +732,7 @@ fn element_bounds(element: &SlideElement) -> (f32, f32, f32, f32) {
         SlideElement::Image(value) => (value.x, value.y, value.width, value.height),
         SlideElement::Shape(value) => (value.x, value.y, value.width, value.height),
         SlideElement::Chart(value) => (value.x, value.y, value.width, value.height),
+        SlideElement::Table(value) => (value.x, value.y, value.width, value.height),
         SlideElement::Video(value) => (value.x, value.y, value.width, value.height),
         SlideElement::Group(value) => group_bounds(&value.elements),
     }
@@ -874,7 +886,7 @@ fn write_chart_parts<W: Write + Seek>(
                 if let Some((_, chart_number)) = resources.charts.get(&chart.id) {
                     zip.start_file(format!("ppt/charts/chart{chart_number}.xml"), options)
                         .map_err(|error| error.to_string())?;
-                    write!(zip, "{}", chart_part_xml(chart)).map_err(|error| error.to_string())?;
+                    write!(zip, "{}", chart_part_xml(chart)?).map_err(|error| error.to_string())?;
                 }
             }
             SlideElement::Group(group) => {
@@ -886,7 +898,23 @@ fn write_chart_parts<W: Write + Seek>(
     Ok(())
 }
 
-pub(crate) fn chart_part_xml(chart: &SlideChart) -> String {
+pub(crate) fn chart_part_xml(chart: &SlideChart) -> Result<String, String> {
+    let points = chart.data.datasets.iter().try_fold(
+        chart
+            .data
+            .labels
+            .len()
+            .checked_add(chart.data.datasets.len())
+            .ok_or("Native chart point budget exceeded")?,
+        |count, series| {
+            count
+                .checked_add(series.values.len())
+                .ok_or("Native chart point budget exceeded")
+        },
+    )?;
+    if points > 100_000 {
+        return Err("Native chart point budget exceeded".into());
+    }
     let (tag, prefix, suffix, axes) = match chart.chart_type {
         ChartType::Bar => (
             "barChart",
@@ -915,19 +943,59 @@ pub(crate) fn chart_part_xml(chart: &SlideChart) -> String {
         ),
         ChartType::Area => ("areaChart", "<c:grouping val=\"standard\"/>", "", true),
     };
+    let style = chart.data.presentation.as_ref();
+    let prefix = if matches!(chart.chart_type, ChartType::Bar) {
+        format!(
+            "<c:barDir val=\"{}\"/><c:grouping val=\"{}\"/>",
+            if style.is_some_and(|s| s.horizontal) {
+                "bar"
+            } else {
+                "col"
+            },
+            escape_xml(
+                style
+                    .and_then(|s| s.grouping.as_deref())
+                    .unwrap_or("clustered")
+            )
+        )
+    } else if matches!(chart.chart_type, ChartType::Pie | ChartType::Doughnut) {
+        format!(
+            "<c:varyColors val=\"{}\"/>",
+            u8::from(style.map(|s| s.vary_colors).unwrap_or(true))
+        )
+    } else {
+        prefix.into()
+    };
     let mut xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:autoTitleDeleted val="1"/><c:plotArea><c:layout/><c:{tag}>{prefix}"#
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart>{}<c:plotArea><c:layout/><c:{tag}>{prefix}"#,
+        chart_style::title_xml(style.and_then(|s| s.title.as_deref()), style)
     );
     for (series_index, dataset) in chart.data.datasets.iter().enumerate() {
         xml.push_str(&format!(
             "<c:ser><c:idx val=\"{series_index}\"/><c:order val=\"{series_index}\"/><c:tx><c:v>{}</c:v></c:tx>",
             escape_xml(&dataset.name)
         ));
-        if let Some(color) = &dataset.color {
-            xml.push_str(&format!(
-                "<c:spPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></c:spPr>",
-                escape_xml(color.trim_start_matches('#'))
-            ));
+        // Standalone chart parts must not depend on an application's implicit
+        // theme palette. LibreOffice also needs explicit per-point pie fills.
+        let series_color = chart_style::series_color(dataset.color.as_deref(), series_index);
+        xml.push_str(&format!(
+            "<c:spPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></c:spPr>",
+            series_color.trim_start_matches('#')
+        ));
+        let colors = style.and_then(|s| s.point_colors.get(series_index));
+        for i in 0..dataset.values.len() {
+            let explicit = colors.and_then(|c| c.get(i)).and_then(Option::as_deref);
+            if matches!(chart.chart_type, ChartType::Pie | ChartType::Doughnut)
+                || explicit.is_some()
+            {
+                let fallback = if style.map(|s| s.vary_colors).unwrap_or(true) {
+                    chart_style::series_color(None, i)
+                } else {
+                    series_color.clone()
+                };
+                let color = chart_style::series_color(explicit.or(Some(&fallback)), i);
+                xml.push_str(&format!("<c:dPt><c:idx val=\"{i}\"/><c:spPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></c:spPr></c:dPt>",color.trim_start_matches('#')));
+            }
         }
         if matches!(chart.chart_type, ChartType::Scatter) {
             xml.push_str("<c:xVal><c:numLit>");
@@ -963,16 +1031,77 @@ pub(crate) fn chart_part_xml(chart: &SlideChart) -> String {
         });
         xml.push_str("</c:ser>");
     }
+    if let Some(style) = style {
+        xml.push_str(&chart_style::labels_xml(&style.labels));
+    }
+    if matches!(chart.chart_type, ChartType::Bar) {
+        xml.push_str(&format!(
+            "<c:gapWidth val=\"{}\"/>",
+            style
+                .and_then(|s| s.gap_width)
+                .unwrap_or(150.)
+                .clamp(0., 500.)
+                .round() as u32
+        ));
+    }
     if axes {
         xml.push_str("<c:axId val=\"123456\"/><c:axId val=\"654321\"/>");
     }
-    xml.push_str(suffix);
+    if matches!(chart.chart_type, ChartType::Doughnut) {
+        xml.push_str(&format!(
+            "<c:holeSize val=\"{}\"/>",
+            style
+                .and_then(|s| s.hole_size)
+                .unwrap_or(50.)
+                .clamp(10., 90.) as u32
+        ));
+    } else {
+        xml.push_str(suffix);
+    }
+    if matches!(chart.chart_type, ChartType::Pie | ChartType::Doughnut) {
+        if let Some(angle) = style.and_then(|s| s.first_slice_angle) {
+            xml.push_str(&format!("<c:firstSliceAng val=\"{}\"/>", angle as u32));
+        }
+    }
     xml.push_str(&format!("</c:{tag}>"));
     if axes {
-        xml.push_str("<c:catAx><c:axId val=\"123456\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/><c:axPos val=\"b\"/><c:crossAx val=\"654321\"/><c:crosses val=\"autoZero\"/></c:catAx><c:valAx><c:axId val=\"654321\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/><c:axPos val=\"l\"/><c:crossAx val=\"123456\"/><c:crosses val=\"autoZero\"/></c:valAx>");
+        xml.push_str(&chart_style::axis_xml(
+            "catAx",
+            123456,
+            654321,
+            style.map(|s| &s.category_axis),
+            style,
+        ));
+        xml.push_str(&chart_style::axis_xml(
+            "valAx",
+            654321,
+            123456,
+            style.map(|s| &s.value_axis),
+            style,
+        ));
     }
-    xml.push_str("</c:plotArea><c:plotVisOnly val=\"1\"/></c:chart></c:chartSpace>");
-    xml
+    xml.push_str("</c:plotArea>");
+    if let Some(style) = style.filter(|s| s.show_legend) {
+        xml.push_str(&format!(
+            "<c:legend><c:legendPos val=\"{}\"/><c:layout/><c:overlay val=\"0\"/></c:legend>",
+            escape_xml(match style.legend_position.as_str() {
+                "right" => "r",
+                "left" => "l",
+                "top" => "t",
+                "bottom" => "b",
+                s => s,
+            })
+        ));
+    }
+    xml.push_str("<c:plotVisOnly val=\"1\"/></c:chart>");
+    if let Some(style) = style {
+        xml.push_str(&chart_style::text_properties_xml(style));
+    }
+    xml.push_str("</c:chartSpace>");
+    if xml.len() as u64 > crate::ooxml::MAX_PART_BYTES {
+        return Err("Native chart XML exceeds the Office part expansion budget".into());
+    }
+    Ok(xml)
 }
 
 fn text_box_to_xml(tb: &TextBox, sp_id: u32, resources: &SlideResources, xml: &mut String) {
@@ -998,12 +1127,15 @@ fn text_box_to_xml(tb: &TextBox, sp_id: u32, resources: &SlideResources, xml: &m
     }
     slide_border_to_xml(tb.border.as_ref(), xml);
     xml.push_str("</p:spPr>");
-    let padding = (tb.padding.max(0.0) * 9525.0) as i64;
-    xml.push_str(&format!("<p:txBody><a:bodyPr lIns=\"{padding}\" rIns=\"{padding}\" tIns=\"{padding}\" bIns=\"{padding}\"/><a:lstStyle/><a:p>"));
-    for run in &tb.content {
-        run_to_xml(run, resources, xml);
-    }
-    xml.push_str("</a:p></p:txBody></p:sp>");
+    table_export::text_body_to_xml(
+        &tb.content,
+        tb.text_layout.as_ref(),
+        tb.padding,
+        "p:txBody",
+        resources,
+        xml,
+    );
+    xml.push_str("</p:sp>");
 }
 
 fn run_to_xml(run: &SlideTextRun, resources: &SlideResources, xml: &mut String) {
@@ -1042,7 +1174,10 @@ fn run_to_xml(run: &SlideTextRun, resources: &SlideResources, xml: &mut String) 
             ));
         }
         if let Some(ref font) = run.font_family {
-            xml.push_str(&format!("<a:latin typeface=\"{}\"/>", escape_xml(font)));
+            xml.push_str(&format!(
+                "<a:latin typeface=\"{0}\"/><a:ea typeface=\"{0}\"/><a:cs typeface=\"{0}\"/>",
+                escape_xml(font)
+            ));
         }
         if let Some(id) = run.link.as_ref().and_then(|url| resources.links.get(url)) {
             xml.push_str(&format!("<a:hlinkClick r:id=\"{}\"/>", escape_xml(id)));
@@ -1213,6 +1348,7 @@ mod tests {
             height: 180.0,
             chart_type: ChartType::Bar,
             data: ChartData {
+                presentation: None,
                 labels: vec!["Q1".into(), "Q2".into()],
                 datasets: vec![Dataset {
                     name: "Revenue".into(),

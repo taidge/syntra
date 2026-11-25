@@ -1,5 +1,6 @@
 //! Read standard SpreadsheetML features independently of syntra native caches.
 use crate::ooxml_import::{self as xml, Archive, Node, warn};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::collections::{BTreeMap, BTreeSet};
 use syntra_doc_engine::calc::*;
 #[derive(Default)]
@@ -9,6 +10,7 @@ struct Styles {
     differential: Vec<CellFormat>,
     colors: Vec<String>,
     date_formats: BTreeSet<usize>,
+    general_alignments: BTreeSet<usize>,
 }
 fn rgb(node: &Node, colors: &[String]) -> Option<String> {
     let color = if let Some(color) = node.attr("rgb") {
@@ -105,7 +107,10 @@ fn fill(format: &mut CellFormat, node: &Node, colors: &[String], warnings: &mut 
             );
         }
         if pattern.attr("patternType") != Some("none") {
-            format.bg_color = pattern.child("fgColor").and_then(|n| rgb(n, colors));
+            format.bg_color = pattern
+                .child("fgColor")
+                .or_else(|| pattern.child("bgColor"))
+                .and_then(|n| rgb(n, colors));
         }
     }
     if let Some(gradient) = node.child("gradientFill") {
@@ -364,10 +369,22 @@ fn styles(
             if let Some(node) = edges.get(integer("borderId")) {
                 borders(&mut format, node, &result.colors, warnings);
             }
-            if let Some(node) = xf
-                .child("alignment")
-                .or_else(|| base.and_then(|n| n.child("alignment")))
+            let mut alignment_node = base.and_then(|n| n.child("alignment")).cloned();
+            if let Some(local) = xf.child("alignment") {
+                if let Some(inherited) = &mut alignment_node {
+                    inherited.attrs.extend(local.attrs.clone());
+                } else {
+                    alignment_node = Some(local.clone());
+                }
+            }
+            if alignment_node
+                .as_ref()
+                .and_then(|n| n.attr("horizontal"))
+                .is_none_or(|value| value == "general")
             {
+                result.general_alignments.insert(index);
+            }
+            if let Some(node) = &alignment_node {
                 alignment(&mut format, node, warnings);
             }
             let id = integer("numFmtId") as u32;
@@ -624,6 +641,7 @@ fn chart(
     part: &str,
     sheet: &Sheet,
     anchor: &Node,
+    layout: &SheetDrawingLayout,
     warnings: &mut Vec<String>,
     points_remaining: &mut usize,
 ) -> Option<SheetChart> {
@@ -656,12 +674,6 @@ fn chart(
             anchor_start.col.saturating_add(8),
         ),
     );
-    if anchor.name != "twoCellAnchor" {
-        warn(
-            warnings,
-            "One-cell/absolute chart anchors are approximated as cell-grid rectangles; original pixel offsets retained in the upload.",
-        );
-    }
     let mut sources = Vec::new();
     let mut first = None;
     let mut last = None;
@@ -714,7 +726,83 @@ fn chart(
         anchor_end,
         cached_data: Some(data),
         series_sources: sources,
+        drawing: Some(drawing_position(layout, anchor).1),
     })
+}
+
+fn drawing_position(layout: &SheetDrawingLayout, anchor: &Node) -> (CellRef, SheetDrawingPosition) {
+    let point = |name: &str| {
+        let node = anchor.child(name);
+        let n = |key: &str| {
+            node.and_then(|n| n.child(key))
+                .and_then(|n| n.all_text().parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+                .unwrap_or(0.)
+                .max(0.)
+        };
+        (
+            CellRef::new((n("row") as u32).min(1048575), (n("col") as u32).min(16383)),
+            n("colOff") / 9525.,
+            n("rowOff") / 9525.,
+        )
+    };
+    let (start, mut x, mut y) = point("from");
+    let extent = anchor.child("ext");
+    let (mut width, mut height) = (
+        extent.and_then(|n| n.num("cx")).unwrap_or(0.) / 9525.,
+        extent.and_then(|n| n.num("cy")).unwrap_or(0.) / 9525.,
+    );
+    if anchor.name == "twoCellAnchor" {
+        let (end, ex, ey) = point("to");
+        width = layout.column_offset(end.col) - layout.column_offset(start.col) + ex - x;
+        height = layout.row_offset(end.row) - layout.row_offset(start.row) + ey - y;
+    } else if anchor.name == "absoluteAnchor" {
+        x = anchor.child("pos").and_then(|n| n.num("x")).unwrap_or(0.) / 9525.;
+        y = anchor.child("pos").and_then(|n| n.num("y")).unwrap_or(0.) / 9525.;
+    }
+    (
+        start,
+        SheetDrawingPosition {
+            offset_x: x.clamp(0., 100000.) as f32,
+            offset_y: y.clamp(0., 100000.) as f32,
+            width: width.clamp(1., 100000.) as f32,
+            height: height.clamp(1., 100000.) as f32,
+        },
+    )
+}
+
+fn drawing_image(
+    archive: &mut Archive<'_>,
+    part: &str,
+    remaining: &mut usize,
+) -> Result<String, String> {
+    let bytes = xml::bytes_limit(archive, part, (*remaining).min(16 * 1024 * 1024))?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|e| format!("Invalid or oversized worksheet image: {e}"))?;
+    let (mime, bytes) = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        ("image/png", bytes)
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        ("image/jpeg", bytes)
+    } else {
+        let mut out = std::io::Cursor::new(Vec::new());
+        decoded
+            .write_to(&mut out, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        ("image/png", out.into_inner())
+    };
+    *remaining = remaining
+        .checked_sub(bytes.len())
+        .ok_or("Worksheet images exceed the embedded media budget")?;
+    Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
 }
 fn drawings(
     archive: &mut Archive<'_>,
@@ -723,7 +811,12 @@ fn drawings(
     rels: &BTreeMap<String, xml::Relationship>,
     warnings: &mut Vec<String>,
     points_remaining: &mut usize,
+    drawings_remaining: &mut usize,
+    media_remaining: &mut usize,
 ) -> Result<(), String> {
+    let layout = sheet.drawing_layout();
+    let mut sheet_drawings_remaining =
+        MAX_SHEET_DRAWINGS.saturating_sub(sheet.images.len().saturating_add(sheet.charts.len()));
     for drawing in root.children.iter().filter(|n| n.name == "drawing") {
         let Some(relation) = drawing
             .attr("r:id")
@@ -733,6 +826,16 @@ fn drawings(
             continue;
         };
         let data = xml::part(archive, &relation.target)?;
+        let count = data
+            .descendants("pic")
+            .len()
+            .saturating_add(data.descendants("chart").len());
+        sheet_drawings_remaining = sheet_drawings_remaining
+            .checked_sub(count)
+            .ok_or("Worksheet exceeds the 1000-drawing limit")?;
+        *drawings_remaining = drawings_remaining
+            .checked_sub(count)
+            .ok_or("Workbook exceeds the 5000-drawing limit")?;
         let links = xml::relationships(archive, &relation.target)?;
         for anchor in &data.children {
             if let Some(part) = anchor
@@ -745,20 +848,58 @@ fn drawings(
                     &part.target,
                     sheet,
                     anchor,
+                    &layout,
                     warnings,
                     points_remaining,
                 )
             {
                 sheet.charts.push(chart);
-                warn(
-                    warnings,
-                    "Worksheet charts and representable bindings are preserved for Office export; the current Calc grid does not render a chart overlay.",
-                );
             }
-            if !anchor.descendants("pic").is_empty() || !anchor.descendants("sp").is_empty() {
+            for picture in anchor.descendants("pic") {
+                let Some(link) = picture
+                    .desc("blip")
+                    .and_then(|n| n.attr("r:embed"))
+                    .and_then(|id| links.get(id))
+                    .filter(|r| !r.external)
+                else {
+                    warn(
+                        warnings,
+                        "External or missing worksheet image is not fetched; original retained.",
+                    );
+                    continue;
+                };
+                let data_url = drawing_image(archive, &link.target, media_remaining)?;
+                let (anchor_start, drawing) = drawing_position(&layout, anchor);
+                let crop = picture.desc("srcRect");
+                let pct = |key| {
+                    crop.and_then(|n| n.num(key))
+                        .unwrap_or(0.)
+                        .clamp(0., 99000.) as f32
+                        / 100000.
+                };
+                let rotation = picture
+                    .desc("xfrm")
+                    .and_then(|n| n.num("rot"))
+                    .unwrap_or(0.) as f32
+                    / 60000.;
+                sheet.images.push(SheetImage {
+                    id: uuid::Uuid::new_v4(),
+                    name: picture
+                        .desc("cNvPr")
+                        .and_then(|n| n.attr("name"))
+                        .unwrap_or("Worksheet image")
+                        .into(),
+                    data_url,
+                    anchor_start,
+                    drawing,
+                    rotation,
+                    crop: [pct("l"), pct("t"), pct("r"), pct("b")],
+                });
+            }
+            if !anchor.descendants("sp").is_empty() {
                 warn(
                     warnings,
-                    "Worksheet drawing images/shapes are outside the current Calc model; original drawing objects remain downloadable.",
+                    "Worksheet vector shapes are retained in the original; images and charts are rendered as editable worksheet objects.",
                 );
             }
         }
@@ -1005,6 +1146,8 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
         ));
     }
     let mut points_remaining = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;
+    let mut drawings_remaining = MAX_WORKBOOK_DRAWINGS;
+    let mut media_remaining = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 2;
     for (name, root, relations) in &sheets {
         let Some(sheet) = workbook.sheets.iter_mut().find(|s| &s.name == name) else {
             continue;
@@ -1086,6 +1229,19 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
                 );
             }
         }
+        // A missing formula cache is evaluated on a disposable sheet. Alignment
+        // follows its true result type without replacing imported cached data.
+        let evaluated = if sheet
+            .cells
+            .values()
+            .any(|cell| cell.formula.is_some() && matches!(cell.value, CellValue::Empty))
+        {
+            let mut evaluated = sheet.clone();
+            evaluated.recalculate();
+            Some(evaluated)
+        } else {
+            None
+        };
         for cell in root.descendants("c") {
             let Some(reference) = cell.attr("r").and_then(CellRef::from_a1) else {
                 continue;
@@ -1099,12 +1255,15 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
                 .or_else(|| row_styles.get(&reference.row).copied())
                 .or_else(|| column_styles.get(&reference.col).copied())
                 .unwrap_or(0);
-            let stored = sheet.cells.entry(reference).or_insert_with(|| Cell {
-                value: CellValue::Empty,
-                formula: None,
-                format: CellFormat::default(),
-                comment: None,
-            });
+            let stored = sheet
+                .cells
+                .entry(reference.clone())
+                .or_insert_with(|| Cell {
+                    value: CellValue::Empty,
+                    formula: None,
+                    format: CellFormat::default(),
+                    comment: None,
+                });
             if let Some(format) = styles.formats.get(index) {
                 stored.format = format.clone();
             } else if index > 0 {
@@ -1121,6 +1280,21 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
             {
                 stored.value = CellValue::Date(value);
             }
+            if styles.general_alignments.contains(&index) || styles.formats.get(index).is_none() {
+                let value = if stored.formula.is_some() && matches!(stored.value, CellValue::Empty)
+                {
+                    evaluated
+                        .as_ref()
+                        .and_then(|sheet| sheet.get_cell(reference.row, reference.col))
+                        .map(|cell| &cell.value)
+                        .unwrap_or(&stored.value)
+                } else {
+                    &stored.value
+                };
+                if matches!(value, CellValue::Number(_) | CellValue::Date(_)) {
+                    stored.format.horizontal_align = HAlign::Right;
+                }
+            }
         }
         annotations(
             sheet,
@@ -1136,6 +1310,8 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
             relations,
             &mut workbook.metadata.import_warnings,
             &mut points_remaining,
+            &mut drawings_remaining,
+            &mut media_remaining,
         )?;
         if root.child("hyperlinks").is_some() {
             warn(

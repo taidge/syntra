@@ -412,6 +412,44 @@ fn conditional_style_for(
     })
 }
 
+fn merge_conditional_style(mut base: CellStyle, differential: CellStyle) -> CellStyle {
+    base.bold |= differential.bold;
+    base.italic |= differential.italic;
+    base.underline |= differential.underline;
+    if !differential.fill_color.is_empty() {
+        base.fill_color = differential.fill_color;
+    }
+    if !differential.text_color.is_empty() {
+        base.text_color = differential.text_color;
+    }
+    if !differential.font_family.is_empty() {
+        base.font_family = differential.font_family;
+    }
+    if !differential.font_size.is_empty() {
+        base.font_size = differential.font_size;
+    }
+    if !differential.number_format.is_empty()
+        && !differential.number_format.eq_ignore_ascii_case("general")
+    {
+        base.number_format = differential.number_format;
+    }
+    for (name, edge) in [
+        ("top", &mut base.borders.top),
+        ("right", &mut base.borders.right),
+        ("bottom", &mut base.borders.bottom),
+        ("left", &mut base.borders.left),
+    ] {
+        if differential.border_details[name].is_object() {
+            *edge = true;
+            if !base.border_details.is_object() {
+                base.border_details = serde_json::json!({});
+            }
+            base.border_details[name] = differential.border_details[name].clone();
+        }
+    }
+    base
+}
+
 fn validation_error_for(
     content: &serde_json::Value,
     sheet: usize,
@@ -612,6 +650,9 @@ struct CellStyle {
     underline: bool,
     number_format: String,
     borders: CellBorders,
+    border_details: serde_json::Value,
+    wrap_text: Option<bool>,
+    vertical_align: Option<String>,
     /// Horizontal alignment: "", "left", "center" or "right".
     align: String,
     /// Background colour as a CSS hex string (empty = none).
@@ -666,25 +707,7 @@ fn current_selection_cells(
 }
 
 fn format_number(value: &str, fmt: &str) -> String {
-    match fmt {
-        "currency" => value
-            .parse::<f64>()
-            .map(|n| format!("${:.2}", n))
-            .unwrap_or_else(|_| value.to_string()),
-        "percent" => value
-            .parse::<f64>()
-            .map(|n| format!("{:.0}%", n * 100.0))
-            .unwrap_or_else(|_| value.to_string()),
-        "decimal0" => value
-            .parse::<f64>()
-            .map(|n| format!("{:.0}", n))
-            .unwrap_or_else(|_| value.to_string()),
-        "decimal2" => value
-            .parse::<f64>()
-            .map(|n| format!("{:.2}", n))
-            .unwrap_or_else(|_| value.to_string()),
-        _ => value.to_string(),
-    }
+    syntra_doc_engine::calc::format_display_value(value, fmt).text
 }
 
 fn style_to_json(style: &CellStyle) -> Option<serde_json::Value> {
@@ -744,10 +767,14 @@ fn style_to_value(style: &CellStyle) -> serde_json::Value {
             .to_string(),
         ),
     );
-    obj.insert(
-        "vertical_align".to_string(),
-        serde_json::Value::String("Bottom".into()),
-    );
+    if let Some(align) = style.vertical_align.as_deref() {
+        let align = match align {
+            "top" => "Top",
+            "middle" | "center" => "Middle",
+            _ => "Bottom",
+        };
+        obj.insert("vertical_align".to_string(), align.into());
+    }
     obj.insert(
         "number_format".to_string(),
         if !style.number_format.is_empty() && style.number_format != "general" {
@@ -758,14 +785,21 @@ fn style_to_value(style: &CellStyle) -> serde_json::Value {
     );
     let b = &style.borders;
     if b.top || b.right || b.bottom || b.left {
-        let edge = || serde_json::json!({ "style": "Thin", "color": "#000000" });
+        let edge = |name: &str| {
+            style
+                .border_details
+                .get(name)
+                .filter(|v| v.is_object())
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({ "style": "Thin", "color": "#000000" }))
+        };
         obj.insert(
             "borders".to_string(),
             serde_json::json!({
-                "top": b.top.then(edge),
-                "right": b.right.then(edge),
-                "bottom": b.bottom.then(edge),
-                "left": b.left.then(edge),
+                "top": b.top.then(||edge("top")),
+                "right": b.right.then(||edge("right")),
+                "bottom": b.bottom.then(||edge("bottom")),
+                "left": b.left.then(||edge("left")),
             }),
         );
     } else {
@@ -774,7 +808,9 @@ fn style_to_value(style: &CellStyle) -> serde_json::Value {
             serde_json::json!({ "top": null, "right": null, "bottom": null, "left": null }),
         );
     }
-    obj.insert("wrap_text".to_string(), serde_json::Value::Bool(false));
+    if let Some(wrap) = style.wrap_text {
+        obj.insert("wrap_text".to_string(), serde_json::Value::Bool(wrap));
+    }
     serde_json::Value::Object(obj)
 }
 
@@ -829,6 +865,12 @@ fn style_from_json(v: &serde_json::Value) -> CellStyle {
             .unwrap_or("general")
             .to_string(),
         borders,
+        border_details: v.get("borders").cloned().unwrap_or(serde_json::Value::Null),
+        wrap_text: v.get("wrap_text").and_then(|v| v.as_bool()),
+        vertical_align: v
+            .get("vertical_align")
+            .and_then(|v| v.as_str())
+            .map(str::to_ascii_lowercase),
         align: v
             .get("horizontal_align")
             .and_then(|value| value.as_str())

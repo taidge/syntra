@@ -10,29 +10,32 @@ pub(super) fn render(content: &Value, reader: bool) -> Result<PrintDocument, Str
     }
     let mut body = String::new();
     let mut budget_cells = MAX_OBJECTS;
-    for sheet in &mut workbook.sheets {
+    let mut budget_drawings = MAX_WORKBOOK_DRAWINGS;
+    let mut budget_pages = 500usize;
+    let (header_width, header_height) = if reader { (28., 20.) } else { (0., 0.) };
+    for (sheet_index, sheet) in workbook.sheets.iter_mut().enumerate() {
         sheet.recalculate();
         let rows = sheet
             .cells
             .keys()
-            .map(|cell| cell.row.saturating_add(1))
+            .map(|c| c.row.saturating_add(1))
             .chain(
                 sheet
                     .merged_cells
                     .iter()
-                    .map(|range| range.end.row.saturating_add(1)),
+                    .map(|r| r.end.row.saturating_add(1)),
             )
             .max()
             .unwrap_or(1);
         let columns = sheet
             .cells
             .keys()
-            .map(|cell| cell.col.saturating_add(1))
+            .map(|c| c.col.saturating_add(1))
             .chain(
                 sheet
                     .merged_cells
                     .iter()
-                    .map(|range| range.end.col.saturating_add(1)),
+                    .map(|r| r.end.col.saturating_add(1)),
             )
             .max()
             .unwrap_or(1);
@@ -48,153 +51,198 @@ pub(super) fn render(content: &Value, reader: bool) -> Result<PrintDocument, Str
         if dense.saturating_mul(rules as u64) > 5_000_000 {
             return Err("PDF worksheet merged cells and conditional formatting exceed the layout-work budget".into());
         }
+        if sheet.images.len() + sheet.charts.len() > MAX_SHEET_DRAWINGS {
+            return Err("PDF worksheet exceeds the drawing budget".into());
+        }
+        budget_drawings = budget_drawings
+            .checked_sub(sheet.images.len() + sheet.charts.len())
+            .ok_or("PDF workbook exceeds the drawing budget")?;
+        let layout = sheet.drawing_layout();
         budget_cells -= dense as usize;
+        // Model dimensions are already CSS pixels, also used by the editor.
         let widths = (0..columns)
-            .map(|column| {
-                finite(
-                    f64::from(
-                        sheet
-                            .column_widths
-                            .get(&column)
-                            .copied()
-                            .or(sheet.default_column_width)
-                            .unwrap_or(75.),
-                    ),
-                    75.,
-                    1.,
-                    2048.,
-                )
-            })
+            .map(|c| sheet.column_width_px(c))
             .collect::<Vec<_>>();
-        let mut start = 0;
-        while start < columns {
-            let mut end = start;
-            let mut width = 32.;
-            while end < columns && (reader || end == start || width + widths[end as usize] <= 1000.)
-            {
-                width += widths[end as usize];
-                end += 1;
-            }
-            // A merged cell remains on one horizontal print segment.
-            loop {
-                let crossing = sheet.merged_cells.iter().find(|range| {
-                    range.start.col < end && range.end.col >= end && range.end.col < columns
-                });
-                let Some(range) = crossing else { break };
-                if range.start.col > start {
-                    end = range.start.col;
-                    break;
+        let heights = (0..rows)
+            .map(|r| sheet.row_height_px(r))
+            .collect::<Vec<_>>();
+        let grid_width = widths.iter().sum::<f64>() + header_width;
+        let mut natural_width = grid_width.max(1.);
+        let mut natural_height = (heights.iter().sum::<f64>() + header_height).max(1.);
+        for picture in &sheet.images {
+            let (x, y, w, h) = layout.drawing_bounds(&picture.anchor_start, &picture.drawing);
+            natural_width = natural_width.max(x + w + header_width);
+            natural_height = natural_height.max(y + h + header_height);
+        }
+        for chart in &sheet.charts {
+            let (x, y, w, h) = layout.chart_bounds(chart);
+            natural_width = natural_width.max(x + w + header_width);
+            natural_height = natural_height.max(y + h + header_height);
+        }
+        // Fit the sheet horizontally once. Vertical pages retain all columns,
+        // including merges and drawing anchors, rather than cutting each into
+        // unrelated horizontal tables. Chrome's zoom scales layout and text.
+        let scale = if reader {
+            1.
+        } else {
+            (1040. / natural_width).min(1.)
+        };
+        let page_height = if reader { natural_height } else { 708. / scale };
+        if (natural_height / page_height).ceil() > budget_pages as f64 {
+            return Err("PDF workbook exceeds the 500-page print budget".into());
+        }
+        let mut row_boundaries = vec![0.];
+        for height in &heights {
+            row_boundaries.push(row_boundaries.last().copied().unwrap_or(0.) + height);
+        }
+        if dense.saturating_mul((natural_height / page_height).ceil().max(1.) as u64) > 2_000_000 {
+            return Err("PDF repeated-page cell budget exceeded".into());
+        }
+        let mut page_top = 0.;
+        while page_top < natural_height {
+            budget_pages = budget_pages
+                .checked_sub(1)
+                .ok_or("PDF workbook exceeds the 500-page print budget")?;
+            let mut page_bottom = (page_top + page_height).min(natural_height);
+            if page_bottom < natural_height {
+                if let Some(boundary) = row_boundaries
+                    .iter()
+                    .rev()
+                    .find(|boundary| **boundary <= page_bottom && **boundary > page_top)
+                {
+                    page_bottom = *boundary;
                 }
-                end = range.end.col + 1;
+                for merged in &sheet.merged_cells {
+                    let top = row_boundaries
+                        .get(merged.start.row as usize)
+                        .copied()
+                        .unwrap_or(0.);
+                    let bottom = row_boundaries
+                        .get(merged.end.row.saturating_add(1) as usize)
+                        .copied()
+                        .unwrap_or(natural_height);
+                    if top < page_bottom && bottom > page_bottom && top > page_top {
+                        page_bottom = top;
+                    }
+                }
             }
-            let grid_width = 28. + widths[start as usize..end as usize].iter().sum::<f64>();
+            if reader {
+                body.push_str(&format!(
+                    "<section class=\"sheet\"><h1>{}</h1>",
+                    escape(&sheet.name)
+                ));
+            } else {
+                body.push_str(&format!(
+                    "<section class=\"sheet\" aria-label=\"{}\">",
+                    escape(&sheet.name)
+                ));
+            }
             body.push_str(&format!(
-                "<section class=\"sheet\"><h1>{}</h1><table style=\"width:{grid_width}px\"><colgroup><col style=\"width:28px\">",
-                escape(&sheet.name)
+                "<div class=\"sheet-page\" style=\"height:{}px;overflow:hidden\"><div class=\"sheet-surface\" style=\"zoom:{scale};width:{natural_width}px;height:{natural_height}px;top:-{page_top}px\"><table style=\"width:{grid_width}px\"><colgroup>",
+                (page_bottom - page_top) * scale
             ));
-            for column in start..end {
-                body.push_str(&format!(
-                    "<col style=\"width:{}px\">",
-                    widths[column as usize]
-                ));
+            if reader {
+                body.push_str(&format!("<col style=\"width:{header_width}px\">"));
             }
-            body.push_str("</colgroup><thead><tr><th></th>");
-            for column in start..end {
-                body.push_str(&format!(
-                    "<th>{}</th>",
-                    CellRef::new(0, column).to_a1().trim_end_matches('1')
-                ));
+            for width in &widths {
+                body.push_str(&format!("<col style=\"width:{width}px\">"));
             }
-            body.push_str("</tr></thead><tbody>");
+            body.push_str("</colgroup>");
+            if reader {
+                body.push_str(&format!(
+                    "<thead><tr style=\"height:{header_height}px\"><th></th>"
+                ));
+                for column in 0..columns {
+                    body.push_str(&format!(
+                        "<th scope=\"col\">{}</th>",
+                        CellRef::new(0, column).to_a1().trim_end_matches('1')
+                    ));
+                }
+                body.push_str("</tr></thead>");
+            }
+            body.push_str("<tbody>");
             for row in 0..rows {
-                let row_height = finite(
-                    f64::from(*sheet.row_heights.get(&row).unwrap_or(&20.)),
-                    20.,
-                    1.,
-                    1000.,
-                );
                 body.push_str(&format!(
-                    "<tr style=\"height:{row_height}px\"><th>{}</th>",
-                    row + 1
+                    "<tr style=\"height:{}px\">",
+                    heights[row as usize]
                 ));
-                for column in start..end {
-                    let merged = sheet.merged_cells.iter().find(|range| {
-                        row >= range.start.row
-                            && row <= range.end.row
-                            && column >= range.start.col
-                            && column <= range.end.col
+                if reader {
+                    body.push_str(&format!("<th scope=\"row\">{}</th>", row + 1));
+                }
+                for column in 0..columns {
+                    let merged = sheet.merged_cells.iter().find(|r| {
+                        row >= r.start.row
+                            && row <= r.end.row
+                            && column >= r.start.col
+                            && column <= r.end.col
                     });
-                    if merged
-                        .is_some_and(|range| row != range.start.row || column != range.start.col)
-                    {
+                    if merged.is_some_and(|r| row != r.start.row || column != r.start.col) {
                         continue;
                     }
                     let spans = merged
-                        .map(|range| {
+                        .map(|r| {
                             format!(
                                 " rowspan=\"{}\" colspan=\"{}\"",
-                                range.end.row - range.start.row + 1,
-                                (range.end.col - range.start.col + 1).min(end - column)
+                                r.end.row - r.start.row + 1,
+                                r.end.col - r.start.col + 1
                             )
                         })
                         .unwrap_or_default();
                     let cell = sheet.get_cell(row, column);
-                    let style = sheet
-                        .conditional_format_for(row, column)
-                        .or_else(|| cell.map(|cell| &cell.format));
-                    let css = if let Some(range) = merged {
-                        let mut style = style.cloned().unwrap_or_default();
-                        if let Some(edge) = sheet
-                            .get_cell(range.end.row, column)
-                            .and_then(|c| c.format.borders.bottom.as_ref())
-                        {
-                            style.borders.bottom = Some(edge.clone());
-                        }
-                        if let Some(edge) = sheet
-                            .get_cell(row, range.end.col)
-                            .and_then(|c| c.format.borders.right.as_ref())
-                        {
-                            style.borders.right = Some(edge.clone());
-                        }
-                        cell_style(&style)
-                    } else {
-                        style.map(cell_style).unwrap_or_default()
-                    };
-                    let short_date = if reader
-                        && cell.is_some_and(|c| {
-                            c.format.localized_short_date && matches!(c.value, CellValue::Date(_))
-                        }) {
-                        " data-short-date"
-                    } else {
-                        ""
+                    let mut format = sheet.effective_format(row, column);
+                    let display = cell
+                        .map(|c| format_cell_value(&c.value, c.format.number_format.as_deref()));
+                    if let Some(color) = display.as_ref().and_then(|d| d.color.clone()) {
+                        format.text_color = Some(color);
+                    }
+                    let (short_date, text) = match cell {
+                        Some(c) if reader && c.format.localized_short_date => match &c.value {
+                            CellValue::Date(iso) => {
+                                (" data-short-date", iso.split('T').next().unwrap_or(iso))
+                            }
+                            _ => ("", display.as_ref().map(|d| d.text.as_str()).unwrap_or("")),
+                        },
+                        _ => ("", display.as_ref().map(|d| d.text.as_str()).unwrap_or("")),
                     };
                     body.push_str(&format!(
                         "<td{spans}{short_date} style=\"{}\">{}</td>",
-                        css,
-                        cell.map(display)
-                            .map(|text| escape(&text))
-                            .unwrap_or_default()
+                        cell_style(&format),
+                        escape(text)
                     ));
                 }
                 body.push_str("</tr>");
             }
-            body.push_str("</tbody></table></section>");
-            start = end;
-        }
-        for chart in &sheet.charts {
-            let data = chart_data(sheet, chart)?;
-            let value = serde_json::json!({"chart_type":chart.chart_type,"data":data});
-            body.push_str(&format!("<section class=\"sheet-chart\"><h2>{}</h2><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1000 500\" style=\"width:100%;height:auto\">{}</svg></section>",escape(&chart.title),canvas::chart_svg(&value,0.,0.,1000.,500.)?));
-        }
-        if body.len() > MAX_HTML_BYTES {
-            return Err("PDF print layout exceeds the rendering budget".into());
+            body.push_str("</tbody></table>");
+            for (index, picture) in sheet.images.iter().enumerate() {
+                let (x, y, w, h) = layout.drawing_bounds(&picture.anchor_start, &picture.drawing);
+                let (x, y) = (x + header_width, y + header_height);
+                let clip = format!("sheet-image-{sheet_index}-{budget_pages}-{index}");
+                let url = image(&picture.data_url)?;
+                let [left, top, right, bottom] = picture.crop.map(|v| f64::from(v).clamp(0., 0.99));
+                let iw = w / (1. - left - right).max(0.01);
+                let ih = h / (1. - top - bottom).max(0.01);
+                let rotation = finite(f64::from(picture.rotation), 0., -360000., 360000.);
+                body.push_str(&format!("<svg class=\"sheet-drawing sheet-image\" aria-label=\"{}\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" style=\"left:{x}px;top:{y}px;width:{w}px;height:{h}px;overflow:visible\"><defs><clipPath id=\"{clip}\"><rect width=\"{w}\" height=\"{h}\"/></clipPath></defs><g transform=\"rotate({rotation} {} {})\"><g clip-path=\"url(#{clip})\"><image href=\"{url}\" x=\"{}\" y=\"{}\" width=\"{iw}\" height=\"{ih}\" preserveAspectRatio=\"none\"/></g></g></svg>",escape(&picture.name),w/2.,h/2.,-iw*left,-ih*top));
+            }
+            for chart in &sheet.charts {
+                let (x, y, w, h) = layout.chart_bounds(chart);
+                let (x, y) = (x + header_width, y + header_height);
+                let data = chart_data(sheet, chart)?;
+                let value = serde_json::json!({"chart_type":chart.chart_type,"data":data,"title":chart.title});
+                body.push_str(&format!("<svg class=\"sheet-drawing sheet-chart\" aria-label=\"{}\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" style=\"left:{x}px;top:{y}px;width:{w}px;height:{h}px\"><rect class=\"worksheet-chart-background\" width=\"{w}\" height=\"{h}\" fill=\"#FFFFFF\"/>{}</svg>",escape(&chart.title),canvas::chart_svg(&value,0.,0.,w,h)?));
+            }
+            body.push_str("</div></div></section>");
+            page_top = page_bottom;
+            if body.len() > MAX_HTML_BYTES {
+                return Err("PDF print layout exceeds the rendering budget".into());
+            }
         }
     }
     if workbook.sheets.is_empty() {
-        body.push_str("<section class=\"sheet\"><p>&#160;</p></section>");
+        body.push_str("<section class=\"sheet\"></section>");
     }
-    // Put fallback gridlines on grid tracks so explicit cell borders win collapsed-border ties.
-    let css = "@page{size:297mm 210mm;margin:10mm}h1{font-size:15pt;margin:0 0 8pt}h2{font-size:13pt}table{border-collapse:collapse;table-layout:fixed;width:100%;font-size:10pt}thead{display:table-header-group}tr{break-inside:avoid}tr,col{border:0.5pt solid #cbd5e1}td,th{padding:0 2px;overflow-wrap:anywhere;white-space:pre-wrap}th{background:#f1f5f9;color:#475569;font-weight:normal;text-align:center;font-size:9pt}td{vertical-align:bottom;overflow:hidden}.sheet{break-before:page}.sheet:first-child{break-before:auto}.sheet-chart{break-inside:avoid;margin-top:12pt}svg text{font-family:Arial,'Office CJK',sans-serif}";
+    // Give explicit cell borders precedence over the track gridlines.
+    let css = "@page{size:297mm 210mm;margin:10mm}.sheet{break-before:page}.sheet:first-child{break-before:auto}.sheet-page{position:relative;break-inside:avoid}.sheet-surface{position:relative}table{border-collapse:collapse;table-layout:fixed;font-size:10pt}tr{break-inside:avoid}tr,col{border:0.5pt solid #cbd5e1}th{background:#f1f5f9;color:#475569;font-weight:normal;text-align:center;font-size:9pt}td{padding:1px;overflow:hidden;white-space:pre;vertical-align:bottom;line-height:1.2}.sheet-drawing{position:absolute;display:block;background:transparent}svg text{font-family:Arial,'Office CJK',sans-serif}";
     Ok(html(&workbook.title, css, &body, 297., 210.))
 }
 
@@ -254,77 +302,12 @@ fn cell_style(format: &CellFormat) -> String {
 }
 
 fn display(cell: &Cell) -> String {
-    match &cell.value {
-        CellValue::Empty => String::new(),
-        CellValue::Text(value) | CellValue::Date(value) | CellValue::Error(value) => value.clone(),
-        CellValue::Boolean(value) => if *value { "TRUE" } else { "FALSE" }.into(),
-        CellValue::Number(value) => {
-            let Some(pattern) = cell
-                .format
-                .number_format
-                .as_deref()
-                .filter(|pattern| !pattern.eq_ignore_ascii_case("general"))
-            else {
-                return value.to_string();
-            };
-            if pattern == ";;;" {
-                return String::new();
-            }
-            let pattern = pattern.split(';').next().unwrap_or(pattern);
-            let percentage = pattern.contains('%');
-            let number = if percentage { *value * 100. } else { *value };
-            let decimals = pattern
-                .split_once('.')
-                .map(|(_, decimal)| {
-                    decimal
-                        .chars()
-                        .take_while(|c| matches!(c, '0' | '#'))
-                        .count()
-                })
-                .unwrap_or(0)
-                .min(12);
-            if pattern.contains('y')
-                && (pattern.contains('d') || pattern.contains('m'))
-                && *value >= 0.
-                && *value < 3_000_000.
-            {
-                if let Some(date) = chrono::NaiveDate::from_ymd_opt(1899, 12, 30)
-                    .and_then(|date| date.checked_add_signed(chrono::Duration::days(*value as i64)))
-                {
-                    return date.format("%Y-%m-%d").to_string();
-                }
-            }
-            let mut formatted = format!("{number:.decimals$}");
-            if pattern.contains(',') {
-                let (integer, fraction) = formatted
-                    .split_once('.')
-                    .map(|(left, right)| (left.to_owned(), format!(".{right}")))
-                    .unwrap_or((formatted.clone(), String::new()));
-                let negative = integer.starts_with('-');
-                let digits = integer.trim_start_matches('-').chars().collect::<Vec<_>>();
-                let mut grouped = String::new();
-                for (index, digit) in digits.iter().enumerate() {
-                    if index > 0 && (digits.len() - index) % 3 == 0 {
-                        grouped.push(',');
-                    }
-                    grouped.push(*digit);
-                }
-                formatted = format!("{}{grouped}{fraction}", if negative { "-" } else { "" });
-            }
-            let currency = pattern
-                .chars()
-                .find(|character| matches!(character, '$' | '€' | '£' | '¥'));
-            format!(
-                "{}{formatted}{}",
-                currency.map(|c| c.to_string()).unwrap_or_default(),
-                if percentage { "%" } else { "" }
-            )
-        }
-    }
+    format_cell_value(&cell.value, cell.format.number_format.as_deref()).text
 }
 
 fn chart_data(sheet: &Sheet, chart: &SheetChart) -> Result<ChartData, String> {
     let mut data = chart.cached_data.clone().unwrap_or_else(|| ChartData {
+        presentation: None,
         labels: Vec::new(),
         datasets: Vec::new(),
     });
@@ -410,6 +393,7 @@ fn chart_data(sheet: &Sheet, chart: &SheetChart) -> Result<ChartData, String> {
             });
         }
     }
+    data.presentation = Some(chart.resolved_presentation());
     Ok(data)
 }
 
@@ -445,6 +429,7 @@ mod tests {
         sheet.set_cell(0, 0, CellValue::Text("Fresh label".into()));
         sheet.set_cell(0, 1, CellValue::Number(42.));
         let chart = SheetChart {
+            drawing: None,
             id: uuid::Uuid::new_v4(),
             title: "Chart".into(),
             chart_type: SheetChartType::Bar,
@@ -453,6 +438,7 @@ mod tests {
             anchor_start: CellRef::new(2, 0),
             anchor_end: CellRef::new(10, 5),
             cached_data: Some(ChartData {
+                presentation: None,
                 labels: vec!["Stale label".into()],
                 datasets: vec![Dataset {
                     name: "Values".into(),

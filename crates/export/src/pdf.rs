@@ -86,7 +86,7 @@ fn css_string(text: &str) -> String {
 
 fn font(text: &str) -> String {
     format!(
-        "'{}',Arial,'Office CJK','Microsoft YaHei','Noto Sans CJK SC',sans-serif",
+        "'{}',Arial,'Microsoft YaHei','Office CJK','Noto Sans CJK SC',sans-serif",
         escape(&css_string(text))
     )
 }

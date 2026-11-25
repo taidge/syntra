@@ -834,6 +834,44 @@ impl Editor {
                 (true, false) => insert_col_in_merged(&mut b.snapshot.merged_cells, si, at),
                 (true, true) => delete_col_from_merged(&mut b.snapshot.merged_cells, si, at),
             }
+            let coordinate = if column { "col" } else { "row" };
+            let shift_reference = |reference: &mut serde_json::Value| {
+                if let Some(n) = reference[coordinate].as_u64() {
+                    let next = if n >= u64::from(at) {
+                        if delete {
+                            n.saturating_sub(u64::from(n > u64::from(at)))
+                        } else {
+                            n.saturating_add(1)
+                        }
+                    } else {
+                        n
+                    };
+                    reference[coordinate] = serde_json::json!(next);
+                }
+            };
+            for key in ["images", "charts"] {
+                if let Some(drawings) = b.content["sheets"][si][key].as_array_mut() {
+                    for drawing in drawings {
+                        shift_reference(&mut drawing["anchor_start"]);
+                        if key == "charts" {
+                            shift_reference(&mut drawing["anchor_end"]);
+                            shift_reference(&mut drawing["data_start"]);
+                            shift_reference(&mut drawing["data_end"]);
+                            if let Some(sources) = drawing["series_sources"].as_array_mut() {
+                                for source in sources {
+                                    for key in
+                                        ["value_start", "value_end", "label_start", "label_end"]
+                                    {
+                                        if source[key].is_object() {
+                                            shift_reference(&mut source[key]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         });
         self.layout.revise(|v| *v += 1);
     }
@@ -1706,6 +1744,7 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
         }),
         toolbar_action("All borders", move || {
             ed.format(|s| {
+                s.border_details = serde_json::Value::Null;
                 s.borders = CellBorders {
                     top: true,
                     right: true,
@@ -1715,7 +1754,10 @@ pub fn Calc(scope: Scope, auth: Cage<AuthState>, id: String) -> impl Widget {
             })
         }),
         toolbar_action("Clear borders", move || {
-            ed.format(|s| s.borders = CellBorders::default())
+            ed.format(|s| {
+                s.borders = CellBorders::default();
+                s.border_details = serde_json::Value::Null;
+            })
         }),
     ];
     let mut formats: Vec<Box<dyn Widget>> = vec![
@@ -2439,7 +2481,11 @@ fn add_blank_sheet(book: &mut Book) -> usize {
 
 fn sheet_axis_size(sheet: &serde_json::Value, column: bool, index: u32) -> f64 {
     let (key, default, maximum) = if column {
-        ("column_widths", 80.0, 800.0)
+        (
+            "column_widths",
+            sheet["default_column_width"].as_f64().unwrap_or(80.0),
+            2048.0,
+        )
     } else {
         ("row_heights", 24.0, 400.0)
     };
@@ -2460,20 +2506,23 @@ fn cell_style(style: &CellStyle) -> Style {
     if let Some(value) = color(&style.text_color) {
         out.color = Some(value);
     }
-    if let Some(value) = color(&style.fill_color) {
-        out.background = Some(value);
-    }
     if let Some(value) = style
         .font_size
         .parse::<f64>()
         .ok()
         .filter(|n| n.is_finite())
     {
-        out.font_size = Some(value.clamp(6.0, 96.0));
+        out.font_size = Some(value.clamp(6.0, 96.0) * 96. / 72.);
     }
     if !style.font_family.is_empty() {
         out.font_family = Some(vec![Family::Named(style.font_family.clone())]);
     }
+    out.white_space = Some(if style.wrap_text.unwrap_or_default() {
+        WhiteSpace::PreWrap
+    } else {
+        WhiteSpace::Pre
+    });
+    out.line_height = Some(style.font_size.parse::<f64>().unwrap_or(11.) * 96. / 72. * 1.2);
     out
 }
 fn grid_context(scope: &Scope, ed: Editor) -> impl Widget {
@@ -2696,7 +2745,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                 }),
         );
         for c in 0..NUM_COLS {
-            let merged = ranges.iter().find(|range| range.contains((r, c)));
+            let merged = ranges.iter().find(|range| range.contains((r, c))).copied();
             if merged.is_some_and(|range| range.start != (r, c)) {
                 continue;
             }
@@ -2714,6 +2763,24 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                             .width(Length::Px(width))
                             .min_width(Length::Px(width))
                             .height(Length::Px(height));
+                        let base = b
+                            .snapshot
+                            .styles
+                            .get(&(si, r, c))
+                            .cloned()
+                            .unwrap_or_default();
+                        let raw = b
+                            .snapshot
+                            .cells
+                            .get(&(si, r, c))
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        let effective = conditional_style_for(&b.content, si, r, c, raw)
+                            .map(|diff| merge_conditional_style(base.clone(), diff))
+                            .unwrap_or(base);
+                        if let Some(fill) = color(&effective.fill_color) {
+                            style.background = Some(fill);
+                        }
                         if (r as u64) < sheet["frozen_rows"].as_u64().unwrap_or(0) {
                             style.position = Some(Position::Sticky);
                             let preceding_height: f64 = (0..r)
@@ -2756,7 +2823,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                             .get(&(si, r, c))
                             .cloned()
                             .unwrap_or_default();
-                        format!(
+                        let mut classes = format!(
                             "{}{}{}{}{}{}{}{}",
                             if style.bold { " cell-bold" } else { "" },
                             if style.italic { " cell-italic" } else { "" },
@@ -2779,7 +2846,25 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                                 "right" => " cell-align-right",
                                 _ => "",
                             }
-                        )
+                        );
+                        classes.push_str(if style.wrap_text.unwrap_or_default() {
+                            " cell-wrap"
+                        } else {
+                            " cell-nowrap"
+                        });
+                        classes.push_str(match style.vertical_align.as_deref() {
+                            Some("top") => " cell-valign-top",
+                            Some("middle" | "center") => " cell-valign-middle",
+                            _ => " cell-valign-bottom",
+                        });
+                        if style.borders.top
+                            || style.borders.right
+                            || style.borders.bottom
+                            || style.borders.left
+                        {
+                            classes.push_str(" calc-custom-border");
+                        }
+                        classes
                     });
                     let range = ed.range();
                     let mut edges = String::new();
@@ -2840,6 +2925,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                                 })
                             })
                     });
+                    let button_scope = scope.clone();
                     let content = when(
                         ed.editing.map(move |target| *target == Some((si, r, c))),
                         move || {
@@ -2897,7 +2983,7 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                             .name(name.clone())
                             .class("cell-button")
                             .node_ref(node)
-                            .style(scope.bond(move || {
+                            .style(button_scope.bond(move || {
                                 ed.book.with(|b| {
                                     let base = b
                                         .snapshot
@@ -2912,8 +2998,22 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                                         .map(String::as_str)
                                         .unwrap_or("");
                                     let style = conditional_style_for(&b.content, si, r, c, raw)
+                                        .map(|differential| {
+                                            merge_conditional_style(base.clone(), differential)
+                                        })
                                         .unwrap_or(base);
-                                    cell_style(&style)
+                                    let mut result = cell_style(&style);
+                                    if let Some(formatted_color) =
+                                        syntra_doc_engine::calc::format_display_value(
+                                            raw,
+                                            &style.number_format,
+                                        )
+                                        .color
+                                        .and_then(|v| color(&v))
+                                    {
+                                        result.color = Some(formatted_color);
+                                    }
+                                    result
                                 })
                             }))
                             .on(EventKind::Activate, move |_| {
@@ -2922,6 +3022,69 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
                     });
                     group().fill((
                         content,
+                        image()
+                            .class("calc-cell-border")
+                            .alt("")
+                            .source(scope.bond(move || {
+                                ed.book.with(|book| {
+                                    let mut style = book
+                                        .snapshot
+                                        .styles
+                                        .get(&(si, r, c))
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    if let Some(range) = merged {
+                                        use syntra_doc_engine::calc::{
+                                            CellBorders as NativeBorders, CellRef,
+                                            MergedRange as NativeRange, merged_cell_borders,
+                                        };
+                                        let native = NativeRange {
+                                            start: CellRef::new(range.start.0, range.start.1),
+                                            end: CellRef::new(range.end.0, range.end.1),
+                                        };
+                                        let border = serde_json::from_value::<NativeBorders>(
+                                            style_to_value(&style)["borders"].clone(),
+                                        )
+                                        .unwrap_or_default();
+                                        let edges =
+                                            merged_cell_borders(&native, border, |row, col| {
+                                                book.snapshot.styles.get(&(si, row, col)).and_then(
+                                                    |style| {
+                                                        serde_json::from_value::<NativeBorders>(
+                                                            style_to_value(style)["borders"]
+                                                                .clone(),
+                                                        )
+                                                        .ok()
+                                                    },
+                                                )
+                                            });
+                                        style.border_details = serde_json::to_value(&edges)
+                                            .unwrap_or(serde_json::Value::Null);
+                                        style.borders = CellBorders {
+                                            top: edges.top.is_some(),
+                                            right: edges.right.is_some(),
+                                            bottom: edges.bottom.is_some(),
+                                            left: edges.left.is_some(),
+                                        };
+                                    }
+                                    let sheet = &book.content["sheets"][si];
+                                    let width = merged
+                                        .map(|m| {
+                                            (m.start.1..=m.end.1)
+                                                .map(|c| ed.dimension(sheet, true, c))
+                                                .sum()
+                                        })
+                                        .unwrap_or_else(|| ed.dimension(sheet, true, c));
+                                    let height = merged
+                                        .map(|m| {
+                                            (m.start.0..=m.end.0)
+                                                .map(|r| ed.dimension(sheet, false, r))
+                                                .sum()
+                                        })
+                                        .unwrap_or_else(|| ed.dimension(sheet, false, r));
+                                    cell_border_image(&style, width, height)
+                                })
+                            })),
                         when(handle_visible, || {
                             glory::ui::button()
                                 .name("Drag to fill")
@@ -2986,24 +3149,149 @@ fn grid(scope: &Scope, ed: Editor) -> impl Widget {
         .class("sheet-scroll spreadsheet")
         .style(Style::new().overflow_x(Overflow::Auto))
         .fill(
-            sapid::table("workbook")
-                .theme(crate::components::ui::theme())
-                .class("sheet-grid")
-                .style(scope.bond(move || {
-                    ed.book.with(|book| {
-                        let sheet = &book.content["sheets"][si];
-                        let width: f64 = 80.0
-                            + (0..NUM_COLS)
-                                .map(|column| ed.dimension(sheet, true, column))
-                                .sum::<f64>();
-                        Style::new().width(Length::Px(width))
-                    })
-                }))
-                .name("Spreadsheet")
-                .bordered(true)
-                .head(sapid::table_head().row(head))
-                .body(body),
+            view().class("calc-sheet-surface").fill((
+                sapid::table("workbook")
+                    .theme(crate::components::ui::theme())
+                    .class("sheet-grid")
+                    .style(scope.bond(move || {
+                        ed.book.with(|book| {
+                            let sheet = &book.content["sheets"][si];
+                            let width: f64 = 80.0
+                                + (0..NUM_COLS)
+                                    .map(|column| ed.dimension(sheet, true, column))
+                                    .sum::<f64>();
+                            Style::new().width(Length::Px(width))
+                        })
+                    }))
+                    .name("Spreadsheet")
+                    .bordered(true)
+                    .head(sapid::table_head().row(head))
+                    .body(body),
+                image()
+                    .class("calc-sheet-drawings")
+                    .alt("Worksheet drawings")
+                    .source(scope.bond(move || {
+                        let _ = ed.calculation_epoch.get();
+                        ed.book.with(|book| sheet_drawing_image(&book.content, si))
+                    })),
+            )),
         )
+}
+fn svg_image(svg: String) -> String {
+    use base64::Engine;
+    format!(
+        "data:image/svg+xml;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(svg)
+    )
+}
+fn svg_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+fn cell_border_image(style: &CellStyle, width: f64, height: f64) -> String {
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">"
+    );
+    for (edge, enabled) in [
+        ("top", style.borders.top),
+        ("right", style.borders.right),
+        ("bottom", style.borders.bottom),
+        ("left", style.borders.left),
+    ] {
+        if !enabled {
+            continue;
+        }
+        let border = &style.border_details[edge];
+        let stroke = border["color"]
+            .as_str()
+            .filter(|v| color(v).is_some())
+            .unwrap_or("#000000");
+        let kind = border["style"].as_str().unwrap_or("Thin");
+        let weight = match kind {
+            "Medium" => 2.7,
+            "Thick" => 4.,
+            "Double" => 4.,
+            _ => 1.3,
+        };
+        let inset = weight / 2.;
+        let (x1, y1, x2, y2) = match edge {
+            "top" => (0., inset, width, inset),
+            "bottom" => (0., height - inset, width, height - inset),
+            "left" => (inset, 0., inset, height),
+            _ => (width - inset, 0., width - inset, height),
+        };
+        let dash = match kind {
+            "Dashed" => " stroke-dasharray=\"6 4\"",
+            "Dotted" => " stroke-dasharray=\"1.5 2.5\"",
+            _ => "",
+        };
+        svg.push_str(&format!(
+            "<path d=\"M{x1} {y1}L{x2} {y2}\" stroke=\"{stroke}\" stroke-width=\"{weight}\"{dash}/>"
+        ));
+        if kind == "Double" {
+            svg.push_str(&format!(
+                "<path d=\"M{x1} {y1}L{x2} {y2}\" stroke=\"white\" stroke-width=\"1.3\"/>"
+            ));
+        }
+    }
+    svg.push_str("</svg>");
+    svg_image(svg)
+}
+fn sheet_drawing_image(content: &serde_json::Value, si: usize) -> String {
+    use syntra_doc_engine::calc::{MAX_SHEET_DRAWINGS, Sheet};
+    let Ok(mut sheet) = serde_json::from_value::<Sheet>(content["sheets"][si].clone()) else {
+        return svg_image("<svg xmlns=\"http://www.w3.org/2000/svg\"/>".into());
+    };
+    sheet.recalculate();
+    let layout = sheet.drawing_layout();
+    let width = (0..NUM_COLS).map(|c| sheet.column_width_px(c)).sum::<f64>();
+    let height = (0..NUM_ROWS).map(|r| sheet.row_height_px(r)).sum::<f64>();
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">"
+    );
+    for (i, picture) in sheet.images.iter().take(MAX_SHEET_DRAWINGS).enumerate() {
+        if ![
+            "data:image/png;base64,",
+            "data:image/jpeg;base64,",
+            "data:image/gif;base64,",
+        ]
+        .iter()
+        .any(|prefix| picture.data_url.starts_with(prefix))
+        {
+            continue;
+        }
+        let (x, y, w, h) = layout.drawing_bounds(&picture.anchor_start, &picture.drawing);
+        let [left, top, right, bottom] = picture.crop.map(|v| f64::from(v).clamp(0., 0.99));
+        let iw = w / (1. - left - right).max(0.01);
+        let ih = h / (1. - top - bottom).max(0.01);
+        let rotation = if picture.rotation.is_finite() {
+            f64::from(picture.rotation)
+        } else {
+            0.
+        };
+        svg.push_str(&format!("<title>{}</title><defs><clipPath id=\"picture{i}\"><rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\"/></clipPath></defs><g transform=\"rotate({rotation} {} {})\"><g clip-path=\"url(#picture{i})\"><image href=\"{}\" x=\"{}\" y=\"{}\" width=\"{iw}\" height=\"{ih}\" preserveAspectRatio=\"none\"/></g></g>",svg_escape(&picture.name),x+w/2.,y+h/2.,svg_escape(&picture.data_url),x-iw*left,y-ih*top));
+    }
+    for chart in sheet
+        .charts
+        .iter()
+        .take(MAX_SHEET_DRAWINGS.saturating_sub(sheet.images.len().min(MAX_SHEET_DRAWINGS)))
+    {
+        let (x, y, w, h) = layout.chart_bounds(chart);
+        let data = sheet.chart_data(chart);
+        svg.push_str(&format!("<rect class=\"worksheet-chart-background\" x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"#FFFFFF\"/>"));
+        svg.push_str(&syntra_doc_engine::chart_render::render_chart_svg(
+            &serde_json::json!({"chart_type":chart.chart_type,"data":data,"title":chart.title}),
+            x,
+            y,
+            w,
+            h,
+        ));
+    }
+    svg.push_str("</svg>");
+    svg_image(svg)
 }
 fn chart_view(scope: &Scope, ed: Editor) -> impl Widget {
     let data = scope.bond(move || {
@@ -3345,7 +3633,9 @@ mod review_regressions {
             serde_json::json!({"type":"Number","value":8.0})
         );
         assert_eq!(book.display(0, 1, 1), "8");
-        book.content["sheets"][0]["cells"][0][1]["format"]["wrap_text"] = serde_json::json!(true);
+        let imported_format = &mut book.content["sheets"][0]["cells"][0][1]["format"];
+        imported_format["wrap_text"] = serde_json::json!(true);
+        imported_format["vertical_align"] = serde_json::json!("Middle");
         book.snapshot.styles.insert(
             (0, 0, 0),
             CellStyle {
@@ -3356,6 +3646,10 @@ mod review_regressions {
         let styled = book.serialize();
         let styled_cells = workbook_cells(&styled);
         assert_eq!(styled_cells[&(0, 0, 0)]["format"]["wrap_text"], true);
+        assert_eq!(
+            styled_cells[&(0, 0, 0)]["format"]["vertical_align"],
+            "Middle"
+        );
         assert_eq!(styled_cells[&(0, 0, 0)]["format"]["bold"], true);
         book.checkpoint();
         book.snapshot.cells.insert((0, 1, 0), "9".into());

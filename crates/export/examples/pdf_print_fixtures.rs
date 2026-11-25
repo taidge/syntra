@@ -64,12 +64,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rows: vec![w::TableRow {
             cells: vec![
                 w::TableCell {
+                    layout: None,
                     blocks: vec![paragraph("项目")],
                     col_span: 1,
                     row_span: 1,
                     background_color: Some("#dbeafe".into()),
                 },
                 w::TableCell {
+                    layout: None,
                     blocks: vec![paragraph("说明：中文、English、123")],
                     col_span: 1,
                     row_span: 1,
@@ -107,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .number_format = Some("¥0.00".into());
     }
     sheet.charts.push(c::SheetChart {
+        drawing: None,
         id: Uuid::new_v4(),
         title: "Sales / 销售图".into(),
         chart_type: c::SheetChartType::Bar,
@@ -163,6 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         height: 350.,
         chart_type: s::ChartType::Line,
         data: s::ChartData {
+            presentation: None,
             labels: vec!["一".into(), "二".into(), "三".into()],
             datasets: vec![s::Dataset {
                 name: "销售".into(),

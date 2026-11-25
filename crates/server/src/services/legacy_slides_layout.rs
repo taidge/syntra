@@ -26,7 +26,7 @@ fn needs_compatibility(version: i32, content: &Value) -> bool {
         && content["metadata"]["pptx_import_revision"]
             .as_u64()
             .unwrap_or_default()
-            < 2
+            < 3
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -244,6 +244,119 @@ fn same_image(current: &Value, source: &Value) -> bool {
         && same_crop(current, source)
 }
 
+fn same_chart_data(current: &Value, source: &Value) -> bool {
+    // Revision three adds presentation metadata to ChartData. Compare all
+    // previously saved data fields so a chart edit can never be overwritten.
+    let (Some(current), Some(source)) = (current.as_object(), source.as_object()) else {
+        return false;
+    };
+    current
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "presentation" | "datasets"))
+        .all(|(key, value)| source.get(key) == Some(value))
+        && current.get("labels") == source.get("labels")
+        && current
+            .get("datasets")
+            .and_then(Value::as_array)
+            .zip(source.get("datasets").and_then(Value::as_array))
+            .is_some_and(|(old, new)| {
+                old.len() == new.len()
+                    && old.iter().zip(new).all(|(old, new)| {
+                        let (Some(old), Some(new)) = (old.as_object(), new.as_object()) else {
+                            return false;
+                        };
+                        old.iter().all(|(key, value)| {
+                            // Missing series colors can now resolve from the source
+                            // theme; existing colors and every data value stay guarded.
+                            key == "color" && value.is_null() || new.get(key) == Some(value)
+                        }) && old.get("values") == new.get("values")
+                    })
+            })
+}
+
+/// The old importer flattened each DrawingML table cell into a TextBox. Only
+/// upgrade an exact text/grid footprint; never reinterpret an arbitrary group.
+fn legacy_table_matches(current: &Value, source: &Value) -> bool {
+    let Some(old_cells) = current["elements"].as_array() else {
+        return false;
+    };
+    let (Some(columns), Some(rows), Some(cells)) = (
+        source["column_widths"].as_array(),
+        source["row_heights"].as_array(),
+        source["cells"].as_array(),
+    ) else {
+        return false;
+    };
+    if columns.is_empty()
+        || rows.is_empty()
+        || columns.len().saturating_mul(rows.len()) > 100_000
+        || old_cells.len() != columns.len() * rows.len()
+    {
+        return false;
+    }
+    let metrics = |values: &[Value]| -> Option<Vec<f64>> {
+        values
+            .iter()
+            .map(|value| value.as_f64().filter(|n| n.is_finite() && *n > 0.))
+            .collect()
+    };
+    let (Some(widths), Some(heights), Some(x), Some(y)) = (
+        metrics(columns),
+        metrics(rows),
+        source["x"].as_f64(),
+        source["y"].as_f64(),
+    ) else {
+        return false;
+    };
+    if !x.is_finite() || !y.is_finite() {
+        return false;
+    }
+    let close = |left: Option<f64>, right: f64| {
+        left.is_some_and(|left| left.is_finite() && (left - right).abs() <= 0.05)
+    };
+    let mut positions = HashMap::new();
+    let mut top = y;
+    for (row, height) in heights.iter().enumerate() {
+        let mut left = x;
+        for (column, width) in widths.iter().enumerate() {
+            let old = &old_cells[row * widths.len() + column];
+            if old["type"] != "TextBox"
+                || !close(old["x"].as_f64(), left)
+                || !close(old["y"].as_f64(), top)
+                || !close(old["width"].as_f64(), *width)
+                || !close(old["height"].as_f64(), *height)
+                || !close(old["rotation"].as_f64(), 0.)
+            {
+                return false;
+            }
+            let Some(text) = runs_text(&old["content"]) else {
+                return false;
+            };
+            positions.insert((row, column), text);
+            left += width;
+        }
+        top += height;
+    }
+    for cell in cells {
+        let (Some(row), Some(column), Some(text)) = (
+            cell["row"].as_u64(),
+            cell["column"].as_u64(),
+            runs_text(&cell["content"]),
+        ) else {
+            return false;
+        };
+        if positions
+            .remove(&(row as usize, column as usize))
+            .as_deref()
+            != Some(text.as_str())
+        {
+            return false;
+        }
+    }
+    // Continuation cells in an old flattened merge may only contain no text.
+    positions.values().all(String::is_empty)
+}
+
 /// Overlay source fields while keeping unknown saved extension fields.
 fn overlay(current: &Value, source: &Value) -> Value {
     match (current.as_object(), source.as_object()) {
@@ -349,6 +462,17 @@ fn merge_elements(
             continue;
         }
         let current = current?;
+        if current["type"] == "Group" && source["type"] == "Table" {
+            if !legacy_table_matches(current, source) {
+                return None;
+            }
+            let mut merged = overlay(current, source);
+            merged.as_object_mut()?.remove("elements");
+            preserve_id(current, source, &mut merged, ids);
+            output.push(merged);
+            old_index += 1;
+            continue;
+        }
         if current["type"] != source["type"] || !same_geometry(current, source) {
             tracing::debug!(slide = slide_index, element_path = ?path,
                 "Legacy Slides recovery skipped: object type or geometry differs");
@@ -371,7 +495,7 @@ fn merge_elements(
             }
             "Chart"
                 if current["chart_type"] != source["chart_type"]
-                    || current["data"] != source["data"] =>
+                    || !same_chart_data(&current["data"], &source["data"]) =>
             {
                 tracing::debug!(slide = slide_index, element_path = ?path,
                     "Legacy Slides recovery skipped: chart differs");
@@ -388,7 +512,8 @@ fn merge_elements(
                 )?);
             }
             "Video" if current["url"] != source["url"] => return None,
-            "TextBox" | "Shape" | "Chart" | "Video" | "Image" => {}
+            "Table" if current["cells"] != source["cells"] => return None,
+            "TextBox" | "Shape" | "Chart" | "Video" | "Image" | "Table" => {}
             _ => return None,
         }
         preserve_id(current, source, &mut merged, ids);
@@ -520,7 +645,7 @@ mod tests {
             .remove("custom_slide");
         source["id"] = json!("source-presentation");
         source["title"] = json!("Source title");
-        source["metadata"]["pptx_import_revision"] = json!(2);
+        source["metadata"]["pptx_import_revision"] = json!(3);
         source["metadata"]["created_at"] = json!("new");
         source["slides"][0]["id"] = json!("source-slide");
         source["slides"][0]["background"] = json!({"Solid":"#123456"});
@@ -544,7 +669,7 @@ mod tests {
         assert_eq!(recovered["title"], "Saved title");
         assert_eq!(recovered["metadata"]["created_at"], "old");
         assert_eq!(recovered["metadata"]["custom_metadata"], 9);
-        assert_eq!(recovered["metadata"]["pptx_import_revision"], 2);
+        assert_eq!(recovered["metadata"]["pptx_import_revision"], 3);
         assert_eq!(recovered["custom_document"], true);
         let slide = &recovered["slides"][0];
         assert_eq!(slide["id"], "saved-slide");
@@ -582,7 +707,7 @@ mod tests {
             .swap(0, 1);
         assert!(merge_original_layout(1, &reordered, &source).is_none());
         let mut newer = current;
-        newer["metadata"]["pptx_import_revision"] = json!(2);
+        newer["metadata"]["pptx_import_revision"] = json!(3);
         assert!(merge_original_layout(1, &newer, &source).is_none());
     }
 
@@ -643,6 +768,68 @@ mod tests {
         assert_eq!(group["elements"][1]["id"], "old-child");
         source["slides"][0]["elements"][0]["elements"] = json!([]);
         assert!(merge_original_layout(1, &current, &source).is_none());
+    }
+
+    #[test]
+    fn revision_two_chart_gains_presentation_without_overwriting_data_edits() {
+        let mut current = presentation();
+        current["metadata"]["pptx_import_revision"] = json!(2);
+        let chart = json!({"type":"Chart","id":"saved-chart","x":10,"y":20,
+            "width":200,"height":60,"rotation":0,"chart_type":"Bar",
+            "data":{"labels":["Jan"],"datasets":[{"label":"Revenue","values":[40]}]}});
+        current["slides"][0]["elements"] = json!([chart]);
+        let mut source = current.clone();
+        source["metadata"]["pptx_import_revision"] = json!(3);
+        source["slides"][0]["elements"][0]["id"] = json!("source-chart");
+        source["slides"][0]["elements"][0]["data"]["presentation"] =
+            json!({"title":"Revenue","legend":true});
+        source["slides"][0]["elements"][0]["data"]["datasets"][0]["color"] = json!("#336699");
+        let recovered = merge_original_layout(1, &current, &source).unwrap();
+        assert_eq!(recovered["slides"][0]["elements"][0]["id"], "saved-chart");
+        assert_eq!(
+            recovered["slides"][0]["elements"][0]["data"]["presentation"]["title"],
+            "Revenue"
+        );
+        current["slides"][0]["elements"][0]["data"]["datasets"][0]["values"][0] = json!(41);
+        assert!(merge_original_layout(1, &current, &source).is_none());
+    }
+
+    #[test]
+    fn old_table_grid_recovers_merges_but_rejects_text_or_geometry_changes() {
+        let mut children = Vec::new();
+        for (index, value) in ["Heading", "", "A", "B"].iter().enumerate() {
+            let mut cell = text(&format!("cell-{index}"), value);
+            cell["x"] = json!(10 + (index % 2) * 100);
+            cell["y"] = json!(20 + (index / 2) * 40);
+            cell["width"] = json!(100);
+            cell["height"] = json!(40);
+            children.push(cell);
+        }
+        let mut current = presentation();
+        current["metadata"]["pptx_import_revision"] = json!(2);
+        current["slides"][0]["elements"] = json!([{"type":"Group","id":"saved-table",
+            "custom_table":true,"elements":children}]);
+        let mut source = original();
+        source["slides"][0]["elements"] = json!([{"type":"Table","id":"new-table",
+        "x":10,"y":20,"width":200,"height":80,"rotation":0,
+        "column_widths":[100,100],"row_heights":[40,40],"cells":[
+            {"row":0,"column":0,"row_span":1,"column_span":2,"content":[{"text":"Heading"}]},
+            {"row":1,"column":0,"row_span":1,"column_span":1,"content":[{"text":"A"}]},
+            {"row":1,"column":1,"row_span":1,"column_span":1,"content":[{"text":"B"}]}
+        ]}]);
+        let recovered = merge_original_layout(1, &current, &source).unwrap();
+        let table = &recovered["slides"][0]["elements"][0];
+        assert_eq!(table["type"], "Table");
+        assert_eq!(table["id"], "saved-table");
+        assert_eq!(table["custom_table"], true);
+        assert_eq!(table["cells"][0]["column_span"], 2);
+        assert!(table.get("elements").is_none());
+        let mut edited = current.clone();
+        edited["slides"][0]["elements"][0]["elements"][2]["content"][0]["text"] = json!("Edited");
+        assert!(merge_original_layout(1, &edited, &source).is_none());
+        let mut moved = current;
+        moved["slides"][0]["elements"][0]["elements"][1]["x"] = json!(111);
+        assert!(merge_original_layout(1, &moved, &source).is_none());
     }
 
     #[test]

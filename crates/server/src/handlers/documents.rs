@@ -348,6 +348,12 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
         }
     };
 
+    use syntra_core::schema::file_versions::dsl as fv;
+    let has_original = diesel::dsl::exists(
+        fv::file_versions
+            .filter(fv::file_id.eq(d::file_id))
+            .filter(fv::version_number.eq(0)),
+    );
     let row = d::documents
         .inner_join(f::files.on(d::file_id.eq(f::id)))
         .filter(d::id.eq(&resolved_doc_id))
@@ -361,6 +367,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
             f::owner_id,
             d::created_at,
             d::updated_at,
+            has_original,
         ))
         .first::<(
             String,
@@ -372,6 +379,7 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
             String,
             String,
             String,
+            bool,
         )>(&mut conn)
         .await
         .optional();
@@ -387,13 +395,14 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
             owner_val,
             created_val,
             updated_val,
+            has_original,
         ))) => {
             let doc_type = DocumentType::parse_lossy(&doc_type_str);
             let content: serde_json::Value = content_opt
                 .as_deref()
                 .and_then(|v| serde_json::from_str(v).ok())
                 .unwrap_or_default();
-            let content = if doc_type == DocumentType::Writer {
+            let content = if has_original && doc_type == DocumentType::Writer {
                 crate::services::legacy_writer_layout::for_response(
                     &state.db,
                     &state.storage,
@@ -402,8 +411,17 @@ pub async fn get_document(req: &mut Request, depot: &mut Depot, res: &mut Respon
                     content,
                 )
                 .await
-            } else if doc_type == DocumentType::Slides {
+            } else if has_original && doc_type == DocumentType::Slides {
                 crate::services::legacy_slides_layout::for_response(
+                    &state.db,
+                    &state.storage,
+                    &file_id_val,
+                    version_val,
+                    content,
+                )
+                .await
+            } else if has_original && doc_type == DocumentType::Calc {
+                crate::services::legacy_calc_layout::for_response(
                     &state.db,
                     &state.storage,
                     &file_id_val,

@@ -12,8 +12,8 @@ use calamine::{Data, Reader, Xlsx};
 use serde::{Deserialize, Serialize};
 use syntra_doc_engine::calc::{
     Cell, CellRef, CellValue, ConditionalFormat, ConditionalRule, DataValidation, MergedRange,
-    NamedRange, PivotTable, Sheet, SheetChart, SheetChartType, ValidationRule, Workbook,
-    WorkbookMetadata,
+    NamedRange, PivotTable, Sheet, SheetChart, SheetChartType, SheetImage, ValidationRule,
+    Workbook, WorkbookMetadata,
 };
 use zip::write::{SimpleFileOptions, ZipWriter};
 
@@ -86,6 +86,8 @@ struct NativeSheet {
     conditional_formats: Vec<ConditionalFormat>,
     data_validations: Vec<DataValidation>,
     charts: Vec<SheetChart>,
+    #[serde(default)]
+    images: Vec<SheetImage>,
 }
 
 impl From<&Workbook> for NativeWorkbook {
@@ -122,6 +124,7 @@ impl NativeWorkbook {
                     conditional_formats: sheet.conditional_formats.clone(),
                     data_validations: sheet.data_validations.clone(),
                     charts: sheet.charts.clone(),
+                    images: sheet.images.clone(),
                 })
                 .collect(),
             named_ranges: workbook.named_ranges.clone(),
@@ -152,6 +155,7 @@ impl From<NativeWorkbook> for Workbook {
                     conditional_formats: sheet.conditional_formats,
                     data_validations: sheet.data_validations,
                     charts: sheet.charts,
+                    images: sheet.images,
                 })
                 .collect(),
             named_ranges: workbook.named_ranges,
@@ -170,6 +174,18 @@ pub fn workbook_to_xlsx(wb: &Workbook) -> Result<Vec<u8>, String> {
 /// events. Counts describe the passes documented by [`XlsxExportStats`],
 /// without imposing a latency, memory or total-CPU guarantee.
 pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExportStats), String> {
+    if wb.sheets.iter().any(|sheet| {
+        sheet.images.len().saturating_add(sheet.charts.len())
+            > syntra_doc_engine::calc::MAX_SHEET_DRAWINGS
+    }) || wb
+        .sheets
+        .iter()
+        .map(|sheet| sheet.images.len().saturating_add(sheet.charts.len()))
+        .sum::<usize>()
+        > syntra_doc_engine::calc::MAX_WORKBOOK_DRAWINGS
+    {
+        return Err("Workbook exceeds the drawing-count budget".into());
+    }
     let mut stats = XlsxExportStats::default();
     crate::ooxml_import::model_budget(&NativeWorkbook::from_with_stats(wb, &mut stats))?;
     if wb
@@ -245,7 +261,7 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
             "\n  <Override PartName=\"/xl/worksheets/sheet{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
             i + 1
         ));
-        if !wb.sheets[i].charts.is_empty() {
+        if !wb.sheets[i].charts.is_empty() || !wb.sheets[i].images.is_empty() {
             ct.push_str(&format!(
                 "\n  <Override PartName=\"/xl/drawings/drawing{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawing+xml\"/>",
                 i + 1
@@ -257,6 +273,7 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
             "\n  <Override PartName=\"/xl/charts/chart{chart_number}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.chart+xml\"/>"
         ));
     }
+    ct.push_str("<Default Extension=\"png\" ContentType=\"image/png\"/>");
     ct.push_str(&pivots::content_types(&pivot_parts));
     ct.push_str("\n</Types>");
     write!(zip, "{}", ct).map_err(|e| e.to_string())?;
@@ -367,7 +384,7 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
             &ss_index,
             &styles,
             differential_offset,
-            (!sheet.charts.is_empty()).then_some(i + 1),
+            (!sheet.charts.is_empty() || !sheet.images.is_empty()).then_some(i + 1),
             &mut stats,
         );
         sheet_xml = sheet_xml.replace(
@@ -378,13 +395,13 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
         differential_offset += sheet.conditional_formats.len();
 
         let pivot_rels = pivots::sheet_rels(&pivot_parts, i);
-        if !sheet.charts.is_empty() || !pivot_rels.is_empty() {
+        if !sheet.charts.is_empty() || !sheet.images.is_empty() || !pivot_rels.is_empty() {
             zip.start_file(
                 format!("xl/worksheets/_rels/sheet{}.xml.rels", i + 1),
                 options,
             )
             .map_err(|e| e.to_string())?;
-            let drawing = if !sheet.charts.is_empty() {
+            let drawing = if !sheet.charts.is_empty() || !sheet.images.is_empty() {
                 format!(
                     "<Relationship Id=\"rIdDrawing\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing\" Target=\"../drawings/drawing{}.xml\"/>",
                     i + 1
@@ -394,7 +411,7 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
             };
             write!(zip,"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{drawing}{pivot_rels}</Relationships>").map_err(|e|e.to_string())?;
         }
-        if !sheet.charts.is_empty() {
+        if !sheet.charts.is_empty() || !sheet.images.is_empty() {
             zip.start_file(format!("xl/drawings/drawing{}.xml", i + 1), options)
                 .map_err(|e| e.to_string())?;
             write!(zip, "{}", drawing_xml(sheet, chart_offset)).map_err(|e| e.to_string())?;
@@ -404,15 +421,59 @@ pub fn workbook_to_xlsx_with_stats(wb: &Workbook) -> Result<(Vec<u8>, XlsxExport
                 options,
             )
             .map_err(|e| e.to_string())?;
-            write!(zip, "{}", drawing_relationships_xml(sheet, chart_offset))
-                .map_err(|e| e.to_string())?;
+            write!(
+                zip,
+                "{}",
+                drawing_relationships_xml(sheet, chart_offset, i + 1)
+            )
+            .map_err(|e| e.to_string())?;
 
             for chart in &sheet.charts {
                 chart_offset += 1;
                 zip.start_file(format!("xl/charts/chart{chart_offset}.xml"), options)
                     .map_err(|e| e.to_string())?;
-                write!(zip, "{}", sheet_chart_xml(chart, sheet, &mut stats))
+                write!(zip, "{}", sheet_chart_xml(chart, sheet, &mut stats)?)
                     .map_err(|e| e.to_string())?;
+            }
+            for (image_index, image) in sheet.images.iter().enumerate() {
+                use base64::Engine;
+                let (prefix, data) = image
+                    .data_url
+                    .split_once(',')
+                    .ok_or("Worksheet image must contain embedded bitmap data")?;
+                if !matches!(
+                    prefix,
+                    "data:image/png;base64" | "data:image/jpeg;base64" | "data:image/gif;base64"
+                ) || data.len() > 24 * 1024 * 1024
+                {
+                    return Err("Invalid worksheet image format or size".into());
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|e| e.to_string())?;
+                let mut reader = image::ImageReader::new(Cursor::new(&bytes))
+                    .with_guessed_format()
+                    .map_err(|e| e.to_string())?;
+                let mut limits = image::Limits::default();
+                limits.max_image_width = Some(16384);
+                limits.max_image_height = Some(16384);
+                limits.max_alloc = Some(128 * 1024 * 1024);
+                reader.limits(limits);
+                let decoded = reader.decode().map_err(|e| e.to_string())?;
+                let mut png = Cursor::new(Vec::new());
+                if prefix == "data:image/png;base64" && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    png.write_all(&bytes).map_err(|e| e.to_string())?;
+                } else {
+                    decoded
+                        .write_to(&mut png, image::ImageFormat::Png)
+                        .map_err(|e| e.to_string())?;
+                }
+                zip.start_file(
+                    format!("xl/media/sheet{}_image{}.png", i + 1, image_index + 1),
+                    options,
+                )
+                .map_err(|e| e.to_string())?;
+                zip.write_all(png.get_ref()).map_err(|e| e.to_string())?;
             }
         }
     }
@@ -620,10 +681,10 @@ fn sheet_to_xml(
                             if *b { 1 } else { 0 }
                         ));
                     }
-                    // Date — store as inline string
+                    // ISO 8601 dates retain their type and number format.
                     (CellValue::Date(d), None) => {
                         xml.push_str(&format!(
-                            "<c r=\"{}\" t=\"inlineStr\"><is><t>{}</t></is></c>",
+                            "<c r=\"{}\" t=\"d\"><v>{}</v></c>",
                             cell_ref,
                             escape_xml(d)
                         ));
@@ -724,7 +785,7 @@ fn differential_format_xml(format: &syntra_doc_engine::calc::CellFormat) -> Stri
     }
     if let Some(color) = &format.bg_color {
         xml.push_str(&format!(
-            "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF{}\"/><bgColor indexed=\"64\"/></patternFill></fill>",
+            "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF{0}\"/><bgColor rgb=\"FF{0}\"/></patternFill></fill>",
             escape_xml(color.trim_start_matches('#'))
         ));
     }
@@ -834,6 +895,11 @@ fn drawing_xml(sheet: &Sheet, chart_offset: usize) -> String {
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
     );
     for (index, chart) in sheet.charts.iter().enumerate() {
+        if let Some(position) = &chart.drawing {
+            xml.push_str(&drawing_anchor_open(&chart.anchor_start, position));
+            xml.push_str(&format!("<xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{}\" name=\"{}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm/><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"rIdChart{}\"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor>",index+2,escape_xml(&chart.title),chart_offset+index+1));
+            continue;
+        }
         xml.push_str(&format!(
             "<xdr:twoCellAnchor><xdr:from><xdr:col>{}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{}\" name=\"{}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm/><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"rIdChart{}\"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>",
             chart.anchor_start.col,
@@ -845,11 +911,42 @@ fn drawing_xml(sheet: &Sheet, chart_offset: usize) -> String {
             chart_offset + index + 1,
         ));
     }
+    for (index, image) in sheet.images.iter().enumerate() {
+        xml.push_str(&drawing_anchor_open(&image.anchor_start, &image.drawing));
+        let crop = |i: usize| (f64::from(image.crop[i]).clamp(0., 0.99) * 100000.).round() as u32;
+        let rotation = if image.rotation.is_finite() {
+            (f64::from(image.rotation) * 60000.) as i64
+        } else {
+            0
+        };
+        xml.push_str(&format!("<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{}\" name=\"{}\"/><xdr:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"rIdImage{}\"/><a:srcRect l=\"{}\" t=\"{}\" r=\"{}\" b=\"{}\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm rot=\"{rotation}\"><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>",sheet.charts.len()+index+2,escape_xml(&image.name),index+1,crop(0),crop(1),crop(2),crop(3),(f64::from(image.drawing.width)*9525.).max(1.) as u64,(f64::from(image.drawing.height)*9525.).max(1.) as u64));
+    }
     xml.push_str("</xdr:wsDr>");
     xml
 }
 
-fn drawing_relationships_xml(sheet: &Sheet, chart_offset: usize) -> String {
+fn drawing_anchor_open(
+    start: &CellRef,
+    position: &syntra_doc_engine::calc::SheetDrawingPosition,
+) -> String {
+    let emu = |n: f32| {
+        if n.is_finite() {
+            (f64::from(n).clamp(0., 100000.) * 9525.).round() as u64
+        } else {
+            0
+        }
+    };
+    format!(
+        "<xdr:oneCellAnchor><xdr:from><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:from><xdr:ext cx=\"{}\" cy=\"{}\"/>",
+        start.col,
+        emu(position.offset_x),
+        start.row,
+        emu(position.offset_y),
+        emu(position.width).max(1),
+        emu(position.height).max(1)
+    )
+}
+fn drawing_relationships_xml(sheet: &Sheet, chart_offset: usize, sheet_number: usize) -> String {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
     );
@@ -859,11 +956,18 @@ fn drawing_relationships_xml(sheet: &Sheet, chart_offset: usize) -> String {
             "<Relationship Id=\"rIdChart{chart_number}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart\" Target=\"../charts/chart{chart_number}.xml\"/>"
         ));
     }
+    for index in 0..sheet.images.len() {
+        xml.push_str(&format!("<Relationship Id=\"rIdImage{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/sheet{}_image{}.png\"/>",index+1,sheet_number,index+1));
+    }
     xml.push_str("</Relationships>");
     xml
 }
 
-fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet, stats: &mut XlsxExportStats) -> String {
+fn sheet_chart_xml(
+    chart: &SheetChart,
+    sheet: &Sheet,
+    stats: &mut XlsxExportStats,
+) -> Result<String, String> {
     use syntra_doc_engine::slides::{ChartData, ChartType, Dataset, SlideChart};
     fn values(
         sheet: &Sheet,
@@ -889,6 +993,7 @@ fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet, stats: &mut XlsxExportStat
         values
     }
     let mut data = chart.cached_data.clone().unwrap_or_else(|| ChartData {
+        presentation: None,
         labels: Vec::new(),
         datasets: vec![Dataset {
             name: chart.title.clone(),
@@ -930,6 +1035,11 @@ fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet, stats: &mut XlsxExportStat
         SheetChartType::Doughnut => ChartType::Doughnut,
         SheetChartType::Scatter => ChartType::Scatter,
     };
+    data.presentation = Some(chart.resolved_presentation());
+    let has_title = data
+        .presentation
+        .as_ref()
+        .is_some_and(|p| p.title.is_some());
     let slide = SlideChart {
         id: chart.id,
         x: 0.0,
@@ -939,15 +1049,17 @@ fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet, stats: &mut XlsxExportStat
         chart_type: kind,
         data,
     };
-    let mut xml = crate::pptx::chart_part_xml(&slide);
+    let mut xml = crate::pptx::chart_part_xml(&slide)?;
     // Keep the worksheet title in a standard DrawingML chart title.
     let title = format!(
         "<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{}</a:t></a:r></a:p></c:rich></c:tx></c:title>",
         escape_xml(&chart.title)
     );
-    xml = xml
-        .replacen("<c:chart>", &format!("<c:chart>{title}"), 1)
-        .replace("<c:autoTitleDeleted val=\"1\"/>", "");
+    if !has_title {
+        xml = xml
+            .replacen("<c:chart>", &format!("<c:chart>{title}"), 1)
+            .replace("<c:autoTitleDeleted val=\"1\"/>", "");
+    }
     fn reference(sheet: &Sheet, start: &CellRef, end: &CellRef) -> String {
         escape_xml(&format!(
             "'{}'!{}:{}",
@@ -994,7 +1106,10 @@ fn sheet_chart_xml(chart: &SheetChart, sheet: &Sheet, stats: &mut XlsxExportStat
         xml.replace_range(start..end, &series);
         offset = start + length;
     }
-    xml
+    if xml.len() as u64 > crate::ooxml::MAX_PART_BYTES {
+        return Err("Native chart XML exceeds the Office part expansion budget".into());
+    }
+    Ok(xml)
 }
 
 /// Escape characters that are special in XML.
@@ -1020,7 +1135,9 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
     if let Some(model) = crate::native_package::read(bytes, &native_paths)
         && let Ok(workbook) = serde_json::from_value::<NativeWorkbook>(model)
     {
-        return Ok(workbook.into());
+        let mut workbook: Workbook = workbook.into();
+        workbook.metadata.xlsx_import_revision = 2;
+        return Ok(workbook);
     }
     external_import::preflight_shared_strings(bytes)?;
     let cursor = Cursor::new(bytes.to_vec());
@@ -1087,6 +1204,7 @@ pub fn xlsx_to_workbook(bytes: &[u8]) -> Result<Workbook, String> {
     }
 
     external_import::enrich(bytes, &mut wb)?;
+    wb.metadata.xlsx_import_revision = 2;
     crate::ooxml_import::model_budget(&NativeWorkbook::from(&wb))?;
     Ok(wb)
 }
@@ -1099,7 +1217,7 @@ fn data_to_cell_value(data: &Data) -> Option<CellValue> {
         Data::Int(i) => Some(CellValue::Number(*i as f64)),
         Data::Bool(b) => Some(CellValue::Boolean(*b)),
         Data::DateTime(dt) => Some(CellValue::Text(dt.to_string())),
-        Data::DateTimeIso(s) => Some(CellValue::Text(s.clone())),
+        Data::DateTimeIso(s) => Some(CellValue::Date(s.clone())),
         Data::DurationIso(s) => Some(CellValue::Text(s.clone())),
         Data::Error(e) => Some(CellValue::Error(format!("{:?}", e))),
     }
@@ -1333,6 +1451,7 @@ mod tests {
             error_message: Some("Invalid status".into()),
         });
         wb.sheets[0].charts.push(SheetChart {
+            drawing: None,
             id: uuid::Uuid::new_v4(),
             title: "Values".into(),
             chart_type: SheetChartType::Bar,

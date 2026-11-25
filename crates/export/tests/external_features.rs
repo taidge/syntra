@@ -280,12 +280,13 @@ fn external_hyperlinks_are_filtered_and_media_is_budgeted_before_base64() {
     };
     assert!(text.content[0].link.is_none());
     assert!(model.metadata.import_warnings.join(" ").contains("unsafe"));
-    // Highly compressed media would fit the ZIP upload limit, but must be
-    // rejected before creating a base64 String or a renderable image model.
+    // A media part can fit the package's 64 MiB part budget while exceeding
+    // the raster importer's 32 MiB source limit. Reject it before base64 or
+    // image decoding; the smaller inline budget applies after optimization.
     let oversized = replace(
         fixture,
         "ppt/media/pixel.png",
-        &"x".repeat(2 * 1024 * 1024 + 1),
+        &"x".repeat(32 * 1024 * 1024 + 1),
     );
     let model = syntra_export::pptx::pptx_to_presentation(&oversized).unwrap();
     assert!(
@@ -294,7 +295,13 @@ fn external_hyperlinks_are_filtered_and_media_is_budgeted_before_base64() {
             .iter()
             .any(|e| matches!(e, SlideElement::Image(_)))
     );
-    assert!(model.metadata.import_warnings.join(" ").contains("budget"));
+    assert!(
+        model
+            .metadata
+            .import_warnings
+            .join(" ")
+            .contains("bounded source size")
+    );
     let slide = part(fixture, "ppt/slides/slide1.xml");
     let begin = slide.find("<p:pic>").unwrap();
     let end = slide[begin..].find("</p:pic>").unwrap() + begin + 8;
@@ -308,12 +315,21 @@ fn external_hyperlinks_are_filtered_and_media_is_budgeted_before_base64() {
             .iter()
             .filter(|e| matches!(e, SlideElement::Image(_)))
             .count(),
-        8
+        0,
+        "invalid PNG bytes must never become renderable images, even when reused"
     );
     assert!(
         serde_json::to_vec(&model).unwrap().len() <= syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES
     );
-    assert!(model.metadata.import_warnings.join(" ").contains("budget"));
+    assert!(
+        model
+            .metadata
+            .import_warnings
+            .join(" ")
+            .contains("could not be decoded")
+    );
+    // Valid reused rasters, optimization and the per-occurrence serialized
+    // budget are covered independently by pptx_import::media_tests.
 }
 
 #[test]
@@ -507,13 +523,10 @@ fn bounded_large_drawingml_numbers_still_make_a_reloadable_typed_model() {
     .unwrap();
     let model: Presentation =
         serde_json::from_value(serde_json::to_value(&model).unwrap()).unwrap();
-    let SlideElement::Group(table) = &model.slides[0].elements[0] else {
+    let SlideElement::Table(table) = &model.slides[0].elements[0] else {
         panic!("table")
     };
-    let SlideElement::TextBox(cell) = &table.elements[0] else {
-        panic!("cell")
-    };
-    assert!(cell.width.is_finite() && cell.height.is_finite());
+    assert!(table.column_widths[0].is_finite() && table.row_heights[0].is_finite());
 }
 
 #[test]
@@ -707,5 +720,12 @@ fn calc_reader_preserves_excel_column_widths_merges_and_short_dates() {
     let sheets = book.sheets.len();
     assert_eq!(html.matches("<section class=\"sheet\">").count(), sheets);
     let print = syntra_export::pdf::document_to_print_html(&content, "calc").unwrap();
-    assert!(print.html.matches("<section class=\"sheet\">").count() > sheets);
+    assert_eq!(
+        print.html.matches("<section class=\"sheet\"").count(),
+        sheets
+    );
+    assert!(
+        print.html.contains(">6</td>"),
+        "The far-right column must remain on the printed page"
+    );
 }

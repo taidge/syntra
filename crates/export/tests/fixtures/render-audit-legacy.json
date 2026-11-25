@@ -1,0 +1,1241 @@
+{
+  "body": [
+    {
+      "alignment": "Center",
+      "id": "696a0dc1-9a87-4eeb-a3ab-9d2a2ca8aa6c",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": true,
+          "color": "#000000",
+          "font_family": "SimHei",
+          "font_size": 20,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "中英文文档排版核对",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 15,
+        "before": 0,
+        "line_height": 1
+      },
+      "type": "Paragraph"
+    },
+    {
+      "alignment": "Left",
+      "id": "e71c96c3-9882-45a5-99b5-84b4d865c969",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "本文用于核对文字格式、段落布局、图片与表格在不同渲染器中的显示。所有内容均为测试数据。",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    },
+    {
+      "alignment": "Left",
+      "id": "cfc1e5df-77ad-4a2f-9945-18db284bd775",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": "#000000",
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "普通宋体 12pt / Times New Roman 12pt  ",
+          "underline": false
+        },
+        {
+          "background_color": null,
+          "bold": true,
+          "color": "#000000",
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "粗体 Bold  ",
+          "underline": false
+        },
+        {
+          "background_color": null,
+          "bold": false,
+          "color": "#000000",
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": true,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "斜体 Italic  ",
+          "underline": false
+        },
+        {
+          "background_color": null,
+          "bold": false,
+          "color": "#1D4ED8",
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "蓝色下划线",
+          "underline": true
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    },
+    {
+      "alignment": "Left",
+      "id": "ad91cb69-aba6-4353-a0ef-a510009ab825",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 16,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "字号测试 16pt 中文",
+          "underline": false
+        },
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 9,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "  small 9pt",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    },
+    {
+      "alignment": "Left",
+      "id": "d072b19c-d8d2-439a-b0a1-97e3f5da9ab7",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "第一行缩进两个汉字，行距为固定二十磅。本段包含足够的文字来核对折行位置和段落的左右边界。中文与 English words 混合出现，末尾标点应与原稿保持一致。第二行和第三行不应继承首行缩进。",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 12,
+        "before": 9,
+        "line_height": 1
+      },
+      "type": "Paragraph"
+    },
+    {
+      "alignment": "Right",
+      "id": "a7f1a0cc-fff9-4ab3-8c2d-a9cc9d7b845d",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "右对齐段落  Right aligned  2026年11月17日",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    },
+    {
+      "id": "5578cae1-e33a-4683-bae4-49714f27b8ae",
+      "level": 1,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": true,
+          "color": "#000000",
+          "font_family": "SimHei",
+          "font_size": 14,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "编号与图片",
+          "underline": false
+        }
+      ],
+      "type": "Heading"
+    },
+    {
+      "id": "7ddfd047-f4c9-4539-8bf8-3e6152f40c36",
+      "items": [
+        {
+          "children": [],
+          "runs": [
+            {
+              "background_color": null,
+              "bold": false,
+              "color": null,
+              "font_family": "SimSun",
+              "font_size": 12,
+              "italic": false,
+              "link": null,
+              "strikethrough": false,
+              "subscript": false,
+              "superscript": false,
+              "text": "核对编号从一开始。",
+              "underline": false
+            }
+          ]
+        },
+        {
+          "children": [],
+          "runs": [
+            {
+              "background_color": null,
+              "bold": false,
+              "color": null,
+              "font_family": "SimSun",
+              "font_size": 12,
+              "italic": false,
+              "link": null,
+              "strikethrough": false,
+              "subscript": false,
+              "superscript": false,
+              "text": "核对同一编号序列的连续性。",
+              "underline": false
+            }
+          ]
+        },
+        {
+          "children": [],
+          "runs": [
+            {
+              "background_color": null,
+              "bold": false,
+              "color": null,
+              "font_family": "SimSun",
+              "font_size": 12,
+              "italic": false,
+              "link": null,
+              "strikethrough": false,
+              "subscript": false,
+              "superscript": false,
+              "text": "核对中英文标点和段落间距。",
+              "underline": false
+            }
+          ]
+        }
+      ],
+      "ordered": true,
+      "type": "List"
+    },
+    {
+      "alignment": "Left",
+      "alt_text": "Picture 1",
+      "height": 115.1999969482422,
+      "id": "c7bd32ff-5b2c-43eb-b1bd-de1de44bbe54",
+      "type": "Image",
+      "url": "data:image/png;base64,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",
+      "width": 460.7999877929687
+    },
+    {
+      "alignment": "Center",
+      "id": "c7e9c254-baf9-4bac-bd18-0581974ea6fd",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 10,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "图一  蓝色矩形 绿色圆形与橙色三角形",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    },
+    {
+      "alignment": "Left",
+      "id": "77eae914-795d-4518-938c-e79d73775767",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "\n",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    },
+    {
+      "id": "45e4cafe-db81-4a76-9d91-1491e632cd5d",
+      "level": 1,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": true,
+          "color": "#000000",
+          "font_family": "SimHei",
+          "font_size": 14,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "第二页表格与段落",
+          "underline": false
+        }
+      ],
+      "type": "Heading"
+    },
+    {
+      "alignment": "Left",
+      "id": "3acf1d2f-94a7-4d95-91fb-f7c57c9de704",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "此段应出现在第二页，前面的显式分页符应保留。表格包含横向合并、纵向合并、底色和换行文字。",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    },
+    {
+      "column_widths": [
+        0
+      ],
+      "id": "3d00af83-5ea5-426d-b40a-0b703e086759",
+      "rows": [
+        {
+          "cells": [
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "71152bbd-30ae-4806-af7f-39b5a0a8b97b",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": true,
+                      "color": "#FFFFFF",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "合并标题  Rendering checklist",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "4b9f43eb-d1bd-414b-b08b-4ebbe001c04c",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": true,
+                      "color": "#FFFFFF",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "项目",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            },
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "db0538e5-2769-4dbc-aea6-437e6b9b219f",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": true,
+                      "color": "#FFFFFF",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "说明",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            },
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "5f1f6773-28fb-418d-b5e2-474e752e317c",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": true,
+                      "color": "#FFFFFF",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "数量",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "c5bc14aa-6bb1-4aa9-a35a-f0e238498285",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": false,
+                      "color": "#000000",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "跨两行",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            },
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "bd0cbd9a-b6fe-439c-8df3-aa70293b5bbe",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": false,
+                      "color": "#000000",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "嵌入图片需保留尺寸和位置。\n第二行文本应在同一单元格内。",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            },
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "55914e85-8021-41c3-b283-cd48a4cfd810",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": false,
+                      "color": "#000000",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "12",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "2bf91635-1530-4b17-bdd2-d29352b2fe9f",
+                  "indent_level": 0,
+                  "runs": [],
+                  "spacing": {
+                    "after": 8,
+                    "before": 0,
+                    "line_height": 1.149999976158142
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            },
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "0848ec4c-a65a-43c5-8148-1c65ba58b51d",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": false,
+                      "color": "#000000",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "宋体与英文字体应保留。",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            },
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "32606e81-b6e1-4520-ae33-7d0f8a5e335f",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": false,
+                      "color": "#000000",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "25%",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "a238bdd9-9447-4bfc-bc0b-374a007e99ee",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": false,
+                      "color": "#000000",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "小计",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            },
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "1b7ba636-2192-447a-ae0e-3eaa39167f95",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": false,
+                      "color": "#000000",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "包含合并单元格的表格",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            },
+            {
+              "background_color": null,
+              "blocks": [
+                {
+                  "alignment": "Left",
+                  "id": "1e36445a-8a09-4633-9804-5ffb95b548e3",
+                  "indent_level": 0,
+                  "runs": [
+                    {
+                      "background_color": null,
+                      "bold": false,
+                      "color": "#000000",
+                      "font_family": "SimSun",
+                      "font_size": 11,
+                      "italic": false,
+                      "link": null,
+                      "strikethrough": false,
+                      "subscript": false,
+                      "superscript": false,
+                      "text": "1,234.50",
+                      "underline": false
+                    }
+                  ],
+                  "spacing": {
+                    "after": 3,
+                    "before": 0,
+                    "line_height": 1.2000000476837158
+                  },
+                  "type": "Paragraph"
+                }
+              ],
+              "col_span": 1,
+              "row_span": 1
+            }
+          ]
+        }
+      ],
+      "type": "Table"
+    },
+    {
+      "alignment": "Left",
+      "id": "1652d173-05db-4aa4-8461-1fd64a4f5a30",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "表格后段落应继续在表格下方，边框与单元格底色应清晰可见。",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    },
+    {
+      "alignment": "Left",
+      "id": "2c09cbc0-3d46-4df8-86f9-0d900acbe649",
+      "indent_level": 0,
+      "runs": [
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "手动换行第一行",
+          "underline": false
+        },
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "\n",
+          "underline": false
+        },
+        {
+          "background_color": null,
+          "bold": false,
+          "color": null,
+          "font_family": "SimSun",
+          "font_size": 12,
+          "italic": false,
+          "link": null,
+          "strikethrough": false,
+          "subscript": false,
+          "superscript": false,
+          "text": "手动换行第二行",
+          "underline": false
+        }
+      ],
+      "spacing": {
+        "after": 6,
+        "before": 0,
+        "line_height": 1.2000000476837158
+      },
+      "type": "Paragraph"
+    }
+  ],
+  "id": "60f1765e-97e3-4101-9a30-cf43676964df",
+  "metadata": {
+    "author": null,
+    "char_count": 0,
+    "created_at": "2026-11-16T18:11:34.898021600Z",
+    "modified_at": "2026-11-16T18:11:34.898021600Z",
+    "page_count": 1,
+    "word_count": 0
+  },
+  "page_settings": {
+    "height_mm": 296.93304443359375,
+    "margin_bottom": 19.049999237060547,
+    "margin_left": 21.59000015258789,
+    "margin_right": 21.59000015258789,
+    "margin_top": 19.049999237060547,
+    "orientation": "Portrait",
+    "width_mm": 210.0615234375
+  },
+  "professional": {
+    "bibliography": [],
+    "different_first_page": false,
+    "endnotes": [],
+    "footer": "Synthetic fixture  页码 ",
+    "footnotes": [],
+    "header": "Office rendering audit  文档渲染核对",
+    "mail_merge_fields": [],
+    "page_numbers": false,
+    "paragraph_formats": [
+      {
+        "alignment": "Center",
+        "block_id": "696a0dc1-9a87-4eeb-a3ab-9d2a2ca8aa6c",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "e71c96c3-9882-45a5-99b5-84b4d865c969",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "cfc1e5df-77ad-4a2f-9945-18db284bd775",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "ad91cb69-aba6-4353-a0ef-a510009ab825",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "d072b19c-d8d2-439a-b0a1-97e3f5da9ab7",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": 24,
+        "left_indent_pt": null,
+        "line_height_pt": 20,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": "Right",
+        "block_id": "a7f1a0cc-fff9-4ab3-8c2d-a9cc9d7b845d",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "5578cae1-e33a-4683-bae4-49714f27b8ae",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": "Center",
+        "block_id": "c7e9c254-baf9-4bac-bd18-0581974ea6fd",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "77eae914-795d-4518-938c-e79d73775767",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "45e4cafe-db81-4a76-9d91-1491e632cd5d",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "3acf1d2f-94a7-4d95-91fb-f7c57c9de704",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "71152bbd-30ae-4806-af7f-39b5a0a8b97b",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "4b9f43eb-d1bd-414b-b08b-4ebbe001c04c",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "db0538e5-2769-4dbc-aea6-437e6b9b219f",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "5f1f6773-28fb-418d-b5e2-474e752e317c",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "c5bc14aa-6bb1-4aa9-a35a-f0e238498285",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "bd0cbd9a-b6fe-439c-8df3-aa70293b5bbe",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "55914e85-8021-41c3-b283-cd48a4cfd810",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "0848ec4c-a65a-43c5-8148-1c65ba58b51d",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "32606e81-b6e1-4520-ae33-7d0f8a5e335f",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "a238bdd9-9447-4bfc-bc0b-374a007e99ee",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "1b7ba636-2192-447a-ae0e-3eaa39167f95",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "1e36445a-8a09-4633-9804-5ffb95b548e3",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "1652d173-05db-4aa4-8461-1fd64a4f5a30",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      },
+      {
+        "alignment": null,
+        "block_id": "2c09cbc0-3d46-4df8-86f9-0d900acbe649",
+        "first_line_indent_chars": null,
+        "first_line_indent_pt": null,
+        "left_indent_pt": null,
+        "line_height_pt": null,
+        "numbering_label": null,
+        "right_indent_pt": null
+      }
+    ],
+    "revisions": [],
+    "sections": [],
+    "table_of_contents": false
+  },
+  "styles": [],
+  "title": "Imported Document"
+}

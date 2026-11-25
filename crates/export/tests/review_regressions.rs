@@ -158,6 +158,7 @@ fn xlsx_cell_counts_include_chart_and_pivot_coordinate_lookups() {
     sheet.set_cell(1, 0, CellValue::Text("A".into()));
     sheet.set_cell(1, 1, CellValue::Number(10.0));
     sheet.charts.push(SheetChart {
+        drawing: None,
         id: uuid::Uuid::new_v4(),
         title: "Reads an absent coordinate too".into(),
         chart_type: SheetChartType::Bar,

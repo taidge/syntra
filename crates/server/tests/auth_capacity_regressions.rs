@@ -69,7 +69,7 @@ async fn owned_document_reads_use_five_leases_and_report_exact_sql_counts() {
         .register("doc_read", "doc_read@test.invalid", "Password123!")
         .await;
     let key = api_key(&server, &jwt).await;
-    let (document, _, _) = server.create_document(&jwt, "Owned", "writer", None).await;
+    let (document, _, _) = server.create_document(&jwt, "Warmup", "writer", None).await;
     let url = server.url(&format!("/api/v1/documents/{document}"));
 
     // Warm the API key's first-use display timestamp, then measure the
@@ -85,30 +85,35 @@ async fn owned_document_reads_use_five_leases_and_report_exact_sql_counts() {
             .status(),
         200
     );
-    for token in [&jwt, &key] {
-        let before = server.db.state().checkouts;
-        let response = server
-            .client
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .unwrap();
-        let id = request_id(&response);
-        assert_eq!(response.status(), 200);
-        assert_eq!(
-            response.json::<Value>().await.unwrap()["data"]["name"],
-            "Owned"
-        );
-        assert_eq!(server.db.state().checkouts - before, 5);
-        let output = logs.text();
-        let line = output.lines().find(|line| line.contains(&id)).unwrap();
-        assert!(line.contains("checkout_attempts=5"), "{line}");
-        assert!(line.contains("checkouts_acquired=5"), "{line}");
-        assert!(line.contains("statements_started=5"), "{line}");
-        assert!(line.contains("statements_completed=5"), "{line}");
-        assert!(line.contains("checkout_wait_us="), "{line}");
-        assert!(line.contains("sql_run_us="), "{line}");
+
+    for kind in ["writer", "calc", "slides"] {
+        let (document, _, _) = server.create_document(&jwt, "Owned", kind, None).await;
+        let url = server.url(&format!("/api/v1/documents/{document}"));
+        for token in [&jwt, &key] {
+            let before = server.db.state().checkouts;
+            let response = server
+                .client
+                .get(&url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap();
+            let id = request_id(&response);
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["data"]["name"],
+                "Owned"
+            );
+            assert_eq!(server.db.state().checkouts - before, 5, "{kind}");
+            let output = logs.text();
+            let line = output.lines().find(|line| line.contains(&id)).unwrap();
+            assert!(line.contains("checkout_attempts=5"), "{line}");
+            assert!(line.contains("checkouts_acquired=5"), "{line}");
+            assert!(line.contains("statements_started=5"), "{line}");
+            assert!(line.contains("statements_completed=5"), "{line}");
+            assert!(line.contains("checkout_wait_us="), "{line}");
+            assert!(line.contains("sql_run_us="), "{line}");
+        }
     }
 }
 

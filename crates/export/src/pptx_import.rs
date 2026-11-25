@@ -748,6 +748,14 @@ pub(crate) fn chart_data(
     warnings: &mut Vec<String>,
     points_remaining: &mut usize,
 ) -> Option<(ChartType, ChartData)> {
+    chart_data_with_theme(root, warnings, points_remaining, &Theme::default())
+}
+fn chart_data_with_theme(
+    root: &Node,
+    warnings: &mut Vec<String>,
+    points_remaining: &mut usize,
+    theme: &Theme,
+) -> Option<(ChartType, ChartData)> {
     let plot = root.desc("plotArea")?;
     let charts: Vec<_> = plot
         .children
@@ -763,15 +771,12 @@ pub(crate) fn chart_data(
     let chart = charts.first()?;
     if chart.name.contains("3D")
         || chart
-            .child("barDir")
-            .is_some_and(|n| n.attr("val") == Some("bar"))
-        || chart
             .child("grouping")
             .is_some_and(|n| !matches!(n.attr("val"), Some("standard" | "clustered")))
     {
         warn(
             warnings,
-            "3D, horizontal or stacked chart layout is approximated as a basic 2D chart; the original retains exact chart orientation/grouping.",
+            "3D or stacked chart layout is approximated as a basic 2D chart; the original retains exact chart orientation/grouping.",
         );
     }
     if plot.desc("logBase").is_some() {
@@ -863,14 +868,167 @@ pub(crate) fn chart_data(
             values,
             color: series
                 .child("spPr")
-                .and_then(|p| fill(p, &Theme::default())),
+                .and_then(|p| fill(p, theme))
+                .or_else(|| {
+                    theme
+                        .colors
+                        .get(&format!("accent{}", index % 6 + 1))
+                        .cloned()
+                }),
         });
     }
     if labels.is_empty() {
         let length = datasets.iter().map(|s| s.values.len()).max().unwrap_or(0);
         labels = (1..=length).map(|i| i.to_string()).collect();
     }
-    Some((kind, ChartData { labels, datasets }))
+    let presentation = chart_presentation(root, chart, theme);
+    Some((
+        kind,
+        ChartData {
+            labels,
+            datasets,
+            presentation: Some(presentation),
+        },
+    ))
+}
+
+fn chart_title(node: &Node) -> Option<String> {
+    let title = node.child("title")?;
+    let rich = title
+        .descendants("t")
+        .iter()
+        .map(|n| n.all_text())
+        .collect::<Vec<_>>()
+        .join("");
+    let text = if rich.is_empty() {
+        title.desc("v").map(Node::all_text).unwrap_or_default()
+    } else {
+        rich
+    };
+    (!text.is_empty()).then_some(text)
+}
+fn chart_presentation(root: &Node, chart: &Node, theme: &Theme) -> ChartPresentation {
+    let container = root.desc("chart").unwrap_or(root);
+    let text = root.child("txPr").and_then(|n| n.desc("defRPr"));
+    let labels = chart
+        .child("dLbls")
+        .or_else(|| chart.child("ser").and_then(|n| n.child("dLbls")));
+    let flag = |name| {
+        labels
+            .and_then(|n| n.child(name))
+            .and_then(|n| n.flag("val"))
+            .unwrap_or(false)
+    };
+    let axis = |name: &str| {
+        let n = container.desc(name);
+        let grid = n.and_then(|n| n.child("majorGridlines"));
+        let line = grid
+            .and_then(|n| n.child("spPr"))
+            .and_then(|n| n.child("ln"));
+        ChartAxis {
+            title: n.and_then(chart_title),
+            minimum: n
+                .and_then(|n| n.child("scaling"))
+                .and_then(|n| n.child("min"))
+                .and_then(|n| n.num("val")),
+            maximum: n
+                .and_then(|n| n.child("scaling"))
+                .and_then(|n| n.child("max"))
+                .and_then(|n| n.num("val")),
+            major_unit: n
+                .and_then(|n| n.child("majorUnit"))
+                .and_then(|n| n.num("val")),
+            hidden: n
+                .and_then(|n| n.child("delete"))
+                .and_then(|n| n.flag("val"))
+                .unwrap_or(false),
+            number_format: n
+                .and_then(|n| n.child("numFmt"))
+                .and_then(|n| n.attr("formatCode"))
+                .map(str::to_owned),
+            major_gridlines: grid.is_some(),
+            grid_color: line.and_then(|n| fill(n, theme)),
+            grid_width: line.and_then(|n| n.num("w")).map(|n| (n / EMU) as f32),
+        }
+    };
+    let legend = container.child("legend");
+    let mut point_colors = Vec::new();
+    for series in chart.children.iter().filter(|n| n.name == "ser") {
+        let mut colors = Vec::new();
+        for point in series.children.iter().filter(|n| n.name == "dPt") {
+            if let Some(index) = point
+                .child("idx")
+                .and_then(|n| n.num("val"))
+                .filter(|n| *n >= 0. && *n < 10000.)
+                .map(|n| n as usize)
+            {
+                colors.resize(colors.len().max(index + 1), None);
+                colors[index] = point.child("spPr").and_then(|n| fill(n, theme));
+            }
+        }
+        point_colors.push(colors);
+    }
+    ChartPresentation {
+        title: chart_title(container),
+        show_legend: legend.is_some(),
+        legend_position: legend
+            .and_then(|n| n.child("legendPos"))
+            .and_then(|n| n.attr("val"))
+            .unwrap_or("b")
+            .into(),
+        labels: ChartLabels {
+            show_value: flag("showVal"),
+            show_percent: flag("showPercent"),
+            show_category: flag("showCatName"),
+            show_series: flag("showSerName"),
+            position: labels
+                .and_then(|n| n.child("dLblPos"))
+                .and_then(|n| n.attr("val"))
+                .unwrap_or("")
+                .into(),
+            number_format: labels
+                .and_then(|n| n.child("numFmt"))
+                .and_then(|n| n.attr("formatCode"))
+                .map(str::to_owned),
+        },
+        category_axis: axis("catAx"),
+        value_axis: axis("valAx"),
+        font_family: text
+            .and_then(|n| n.child("latin"))
+            .and_then(|n| n.attr("typeface"))
+            .map(str::to_owned),
+        font_size: text
+            .and_then(|n| n.num("sz"))
+            .map(|n| (n / 75.) as f32)
+            .or(Some(40. / 3.)),
+        title_font_size: container
+            .child("title")
+            .and_then(|n| n.desc("defRPr").or_else(|| n.desc("rPr")))
+            .and_then(|n| n.num("sz"))
+            .map(|n| (n / 75.) as f32),
+        point_colors,
+        vary_colors: chart
+            .child("varyColors")
+            .and_then(|n| n.flag("val"))
+            .unwrap_or(false),
+        horizontal: chart.child("barDir").and_then(|n| n.attr("val")) == Some("bar"),
+        grouping: chart
+            .child("grouping")
+            .and_then(|n| n.attr("val"))
+            .map(str::to_owned),
+        gap_width: chart
+            .child("gapWidth")
+            .and_then(|n| n.num("val"))
+            .map(|n| n.clamp(0., 500.) as f32),
+        first_slice_angle: chart
+            .child("firstSliceAng")
+            .and_then(|n| n.num("val"))
+            .map(|n| n as f32),
+        hole_size: chart
+            .child("holeSize")
+            .and_then(|n| n.num("val"))
+            .map(|n| n as f32),
+    }
 }
 struct Context<'a, 'b> {
     archive: &'a mut Archive<'b>,
@@ -1005,7 +1163,7 @@ impl Context<'_, '_> {
                 .filter(|chart| !chart.external)
                 && let Ok(root) = xml::part(self.archive, &chart.target)
                 && let Some((chart_type, data)) =
-                    chart_data(&root, self.warnings, self.points_remaining)
+                    chart_data_with_theme(&root, self.warnings, self.points_remaining, &self.theme)
             {
                 return Some(SlideElement::Chart(SlideChart {
                     id,
@@ -1018,45 +1176,104 @@ impl Context<'_, '_> {
                 }));
             }
             if let Some(table) = node.desc("tbl") {
-                warn(
-                    self.warnings,
-                    "DrawingML tables are represented as positioned text cells; merged-cell geometry and table-specific styles may differ from the original.",
-                );
-                let columns: Vec<_> = table
+                if table.descendants("gridCol").len() > 1000
+                    || table.children.iter().filter(|n| n.name == "tr").count() > 1000
+                {
+                    warn(
+                        self.warnings,
+                        "DrawingML table exceeds the supported grid budget; the entire table is omitted from editing and the original retains the complete table.",
+                    );
+                    return None;
+                }
+                let columns: Vec<f32> = table
                     .descendants("gridCol")
                     .iter()
-                    .map(|n| n.num("w").unwrap_or(EMU) / EMU)
+                    .map(|n| (n.num("w").unwrap_or(EMU) / EMU).clamp(0., 10_000_000.) as f32)
                     .collect();
-                let mut y = b.y;
-                let mut elements = Vec::new();
-                for row in table.children.iter().filter(|n| n.name == "tr") {
-                    let height = (row.num("h").unwrap_or(EMU * 20.0) / EMU) as f32;
-                    let mut x = b.x;
+                let mut row_heights = Vec::new();
+                let mut cells = Vec::new();
+                for (ri, row) in table.children.iter().filter(|n| n.name == "tr").enumerate() {
+                    row_heights.push(
+                        (row.num("h").unwrap_or(EMU * 20.0) / EMU).clamp(0., 10_000_000.) as f32,
+                    );
                     for (ci, cell) in row.children.iter().filter(|n| n.name == "tc").enumerate() {
-                        let width = columns
-                            .get(ci)
-                            .copied()
-                            .unwrap_or(b.width as f64 / columns.len().max(1) as f64)
-                            as f32;
+                        if ci >= columns.len() {
+                            warn(
+                                self.warnings,
+                                "DrawingML table cells exceed the declared grid budget; the entire table is omitted from editing and the original retains the complete table.",
+                            );
+                            return None;
+                        }
+                        if cell.flag("hMerge") == Some(true) || cell.flag("vMerge") == Some(true) {
+                            continue;
+                        }
+                        if cells.len() >= 50000 {
+                            warn(
+                                self.warnings,
+                                "DrawingML table exceeds the supported cell budget; the entire table is omitted from editing and the original retains the complete table.",
+                            );
+                            return None;
+                        }
+                        let props = cell.child("tcPr");
+                        let mut layout = text_layout(cell, None).unwrap();
+                        let margin = |name: &str, default: f32| {
+                            props
+                                .and_then(|n| n.num(name))
+                                .map(|n| (n / EMU) as f32)
+                                .unwrap_or(default)
+                        };
+                        layout.inset_left = margin("marL", 9.6);
+                        layout.inset_right = margin("marR", 9.6);
+                        layout.inset_top = margin("marT", 4.8);
+                        layout.inset_bottom = margin("marB", 4.8);
+                        layout.vertical_alignment = match props.and_then(|n| n.attr("anchor")) {
+                            Some("ctr") => "center",
+                            Some("b") => "bottom",
+                            _ => "top",
+                        }
+                        .into();
+                        let edge = |name: &str| {
+                            props
+                                .and_then(|n| n.child(name))
+                                .filter(|n| n.child("noFill").is_none())
+                                .map(|n| SlideBorder {
+                                    color: fill(n, &self.theme).unwrap_or_else(|| "#000000".into()),
+                                    width: (n.num("w").unwrap_or(9525.) / EMU) as f32,
+                                })
+                        };
                         let content = runs(cell, None, &self.theme, &self.rels, self.warnings);
-                        elements.push(SlideElement::TextBox(TextBox {
-                            id: Uuid::new_v4(),
-                            x,
-                            y,
-                            width,
-                            height,
-                            rotation: b.rotation,
+                        cells.push(SlideTableCell {
+                            row: ri,
+                            column: ci,
+                            row_span: cell.num("rowSpan").unwrap_or(1.).clamp(1., 1000.) as usize,
+                            column_span: cell
+                                .num("gridSpan")
+                                .unwrap_or(1.)
+                                .clamp(1., columns.len().max(1) as f64)
+                                as usize,
                             content,
-                            background_color: cell.child("tcPr").and_then(|n| fill(n, &self.theme)),
-                            border: None,
-                            padding: 4.0,
-                            text_layout: text_layout(cell, None),
-                        }));
-                        x += width;
+                            background_color: props.and_then(|n| fill(n, &self.theme)),
+                            text_layout: layout,
+                            borders: TableCellBorders {
+                                top: edge("lnT"),
+                                right: edge("lnR"),
+                                bottom: edge("lnB"),
+                                left: edge("lnL"),
+                            },
+                        });
                     }
-                    y += height;
                 }
-                return Some(SlideElement::Group(ElementGroup { id, elements }));
+                return Some(SlideElement::Table(SlideTable {
+                    id,
+                    x: b.x,
+                    y: b.y,
+                    width: b.width,
+                    height: b.height,
+                    rotation: b.rotation,
+                    column_widths: columns,
+                    row_heights,
+                    cells,
+                }));
             }
             warn(
                 self.warnings,
@@ -1284,7 +1501,7 @@ pub(super) fn import(
         return Err("Unsupported presentation page dimensions".into());
     }
     let mut used_themes = BTreeSet::new();
-    result.metadata.pptx_import_revision = 2;
+    result.metadata.pptx_import_revision = 3;
     let mut media_remaining =
         MediaImporter::new(result.metadata.slide_width, result.metadata.slide_height);
     let mut points_remaining = syntra_doc_engine::MAX_DOCUMENT_CONTENT_BYTES / 200;

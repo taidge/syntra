@@ -12,12 +12,16 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use syntra_doc_engine::writer::{
-    Alignment, Block, Blockquote, CodeBlock, Heading, ImageBlock, List, ListItem, Paragraph,
-    ParagraphFormat, Spacing, Table, TableCell, TableRow, TextRun, WriterDocument,
+    Alignment, Block, Blockquote, CellVerticalAlignment, CodeBlock, Heading, ImageBlock, List,
+    ListItem, ListItemLayout, Paragraph, ParagraphFormat, Spacing, Table, TableCell,
+    TableCellLayout, TableRow, TextRun, WriterDocument,
 };
 use uuid::Uuid;
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
+
+#[path = "writer_font_metrics.rs"]
+mod writer_font_metrics;
 
 const MAX_EMBEDDED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: usize = 50 * 1024 * 1024;
@@ -276,7 +280,12 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
     if !doc.professional.header.is_empty() {
         zip.start_file("word/header1.xml", options)
             .map_err(|e| e.to_string())?;
-        write!(zip, "{}", header_xml(&doc.professional.header)).map_err(|e| e.to_string())?;
+        write!(
+            zip,
+            "{}",
+            header_xml(&doc.professional.header, doc.professional.header_alignment)
+        )
+        .map_err(|e| e.to_string())?;
     }
     if !doc.professional.footer.is_empty() || doc.professional.page_numbers {
         zip.start_file("word/footer1.xml", options)
@@ -284,7 +293,11 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
         write!(
             zip,
             "{}",
-            footer_xml(&doc.professional.footer, doc.professional.page_numbers)
+            footer_xml(
+                &doc.professional.footer,
+                doc.professional.page_numbers,
+                doc.professional.footer_alignment
+            )
         )
         .map_err(|e| e.to_string())?;
     }
@@ -307,13 +320,28 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
         zip.write_all(&image.bytes).map_err(|e| e.to_string())?;
     }
 
+    // Word uses document language when choosing fonts for missing glyphs.
+    let mut language_attributes = String::new();
+    if let Some(lang) = &doc.professional.language {
+        language_attributes.push_str(&format!(" w:val=\"{}\"", escape_xml(lang)));
+    }
+    if let Some(lang) = &doc.professional.east_asia_language {
+        language_attributes.push_str(&format!(" w:eastAsia=\"{}\"", escape_xml(lang)));
+    }
+    let language_defaults = if language_attributes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<w:docDefaults><w:rPrDefault><w:rPr><w:lang{language_attributes}/></w:rPr></w:rPrDefault></w:docDefaults>"
+        )
+    };
     // word/styles.xml — basic styles
     zip.start_file("word/styles.xml", options)
         .map_err(|e| e.to_string())?;
     write!(
         zip,
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{}
   <w:style w:type="paragraph" w:styleId="Normal" w:default="1"><w:name w:val="Normal"/></w:style>
   <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="48"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="36"/></w:rPr></w:style>
@@ -322,7 +350,7 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
   <w:style w:type="paragraph" w:styleId="Heading5"><w:name w:val="heading 5"/><w:pPr><w:outlineLvl w:val="4"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="Heading6"><w:name w:val="heading 6"/><w:pPr><w:outlineLvl w:val="5"/></w:pPr><w:rPr><w:b/><w:sz w:val="22"/></w:rPr></w:style>
   <w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/></w:style>
-</w:styles>"#
+</w:styles>"#, language_defaults
     )
     .map_err(|e| e.to_string())?;
 
@@ -390,16 +418,27 @@ pub fn writer_to_docx(doc: &WriterDocument) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
-fn header_xml(text: &str) -> String {
+fn furniture_alignment(alignment: Alignment) -> &'static str {
+    match alignment {
+        Alignment::Center => "center",
+        Alignment::Right => "right",
+        Alignment::Justify => "both",
+        Alignment::Left => "left",
+    }
+}
+
+fn header_xml(text: &str, alignment: Option<Alignment>) -> String {
+    let alignment = furniture_alignment(alignment.unwrap_or(Alignment::Left));
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p></w:hdr>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:jc w:val="{alignment}"/></w:pPr><w:r><w:t xml:space="preserve">{}</w:t></w:r></w:p></w:hdr>"#,
         escape_xml(text)
     )
 }
 
-fn footer_xml(text: &str, page_numbers: bool) -> String {
+fn footer_xml(text: &str, page_numbers: bool, alignment: Option<Alignment>) -> String {
+    let alignment = furniture_alignment(alignment.unwrap_or(Alignment::Center));
     let mut xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">{}</w:t></w:r>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:pPr><w:jc w:val="{alignment}"/></w:pPr><w:r><w:t xml:space="preserve">{}</w:t></w:r>"#,
         escape_xml(text)
     );
     if page_numbers {
@@ -590,6 +629,7 @@ fn paragraph_properties_xml(
     spacing: Spacing,
     format: Option<&ParagraphFormat>,
 ) -> String {
+    let spacing = format.and_then(|format| format.spacing).unwrap_or(spacing);
     let alignment = match format
         .and_then(|format| format.alignment)
         .unwrap_or(alignment)
@@ -779,9 +819,47 @@ fn list_item_paragraph(
     links: &BTreeMap<String, String>,
     xml: &mut String,
 ) {
+    xml.push_str("<w:p><w:pPr><w:pStyle w:val=\"ListParagraph\"/>");
+    if let Some(layout) = &item.layout {
+        xml.push_str(&paragraph_properties_xml(
+            Alignment::Left,
+            0,
+            layout.spacing,
+            Some(&layout.format),
+        ));
+        if layout.format.contextual_spacing == Some(true) {
+            xml.push_str("<w:contextualSpacing/>");
+        }
+    }
     xml.push_str(&format!(
-        "<w:p><w:pPr><w:pStyle w:val=\"ListParagraph\"/><w:numPr><w:ilvl w:val=\"{ilvl}\"/><w:numId w:val=\"{num_id}\"/></w:numPr></w:pPr>"
+        "<w:numPr><w:ilvl w:val=\"{ilvl}\"/><w:numId w:val=\"{num_id}\"/></w:numPr>"
     ));
+    // Numbering inherits the paragraph mark's run properties. Keeping these
+    // separate from the first text run preserves Latin marker metrics in a
+    // paragraph whose first visible character uses an East Asian font.
+    if let Some(layout) = &item.layout
+        && (layout.label_font_family.is_some() || layout.label_font_size.is_some())
+    {
+        xml.push_str("<w:rPr>");
+        if let Some(font) = &layout.label_font_family {
+            xml.push_str(&format!(
+                "<w:rFonts w:ascii=\"{}\" w:hAnsi=\"{}\"/>",
+                escape_xml(font),
+                escape_xml(font)
+            ));
+        }
+        if let Some(size) = layout
+            .label_font_size
+            .filter(|size| size.is_finite() && *size > 0.)
+        {
+            xml.push_str(&format!(
+                "<w:sz w:val=\"{}\"/>",
+                (size.clamp(1., 1000.) * 2.).round() as u32
+            ));
+        }
+        xml.push_str("</w:rPr>");
+    }
+    xml.push_str("</w:pPr>");
     for run in &item.runs {
         run_to_xml(run, links, xml);
     }
@@ -803,33 +881,63 @@ fn table_to_xml(
     xml.push_str("<w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"000000\"/>");
     xml.push_str("<w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"000000\"/>");
     xml.push_str("</w:tblBorders></w:tblPr>");
-    // Standard readers use tblGrid to address cells, even for auto-sized tables.
-    let columns = table
-        .rows
-        .iter()
-        .map(|row| row.cells.len())
-        .max()
-        .unwrap_or(0)
-        .max(table.column_widths.len());
-    xml.push_str("<w:tblGrid>");
-    for column in 0..columns {
-        match table
-            .column_widths
-            .get(column)
-            .filter(|w| w.is_finite() && **w > 0.0)
-        {
-            Some(width) => xml.push_str(&format!(
-                r#"<w:gridCol w:w="{}"/>"#,
-                (width * 15.).round() as u32
-            )),
-            None => xml.push_str("<w:gridCol/>"),
-        }
-    }
-    xml.push_str("</w:tblGrid>");
+    let grid_start = xml.len();
+    let mut columns = table.column_widths.len();
+    let mut merges: BTreeMap<usize, (u32, u32)> = BTreeMap::new();
     for row in &table.rows {
         xml.push_str("<w:tr>");
-        for cell in &row.cells {
-            xml.push_str("<w:tc>");
+        let mut column = 0;
+        let mut next_merges = BTreeMap::new();
+        let mut cells = row.cells.iter().peekable();
+        while cells.peek().is_some() || merges.range(column..).next().is_some() {
+            if let Some(&(remaining, span)) = merges.get(&column) {
+                xml.push_str(&format!(
+                    "<w:tc><w:tcPr><w:gridSpan w:val=\"{span}\"/><w:vMerge/></w:tcPr><w:p/></w:tc>"
+                ));
+                if remaining > 1 {
+                    next_merges.insert(column, (remaining - 1, span));
+                }
+                column += span as usize;
+                continue;
+            }
+            let Some(cell) = cells.next() else {
+                break;
+            };
+            let span = cell.col_span.clamp(1, 1000);
+            xml.push_str(&format!("<w:tc><w:tcPr><w:gridSpan w:val=\"{span}\"/>"));
+            if cell.row_span > 1 {
+                xml.push_str("<w:vMerge w:val=\"restart\"/>");
+                next_merges.insert(column, (cell.row_span.clamp(1, 1000) - 1, span));
+            }
+            if let Some(fill) = cell
+                .background_color
+                .as_deref()
+                .map(|color| color.trim_start_matches('#'))
+                .filter(|color| valid_hex_color(color))
+            {
+                xml.push_str(&format!("<w:shd w:val=\"clear\" w:fill=\"{fill}\"/>"));
+            }
+            if let Some(layout) = &cell.layout {
+                let align = match layout.vertical_alignment {
+                    CellVerticalAlignment::Top => "top",
+                    CellVerticalAlignment::Center => "center",
+                    CellVerticalAlignment::Bottom => "bottom",
+                };
+                xml.push_str(&format!("<w:vAlign w:val=\"{align}\"/><w:tcMar>"));
+                for (name, value) in ["top", "right", "bottom", "left"]
+                    .iter()
+                    .zip(layout.padding)
+                {
+                    if let Some(value) = value.filter(|v| v.is_finite()) {
+                        xml.push_str(&format!(
+                            "<w:{name} w:w=\"{}\" w:type=\"dxa\"/>",
+                            (value.clamp(0., 1000.) * 20.).round() as u32
+                        ));
+                    }
+                }
+                xml.push_str("</w:tcMar>");
+            }
+            xml.push_str("</w:tcPr>");
             if cell.blocks.is_empty() {
                 // An empty cell still needs at least one paragraph.
                 xml.push_str("<w:p/>");
@@ -843,9 +951,30 @@ fn table_to_xml(
                 }
             }
             xml.push_str("</w:tc>");
+            column += span as usize;
         }
+        columns = columns.max(column);
+        merges = next_merges;
         xml.push_str("</w:tr>");
     }
+    let mut grid = String::new();
+    // Standard readers use tblGrid to address cells, even for auto-sized tables.
+    grid.push_str("<w:tblGrid>");
+    for column in 0..columns {
+        match table
+            .column_widths
+            .get(column)
+            .filter(|w| w.is_finite() && **w > 0.0)
+        {
+            Some(width) => grid.push_str(&format!(
+                r#"<w:gridCol w:w="{}"/>"#,
+                (width * 15.).round() as u32
+            )),
+            None => grid.push_str("<w:gridCol/>"),
+        }
+    }
+    grid.push_str("</w:tblGrid>");
+    xml.insert_str(grid_start, &grid);
     xml.push_str("</w:tbl>");
 }
 
@@ -875,8 +1004,13 @@ fn image_to_xml(img: &ImageBlock, embedded: Option<&EmbeddedImage>, xml: &mut St
         let width_emu = (img.width.unwrap_or(320.0).clamp(1.0, 4096.0) * 9525.0) as i64;
         let height_emu = (img.height.unwrap_or(240.0).clamp(1.0, 4096.0) * 9525.0) as i64;
         let alt = escape_xml(&img.alt_text);
+        let alignment = match img.alignment {
+            Alignment::Center => "center",
+            Alignment::Right => "right",
+            _ => "left",
+        };
         xml.push_str(&format!(
-            r#"<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{width_emu}" cy="{height_emu}"/><wp:docPr id="{}" name="{}" descr="{alt}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="{}" descr="{alt}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width_emu}" cy="{height_emu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#,
+            r#"<w:p><w:pPr><w:jc w:val="{alignment}"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{width_emu}" cy="{height_emu}"/><wp:docPr id="{}" name="{}" descr="{alt}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="{}" descr="{alt}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width_emu}" cy="{height_emu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#,
             embedded.drawing_id,
             escape_xml(&embedded.file_name),
             escape_xml(&embedded.file_name),
@@ -1000,7 +1134,8 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
     };
     let imported_images = load_imported_images(&mut archive)?;
     let imported_hyperlinks = load_imported_hyperlinks(&mut archive)?;
-    let header = read_part_text(&mut archive, "word/header1.xml").unwrap_or_default();
+    let header_xml = read_part_xml(&mut archive, "word/header1.xml").unwrap_or_default();
+    let header = xml_visible_text(&header_xml);
     let footer_xml = read_part_xml(&mut archive, "word/footer1.xml").unwrap_or_default();
     let footer = xml_visible_text(&footer_xml);
     let footnotes = read_notes(&mut archive, "word/footnotes.xml", false)?;
@@ -1018,7 +1153,13 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
     let styles_xml = read_part_xml(&mut archive, "word/styles.xml").unwrap_or_default();
     let theme_xml = read_part_xml(&mut archive, "word/theme/theme1.xml").unwrap_or_default();
     let mut context = ImportContext {
-        styles: ImportStyles::parse(&styles_xml, ThemeFonts::parse(&theme_xml)?)?,
+        styles: ImportStyles::parse(
+            &styles_xml,
+            ThemeFonts::parse(
+                &theme_xml,
+                &read_part_xml(&mut archive, "word/settings.xml").unwrap_or_default(),
+            )?,
+        )?,
         grid_line_pitch_pt: parse_grid_line_pitch(&document_xml)?,
         ..Default::default()
     };
@@ -1031,10 +1172,31 @@ pub fn docx_to_writer(bytes: &[u8]) -> Result<WriterDocument, String> {
     )?;
     let mut doc = WriterDocument::new(title);
     doc.body = blocks;
+    doc.professional.docx_import_revision = 3;
+    let mut lang_reader = Reader::from_str(&styles_xml);
+    let mut defaults = false;
+    loop {
+        match lang_reader.read_event() {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"docDefaults" => defaults = true,
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"docDefaults" => break,
+            Ok(Event::Empty(e)) | Ok(Event::Start(e))
+                if defaults && e.local_name().as_ref() == b"lang" =>
+            {
+                doc.professional.language = attr_val(&e, b"val");
+                doc.professional.east_asia_language = attr_val(&e, b"eastAsia");
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(e.to_string()),
+            _ => {}
+        }
+    }
+    doc.professional.font_metrics = writer_font_metrics::used_metrics(&doc.body);
     doc.professional.paragraph_formats = context.formats;
     doc.professional.header = header;
     doc.professional.footer = footer;
-    doc.professional.page_numbers = footer_xml.contains(">PAGE<");
+    doc.professional.header_alignment = part_alignment(&header_xml);
+    doc.professional.footer_alignment = part_alignment(&footer_xml);
+    doc.professional.page_numbers = has_page_field(&footer_xml);
     doc.professional.table_of_contents = document_xml.contains("> TOC ");
     doc.professional.footnotes = footnotes;
     doc.professional.endnotes = endnotes;
@@ -1056,11 +1218,20 @@ fn read_part_xml<R: Read + std::io::Seek>(
     Some(xml)
 }
 
-fn read_part_text<R: Read + std::io::Seek>(
-    archive: &mut ZipArchive<R>,
-    name: &str,
-) -> Option<String> {
-    read_part_xml(archive, name).map(|xml| xml_visible_text(&xml))
+fn part_alignment(xml: &str) -> Option<Alignment> {
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) if event.local_name().as_ref() == b"pPr" => {
+                return Some(parse_p_pr(&mut reader).ok()?.alignment.unwrap_or_default());
+            }
+            Ok(Event::End(event)) if event.local_name().as_ref() == b"p" => {
+                return Some(Alignment::Left);
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+    }
 }
 
 fn load_imported_hyperlinks<R: Read + std::io::Seek>(
@@ -1115,6 +1286,41 @@ fn xml_visible_text(xml: &str) -> String {
         buf.clear();
     }
     output
+}
+
+fn has_page_field(xml: &str) -> bool {
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if e.local_name().as_ref() == b"fldSimple" =>
+            {
+                if attr_val(&e, b"instr").is_some_and(|instruction| {
+                    instruction
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("PAGE"))
+                }) {
+                    return true;
+                }
+            }
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"instrText" => {
+                if read_text_content(&mut reader, b"instrText")
+                    .ok()
+                    .is_some_and(|instruction| {
+                        instruction
+                            .split_whitespace()
+                            .next()
+                            .is_some_and(|name| name.eq_ignore_ascii_case("PAGE"))
+                    })
+                {
+                    return true;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return false,
+            _ => {}
+        }
+    }
 }
 
 fn read_notes<R: Read + std::io::Seek>(
@@ -1390,7 +1596,30 @@ struct ThemeFonts {
     fonts: HashMap<String, String>,
 }
 impl ThemeFonts {
-    fn parse(xml: &str) -> Result<Self, String> {
+    fn parse(xml: &str, settings: &str) -> Result<Self, String> {
+        let mut settings_reader = Reader::from_str(settings);
+        let mut script = "Hans";
+        loop {
+            match settings_reader.read_event() {
+                Ok(Event::Empty(e)) | Ok(Event::Start(e))
+                    if e.local_name().as_ref() == b"themeFontLang" =>
+                {
+                    let lang = attr_val(&e, b"eastAsia").unwrap_or_default().to_lowercase();
+                    script = if lang.starts_with("ja") {
+                        "Jpan"
+                    } else if lang.starts_with("ko") {
+                        "Hang"
+                    } else if lang.starts_with("zh-tw") || lang.starts_with("zh-hk") {
+                        "Hant"
+                    } else {
+                        "Hans"
+                    };
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(e.to_string()),
+                _ => {}
+            }
+        }
         let mut result = Self::default();
         let mut reader = Reader::from_str(xml);
         let mut family = None;
@@ -1412,7 +1641,7 @@ impl ThemeFonts {
                             b"latin" => Some("HAnsi"),
                             b"ea" => Some("EastAsia"),
                             b"cs" => Some("Bidi"),
-                            b"font" if attr_val(&e, b"script").as_deref() == Some("Hans") => {
+                            b"font" if attr_val(&e, b"script").as_deref() == Some(script) => {
                                 Some("EastAsia")
                             }
                             _ => None,
@@ -1578,16 +1807,15 @@ fn read_run_properties(
                 b"u" => properties.underline = Some(run_property_enabled(&e)),
                 b"strike" => properties.strikethrough = Some(run_property_enabled(&e)),
                 b"rFonts" => {
-                    properties.ascii_font = attr_val(&e, b"ascii")
+                    properties.ascii_font = attr_val(&e, b"asciiTheme")
+                        .or_else(|| attr_val(&e, b"hAnsiTheme"))
+                        .and_then(|key| theme.get(&key))
+                        .or_else(|| attr_val(&e, b"ascii"))
                         .or_else(|| attr_val(&e, b"hAnsi"))
-                        .or_else(|| {
-                            attr_val(&e, b"asciiTheme")
-                                .or_else(|| attr_val(&e, b"hAnsiTheme"))
-                                .and_then(|key| theme.get(&key))
-                        })
                         .filter(|value| !value.is_empty());
-                    properties.east_asia_font = attr_val(&e, b"eastAsia")
-                        .or_else(|| attr_val(&e, b"eastAsiaTheme").and_then(|key| theme.get(&key)))
+                    properties.east_asia_font = attr_val(&e, b"eastAsiaTheme")
+                        .and_then(|key| theme.get(&key))
+                        .or_else(|| attr_val(&e, b"eastAsia"))
                         .filter(|value| !value.is_empty());
                 }
                 b"sz" => {
@@ -1655,6 +1883,7 @@ struct NumberingLevel {
     format: String,
     start: u32,
     text: String,
+    paragraph: ParagraphProperties,
 }
 
 #[derive(Default)]
@@ -1833,6 +2062,7 @@ fn parse_numbering(xml: &str) -> Result<NumberingDefinitions, String> {
                             format: "decimal".into(),
                             start: 1,
                             text: format!("%{}.", current_level.unwrap_or(0) + 1),
+                            paragraph: ParagraphProperties::default(),
                         });
                 }
                 b"numFmt" if current_abstract.is_some() && current_level.is_some() => {
@@ -1843,6 +2073,25 @@ fn parse_numbering(xml: &str) -> Result<NumberingDefinitions, String> {
                         )) {
                             level.format = format;
                         }
+                    }
+                }
+                b"ind" if current_abstract.is_some() && current_level.is_some() => {
+                    if let Some(level) = abstract_formats.get_mut(&(
+                        current_abstract.clone().unwrap_or_default(),
+                        current_level.unwrap_or(0),
+                    )) {
+                        let number = |key: &[u8]| {
+                            attr_val(&e, key)
+                                .and_then(|v| v.parse::<f32>().ok())
+                                .filter(|v| v.is_finite())
+                                .map(|v| v / 20.)
+                        };
+                        level.paragraph.left_indent_pt =
+                            number(b"left").or_else(|| number(b"start"));
+                        level.paragraph.right_indent_pt =
+                            number(b"right").or_else(|| number(b"end"));
+                        level.paragraph.first_line_indent_pt =
+                            number(b"firstLine").or_else(|| number(b"hanging").map(|v| -v));
                     }
                 }
                 b"start" if current_abstract.is_some() && current_level.is_some() => {
@@ -1930,12 +2179,14 @@ struct ParsedParagraph {
     blocks: Vec<Block>,
     numbering: Option<NumberingRef>,
     format: Option<ParagraphFormat>,
+    numbering_font_family: Option<String>,
+    numbering_font_size: Option<f32>,
 }
 
 struct PendingList {
     num_id: String,
     ordered: bool,
-    entries: Vec<(u32, Vec<TextRun>)>,
+    entries: Vec<(u32, ListItem)>,
 }
 
 fn flush_pending_list(pending: &mut Option<PendingList>, blocks: &mut Vec<Block>) {
@@ -1948,7 +2199,7 @@ fn flush_pending_list(pending: &mut Option<PendingList>, blocks: &mut Vec<Block>
     }
 }
 
-fn build_list_items(entries: &[(u32, Vec<TextRun>)]) -> Vec<ListItem> {
+fn build_list_items(entries: &[(u32, ListItem)]) -> Vec<ListItem> {
     let Some(base_level) = entries.iter().map(|(level, _)| *level).min() else {
         return Vec::new();
     };
@@ -1956,14 +2207,10 @@ fn build_list_items(entries: &[(u32, Vec<TextRun>)]) -> Vec<ListItem> {
     build_list_level(entries, &mut index, base_level)
 }
 
-fn build_list_level(
-    entries: &[(u32, Vec<TextRun>)],
-    index: &mut usize,
-    level: u32,
-) -> Vec<ListItem> {
+fn build_list_level(entries: &[(u32, ListItem)], index: &mut usize, level: u32) -> Vec<ListItem> {
     let mut items: Vec<ListItem> = Vec::new();
     while *index < entries.len() {
-        let (entry_level, runs) = &entries[*index];
+        let (entry_level, item) = &entries[*index];
         if *entry_level < level {
             break;
         }
@@ -1976,10 +2223,7 @@ fn build_list_level(
             continue;
         }
 
-        items.push(ListItem {
-            runs: runs.clone(),
-            children: Vec::new(),
-        });
+        items.push(item.clone());
         *index += 1;
     }
     items
@@ -2013,9 +2257,9 @@ fn append_paragraph(
 
     let ordered = numbering.is_ordered(&reference.num_id, reference.level);
     let mut parsed_blocks = parsed.blocks.into_iter();
-    let runs = match parsed_blocks.next() {
-        Some(Block::Paragraph(paragraph)) => paragraph.runs,
-        Some(Block::Heading(heading)) => heading.runs,
+    let (runs, spacing) = match parsed_blocks.next() {
+        Some(Block::Paragraph(paragraph)) => (paragraph.runs, paragraph.spacing),
+        Some(Block::Heading(heading)) => (heading.runs, Spacing::default()),
         Some(other) => {
             flush_pending_list(pending, blocks);
             blocks.push(other);
@@ -2036,7 +2280,42 @@ fn append_paragraph(
         });
     }
     if let Some(list) = pending {
-        list.entries.push((reference.level, runs));
+        let mut format = parsed.format.unwrap_or_default();
+        if let Some(level) = numbering.level(&reference.num_id, reference.level) {
+            format.left_indent_pt = format.left_indent_pt.or(level.paragraph.left_indent_pt);
+            format.right_indent_pt = format.right_indent_pt.or(level.paragraph.right_indent_pt);
+            format.first_line_indent_pt = format
+                .first_line_indent_pt
+                .or(level.paragraph.first_line_indent_pt);
+        }
+        format.numbering_label = numbering.label(&reference, &mut context.numbering_counters);
+        if numbering
+            .level(&reference.num_id, reference.level)
+            .is_some_and(|level| level.format == "bullet")
+            && format.numbering_label.as_ref().is_some_and(|label| {
+                label
+                    .chars()
+                    .any(|character| ('\u{f000}'..='\u{f8ff}').contains(&character))
+            })
+        {
+            // Legacy Symbol/Wingdings private-use bullet glyphs require their
+            // original font. The compact List model has always used Unicode
+            // bullets, so keep that safe fallback rather than showing tofu.
+            format.numbering_label = Some("•".into());
+        }
+        list.entries.push((
+            reference.level,
+            ListItem {
+                runs,
+                children: Vec::new(),
+                layout: Some(ListItemLayout {
+                    spacing,
+                    format,
+                    label_font_family: parsed.numbering_font_family,
+                    label_font_size: parsed.numbering_font_size,
+                }),
+            },
+        ));
     }
     let remaining: Vec<Block> = parsed_blocks.collect();
     if !remaining.is_empty() {
@@ -2127,13 +2406,18 @@ fn parse_paragraph(
                 } else if n == b"hyperlink" {
                     hyperlink = attr_val(&e, b"r:id").and_then(|id| links.get(&id).cloned());
                 } else if n == b"r" {
-                    let (mut run, run_images) =
+                    let (parsed_runs, run_images) =
                         parse_run(reader, images, &context.styles, &style.run)?;
-                    run.link = hyperlink.clone();
-                    if !run.text.is_empty() {
-                        runs.push(run);
+                    for mut run in parsed_runs {
+                        run.link = hyperlink.clone();
+                        if !run.text.is_empty() {
+                            runs.push(run);
+                        }
                     }
-                    image_blocks.extend(run_images.into_iter().map(Block::Image));
+                    image_blocks.extend(run_images.into_iter().map(|mut image| {
+                        image.alignment = layout.alignment.unwrap_or_default();
+                        Block::Image(image)
+                    }));
                 }
             }
             Ok(Event::End(e)) if e.local_name().as_ref() == b"hyperlink" => hyperlink = None,
@@ -2145,8 +2429,11 @@ fn parse_paragraph(
         buf.clear();
     }
     let mut blocks = Vec::new();
-    if !runs.is_empty() {
-        blocks.push(if let Some(level) = layout.heading_level {
+    if layout.page_break_before == Some(true) {
+        blocks.push(Block::PageBreak);
+    }
+    let paragraph = |runs: Vec<TextRun>| {
+        if let Some(level) = layout.heading_level {
             Block::Heading(Heading {
                 id: Uuid::new_v4(),
                 level,
@@ -2162,7 +2449,29 @@ fn parse_paragraph(
                     .clamp(0.0, 255.0) as u8,
                 spacing: layout.spacing(),
             })
-        });
+        }
+    };
+    // A page break can occur inside a run, between two pieces of text. Keep
+    // its position instead of flattening it into an ordinary newline.
+    let mut segment = Vec::new();
+    for mut run in runs {
+        let text = std::mem::take(&mut run.text);
+        for (index, text) in text.split('\u{000c}').enumerate() {
+            if index > 0 {
+                if !segment.is_empty() {
+                    blocks.push(paragraph(std::mem::take(&mut segment)));
+                }
+                blocks.push(Block::PageBreak);
+            }
+            if !text.is_empty() {
+                let mut piece = run.clone();
+                piece.text = text.to_owned();
+                segment.push(piece);
+            }
+        }
+    }
+    if !segment.is_empty() {
+        blocks.push(paragraph(segment));
     }
     blocks.extend(image_blocks);
     if blocks.is_empty() {
@@ -2188,10 +2497,25 @@ fn parse_paragraph(
         Block::Heading(h) => Some(layout.format(h.id, grid_pitch)),
         _ => None,
     });
+    for block in blocks.iter().skip(1) {
+        match block {
+            Block::Paragraph(p) => context.formats.push(layout.format(p.id, grid_pitch)),
+            Block::Heading(h) => context.formats.push(layout.format(h.id, grid_pitch)),
+            _ => {}
+        }
+    }
     Ok(ParsedParagraph {
         blocks,
         numbering,
         format,
+        numbering_font_family: layout.numbering_font_family.clone().or_else(|| {
+            style
+                .run
+                .ascii_font
+                .clone()
+                .or_else(|| style.run.east_asia_font.clone())
+        }),
+        numbering_font_size: layout.numbering_font_size.or(style.run.font_size),
     })
 }
 
@@ -2210,6 +2534,10 @@ struct ParagraphProperties {
     line: Option<f32>,
     line_rule: Option<String>,
     snap_to_grid: Option<bool>,
+    page_break_before: Option<bool>,
+    contextual_spacing: Option<bool>,
+    numbering_font_family: Option<String>,
+    numbering_font_size: Option<f32>,
 }
 
 impl ParagraphProperties {
@@ -2228,7 +2556,11 @@ impl ParagraphProperties {
             after,
             line,
             line_rule,
-            snap_to_grid
+            snap_to_grid,
+            page_break_before,
+            contextual_spacing,
+            numbering_font_family,
+            numbering_font_size
         );
     }
     fn spacing(&self) -> Spacing {
@@ -2264,6 +2596,8 @@ impl ParagraphProperties {
                 }),
             numbering_label: None,
             alignment: self.alignment,
+            contextual_spacing: self.contextual_spacing,
+            spacing: self.heading_level.map(|_| self.spacing()),
         }
     }
 }
@@ -2276,11 +2610,12 @@ fn parse_p_pr(reader: &mut Reader<&[u8]>) -> Result<ParagraphProperties, String>
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"rPr" => {
-                // Paragraph-mark run properties contain a different snapToGrid
-                // property for character spacing; it must not affect line pitch.
-                reader
-                    .read_to_end(e.name())
-                    .map_err(|error| format!("xml parse paragraph mark properties: {error}"))?;
+                // Only the font of the paragraph mark is relevant to list
+                // markers here. Its character snapToGrid must not affect the
+                // paragraph's independent line-pitch setting.
+                let mark = read_run_properties(reader, &ThemeFonts::default())?;
+                properties.numbering_font_family = mark.ascii_font.or(mark.east_asia_font);
+                properties.numbering_font_size = mark.font_size;
             }
             Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
                 if e.local_name().as_ref() == b"pStyle" {
@@ -2293,6 +2628,10 @@ fn parse_p_pr(reader: &mut Reader<&[u8]>) -> Result<ParagraphProperties, String>
                     }
                 } else if e.local_name().as_ref() == b"snapToGrid" {
                     properties.snap_to_grid = Some(run_property_enabled(&e));
+                } else if e.local_name().as_ref() == b"pageBreakBefore" {
+                    properties.page_break_before = Some(run_property_enabled(&e));
+                } else if e.local_name().as_ref() == b"contextualSpacing" {
+                    properties.contextual_spacing = Some(run_property_enabled(&e));
                 } else if e.local_name().as_ref() == b"numId" {
                     num_id = attr_val(&e, b"val");
                 } else if e.local_name().as_ref() == b"ilvl" {
@@ -2364,10 +2703,11 @@ fn parse_run(
     images: &HashMap<String, String>,
     styles: &ImportStyles,
     base: &RunProperties,
-) -> Result<(TextRun, Vec<ImageBlock>), String> {
+) -> Result<(Vec<TextRun>, Vec<ImageBlock>), String> {
     let mut buf = Vec::new();
     let mut run = TextRun::default();
     base.apply(&mut run);
+    let mut properties = base.clone();
     let mut run_images = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -2375,14 +2715,20 @@ fn parse_run(
                 let n = e.local_name().as_ref().to_vec();
                 if n == b"rPr" {
                     let direct = read_run_properties(reader, &styles.theme)?;
-                    styles.run(base, &direct).apply(&mut run);
+                    properties = styles.run(base, &direct);
+                    properties.apply(&mut run);
                 } else if n == b"t" {
                     let text = read_text_content(reader, b"t")?;
                     run.text.push_str(&text);
                 } else if n == b"tab" {
                     run.text.push('\t');
                 } else if n == b"br" || n == b"cr" {
-                    run.text.push('\n');
+                    run.text
+                        .push(if attr_val(&e, b"type").as_deref() == Some("page") {
+                            '\u{000c}'
+                        } else {
+                            '\n'
+                        });
                 } else if n == b"drawing"
                     && let Some(image) = parse_drawing(reader, images)?
                 {
@@ -2391,7 +2737,14 @@ fn parse_run(
             }
             Ok(Event::Empty(e)) => match e.local_name().as_ref() {
                 b"tab" => run.text.push('\t'),
-                b"br" | b"cr" => run.text.push('\n'),
+                b"br" | b"cr" => {
+                    run.text
+                        .push(if attr_val(&e, b"type").as_deref() == Some("page") {
+                            '\u{000c}'
+                        } else {
+                            '\n'
+                        })
+                }
                 _ => {}
             },
             Ok(Event::End(e)) if e.local_name().as_ref() == b"r" => break,
@@ -2401,7 +2754,43 @@ fn parse_run(
         }
         buf.clear();
     }
-    Ok((run, run_images))
+    Ok((script_font_runs(run, &properties), run_images))
+}
+
+// Word chooses ascii/hAnsi versus eastAsia per character, even within one
+// run. Splitting only when the selected family changes preserves this with
+// the existing, backwards-compatible single-family TextRun model.
+fn script_font_runs(mut run: TextRun, properties: &RunProperties) -> Vec<TextRun> {
+    let mut output: Vec<TextRun> = Vec::new();
+    let text = std::mem::take(&mut run.text);
+    for character in text.chars() {
+        let code = character as u32;
+        let east_asian = matches!(code, 0x2e80..=0x9fff | 0xac00..=0xd7af | 0xf900..=0xfaff | 0xfe30..=0xfe4f | 0xff01..=0xff60 | 0xffe0..=0xffe6 | 0x20000..=0x323af);
+        let family = if east_asian {
+            properties
+                .east_asia_font
+                .as_ref()
+                .or(properties.ascii_font.as_ref())
+        } else {
+            properties
+                .ascii_font
+                .as_ref()
+                .or(properties.east_asia_font.as_ref())
+        }
+        .cloned();
+        if let Some(previous) = output
+            .last_mut()
+            .filter(|previous| previous.font_family == family)
+        {
+            previous.text.push(character);
+        } else {
+            let mut piece = run.clone();
+            piece.text = character.to_string();
+            piece.font_family = family;
+            output.push(piece);
+        }
+    }
+    output
 }
 
 fn parse_drawing(
@@ -2492,13 +2881,52 @@ fn parse_table(
 ) -> Result<Block, String> {
     context.table_depth += 1;
     let mut buf = Vec::new();
-    let mut rows = Vec::new();
+    let mut rows: Vec<TableRow> = Vec::new();
     let mut column_widths = Vec::new();
+    let mut merges: HashMap<usize, (usize, usize, u32)> = HashMap::new();
+    let mut table_padding = [Some(0.), Some(5.4), Some(0.), Some(5.4)];
     let mut in_grid = false;
+    let mut columns = 0;
     loop {
         match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == b"tblCellMar" => {
+                table_padding = read_cell_padding(reader, b"tblCellMar", table_padding)?;
+            }
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"tr" => {
-                rows.push(parse_row(reader, numbering, images, links, context)?);
+                let parsed = parse_row(reader, numbering, images, links, context)?;
+                let row_index = rows.len();
+                let mut cells = Vec::new();
+                let mut next_merges = HashMap::new();
+                let mut column = 0;
+                for mut parsed_cell in parsed {
+                    if let Some(layout) = &mut parsed_cell.cell.layout {
+                        for i in 0..4 {
+                            if layout.padding[i].is_none() {
+                                layout.padding[i] = table_padding[i];
+                            }
+                        }
+                    }
+                    let span = parsed_cell.cell.col_span;
+                    if parsed_cell.vertical_merge.as_deref() == Some("continue")
+                        && let Some(&(anchor_row, anchor_cell, anchor_span)) = merges.get(&column)
+                        && anchor_span == span
+                    {
+                        rows[anchor_row].cells[anchor_cell].row_span += 1;
+                        next_merges.insert(column, (anchor_row, anchor_cell, span));
+                    } else {
+                        if parsed_cell.vertical_merge.as_deref() == Some("restart") {
+                            next_merges.insert(column, (row_index, cells.len(), span));
+                        }
+                        cells.push(parsed_cell.cell);
+                    }
+                    column += span as usize;
+                    if column > 10_000 {
+                        return Err("DOCX table has too many grid columns".into());
+                    }
+                }
+                columns = columns.max(column);
+                merges = next_merges;
+                rows.push(TableRow { cells });
             }
             // A tracked grid change contains a second, historical grid.
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"tblGridChange" => {
@@ -2526,7 +2954,6 @@ fn parse_table(
         }
         buf.clear();
     }
-    let columns = rows.iter().map(|row| row.cells.len()).max().unwrap_or(0);
     column_widths.resize(column_widths.len().max(columns), 0.);
     context.table_depth -= 1;
     Ok(Block::Table(Table {
@@ -2542,9 +2969,9 @@ fn parse_row(
     images: &HashMap<String, String>,
     links: &HashMap<String, String>,
     context: &mut ImportContext,
-) -> Result<TableRow, String> {
+) -> Result<Vec<ImportedCell>, String> {
     let mut buf = Vec::new();
-    let mut cells: Vec<TableCell> = Vec::new();
+    let mut cells = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
@@ -2559,7 +2986,47 @@ fn parse_row(
         }
         buf.clear();
     }
-    Ok(TableRow { cells })
+    Ok(cells)
+}
+
+struct ImportedCell {
+    cell: TableCell,
+    vertical_merge: Option<String>,
+}
+
+fn read_cell_padding(
+    reader: &mut Reader<&[u8]>,
+    end: &[u8],
+    mut padding: [Option<f32>; 4],
+) -> Result<[Option<f32>; 4], String> {
+    loop {
+        match reader.read_event() {
+            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
+                let index = match e.local_name().as_ref() {
+                    b"top" => Some(0),
+                    b"right" | b"end" => Some(1),
+                    b"bottom" => Some(2),
+                    b"left" | b"start" => Some(3),
+                    _ => None,
+                };
+                if let Some(index) = index {
+                    if attr_val(&e, b"type").as_deref().unwrap_or("dxa") == "dxa" {
+                        if let Some(value) = attr_val(&e, b"w")
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .filter(|v| v.is_finite() && *v >= 0. && *v <= 20000.)
+                        {
+                            padding[index] = Some(value / 20.);
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(e)) if e.local_name().as_ref() == end => break,
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(e.to_string()),
+            _ => {}
+        }
+    }
+    Ok(padding)
 }
 
 fn parse_cell(
@@ -2568,15 +3035,68 @@ fn parse_cell(
     images: &HashMap<String, String>,
     links: &HashMap<String, String>,
     context: &mut ImportContext,
-) -> Result<TableCell, String> {
+) -> Result<ImportedCell, String> {
     let mut buf = Vec::new();
     let mut blocks: Vec<Block> = Vec::new();
     let mut pending_list = None;
+    let mut col_span = 1;
+    let mut vertical_merge = None;
+    let mut background_color = None;
+    let mut layout = TableCellLayout::default();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let n = e.local_name().as_ref().to_vec();
-                if n == b"p" {
+                if n == b"tcPr" {
+                    loop {
+                        match reader.read_event() {
+                            Ok(Event::Start(property)) | Ok(Event::Empty(property)) => {
+                                match property.local_name().as_ref() {
+                                    b"tcMar" => {
+                                        layout.padding =
+                                            read_cell_padding(reader, b"tcMar", layout.padding)?;
+                                    }
+                                    b"vAlign" => {
+                                        layout.vertical_alignment =
+                                            match attr_val(&property, b"val").as_deref() {
+                                                Some("center") => CellVerticalAlignment::Center,
+                                                Some("bottom") => CellVerticalAlignment::Bottom,
+                                                _ => CellVerticalAlignment::Top,
+                                            };
+                                    }
+                                    b"gridSpan" => {
+                                        col_span = attr_val(&property, b"val")
+                                            .and_then(|v| v.parse::<u32>().ok())
+                                            .unwrap_or(1)
+                                            .clamp(1, 1000)
+                                    }
+                                    b"vMerge" => {
+                                        vertical_merge = Some(
+                                            attr_val(&property, b"val")
+                                                .unwrap_or_else(|| "continue".into()),
+                                        )
+                                    }
+                                    b"shd" => {
+                                        background_color = attr_val(&property, b"fill")
+                                            .filter(|value| valid_hex_color(value))
+                                            .map(|value| format!("#{value}"))
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Ok(Event::End(property))
+                                if property.local_name().as_ref() == b"tcPr" =>
+                            {
+                                break;
+                            }
+                            Ok(Event::Eof) => break,
+                            Err(error) => {
+                                return Err(format!("xml parse cell properties: {error}"));
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if n == b"p" {
                     append_paragraph(
                         parse_paragraph(reader, images, links, context)?,
                         numbering,
@@ -2601,11 +3121,15 @@ fn parse_cell(
         buf.clear();
     }
     flush_pending_list(&mut pending_list, &mut blocks);
-    Ok(TableCell {
-        blocks,
-        col_span: 1,
-        row_span: 1,
-        background_color: None,
+    Ok(ImportedCell {
+        cell: TableCell {
+            blocks,
+            col_span,
+            row_span: 1,
+            background_color,
+            layout: Some(layout),
+        },
+        vertical_merge,
     })
 }
 
@@ -2877,16 +3401,20 @@ mod tests {
             ordered: false,
             items: vec![
                 ListItem {
+                    layout: None,
                     runs: vec![TextRun::plain("Bullet one")],
                     children: vec![ListItem {
+                        layout: None,
                         runs: vec![TextRun::plain("Nested bullet")],
                         children: vec![ListItem {
+                            layout: None,
                             runs: vec![TextRun::plain("Deep bullet")],
                             children: Vec::new(),
                         }],
                     }],
                 },
                 ListItem {
+                    layout: None,
                     runs: vec![TextRun::plain("Bullet two")],
                     children: Vec::new(),
                 },
@@ -2898,10 +3426,12 @@ mod tests {
             ordered: true,
             items: vec![
                 ListItem {
+                    layout: None,
                     runs: vec![TextRun::plain("First")],
                     children: Vec::new(),
                 },
                 ListItem {
+                    layout: None,
                     runs: vec![TextRun::plain("Second")],
                     children: Vec::new(),
                 },

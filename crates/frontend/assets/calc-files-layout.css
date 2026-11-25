@@ -80,7 +80,7 @@
 .calc-editor .sheet-grid th { background: #f1f5f9 !important; color: var(--text-light) !important; font-size: 12px !important; font-weight: 600 !important; line-height: 20px !important; }
 .calc-editor .sheet-grid thead th { height: 24px; min-width: 80px; padding: 0 2px !important; }
 .calc-editor .sheet-grid th.row-header { width: 80px !important; min-width: 80px !important; max-width: 80px; padding: 0 8px !important; }
-.calc-editor .sheet-grid .cell-button { min-height: 24px; padding: 2px 4px; line-height: 20px; height: 100%; width: 100% !important; text-overflow: clip; white-space: nowrap; display: block; }
+.calc-editor .sheet-grid .cell-button { min-height: 24px; padding: 2px 4px; height: auto; width: 100% !important; text-overflow: clip; white-space: pre; display: block; overflow:hidden; }
 .calc-editor .sheet-grid .cell-italic .cell-button,
 .calc-editor .sheet-grid .cell-italic .calc-cell-input { font-style: italic; }
 .calc-editor .sheet-grid .cell-underline .cell-button,
@@ -188,7 +188,7 @@
 .calc-editor .calc-toolbar .sapid-overflow-panel .toolbar-btn::after { content:attr(aria-label); font-size:12px; }
 .calc-editor .calc-advanced-formats { gap:8px; flex-wrap:wrap; }
 .calc-editor .sheet-grid .cell-button { border:0; border-radius:0; background:transparent; color:inherit; font:inherit; padding:2px 4px; margin:0; outline-offset:-2px; }
-.calc-editor .sheet-grid .cell-button { box-sizing:border-box; min-height:0 !important; line-height:20px !important; padding:0 4px; }
+.calc-editor .sheet-grid .cell-button { box-sizing:border-box; min-height:1lh !important; padding:0 4px; }
 .calc-editor .sheet-grid .cell-button:focus { outline:0; }
 .calc-editor .sheet-grid .cell.active { background:var(--primary-light); }
 .calc-editor .sheet-management { gap:3px; align-items:center; }
@@ -271,3 +271,14 @@
 .calc-editor .sheet-grid .calc-column-resize { top:0; right:-3px; width:7px; height:100%; cursor:col-resize; }
 .calc-editor .sheet-grid .calc-row-resize { bottom:-3px; left:0; width:100%; height:7px; cursor:row-resize; }
 .calc-editor .sheet-grid :is(.calc-column-resize,.calc-row-resize):hover { background:var(--primary); opacity:.65; }
+/* SpreadsheetML layout is retained independently of the editing selection. */
+.calc-editor .calc-sheet-surface { position:relative; width:max-content; }
+.calc-editor .calc-sheet-drawings { position:absolute; left:80px; top:24px; max-width:none !important; pointer-events:none; z-index:1; }
+.calc-editor .sheet-grid td.cell { position:relative; overflow:hidden; }
+.calc-editor .sheet-grid .cell-valign-top { vertical-align:top !important; }
+.calc-editor .sheet-grid .cell-valign-middle { vertical-align:middle !important; }
+.calc-editor .sheet-grid .cell-valign-bottom { vertical-align:bottom !important; }
+.calc-editor .sheet-grid .cell-wrap .cell-button { white-space:pre-wrap; overflow-wrap:anywhere; }
+.calc-editor .sheet-grid .cell-nowrap .cell-button { white-space:pre; }
+.calc-editor .calc-cell-border { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:1; }
+.calc-editor .sheet-grid .calc-custom-border { border-width:1px !important; border-style:solid !important; border-color:transparent !important; }

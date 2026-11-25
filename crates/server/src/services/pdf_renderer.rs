@@ -152,6 +152,14 @@ pub fn render(html: &str) -> Result<Vec<u8>, String> {
         if let Some(position) = html.find("</head>") {
             html.insert_str(position, &css);
         }
+        // Chrome may discover a web font used only in @page margin boxes too
+        // late and omit the complete header/footer. An invisible body glyph
+        // loads the same local embedded face before paged layout. Fixed,
+        // transparent content occupies no space and is omitted from PDF text.
+        if let Some(position) = html.find("<body>") {
+            html.insert_str(position + "<body>".len(),
+                "<span aria-hidden=\"true\" style=\"position:fixed;opacity:0;pointer-events:none;font-family:'Office CJK';font-size:1px\">文</span>");
+        }
     }
     if html.len() > MAX_HTML_BYTES {
         return Err(

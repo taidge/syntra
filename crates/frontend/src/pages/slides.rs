@@ -541,7 +541,7 @@ fn slide_text_svg(
         Some("bottom") => "flex-end",
         _ => "flex-start",
     };
-    let mut paragraphs: Vec<(Value, String)> = Vec::new();
+    let mut paragraphs: Vec<(Value, String, f64, String)> = Vec::new();
     let mut paragraph_index = None;
     for run in runs {
         if run["paragraph_break"].as_bool() == Some(true) {
@@ -549,7 +549,7 @@ fn slide_text_svg(
         }
         let index = run["paragraph"]["index"].as_u64();
         if paragraphs.is_empty() || (index.is_some() && index != paragraph_index) {
-            paragraphs.push((run["paragraph"].clone(), String::new()));
+            paragraphs.push((run["paragraph"].clone(), String::new(), 0., String::new()));
         }
         paragraph_index = index;
         let size = run["font_size"]
@@ -567,6 +567,11 @@ fn slide_text_svg(
                 .replace('\'', "\\27 ")
                 .replace(['\r', '\n'], " "),
         );
+        if size > paragraphs.last().unwrap().2 {
+            let paragraph = paragraphs.last_mut().unwrap();
+            paragraph.2 = size;
+            paragraph.3 = css_font.clone();
+        }
         let bold = if run["bold"].as_bool() == Some(true) {
             "bold"
         } else {
@@ -596,7 +601,7 @@ fn slide_text_svg(
                 if index.is_some() {
                     paragraphs.last_mut().unwrap().1.push_str("<br/>");
                 } else {
-                    paragraphs.push((Value::Null, String::new()));
+                    paragraphs.push((Value::Null, String::new(), size, css_font.clone()));
                 }
             }
             paragraphs.last_mut().unwrap().1.push_str(&format!("<span font-family=\"{font}\" font-weight=\"{bold}\" text-decoration=\"{decorations}\" style=\"font-family:'{css_font}',sans-serif;font-size:{size}px;font-weight:{bold};font-style:{italic};text-decoration:{decorations};color:{color}\">{}</span>", svg_escape(text)));
@@ -607,7 +612,7 @@ fn slide_text_svg(
         x + width / 2.,
         y + height / 2.
     );
-    for (style, text) in paragraphs {
+    for (style, text, size, paragraph_font) in paragraphs {
         let alignment = match style["alignment"].as_str() {
             Some("center") => "center",
             Some("right") => "right",
@@ -618,160 +623,27 @@ fn slide_text_svg(
             .as_f64()
             .filter(|n| n.is_finite() && *n > 0.)
             .map(|n| format!("{}px", n * POINT))
-            .unwrap_or_else(|| number(&style["line_height"], 1.2).max(0.1).to_string());
+            // DrawingML percentages scale the default 120% text line, rather
+            // than the font's em. Keep the paragraph's own font size explicit
+            // so mixed-size spans do not inherit the browser's 16px strut.
+            .unwrap_or_else(|| (number(&style["line_height"], 1.0).max(0.1) * 1.2).to_string());
         let before = number(&style["space_before_points"], 0.).max(0.) * POINT;
         let after = number(&style["space_after_points"], 0.).max(0.) * POINT;
-        result.push_str(&format!("<div style=\"flex:0 0 auto;min-width:0;text-align:{alignment};line-height:{line_height};margin:{before}px 0 {after}px 0\">{}</div>", if text.is_empty() { "<br/>" } else { &text }));
+        let configured_line = style["line_height_points"]
+            .as_f64()
+            .filter(|n| n.is_finite() && *n > 0.)
+            .map(|n| n * POINT)
+            .unwrap_or(size * number(&style["line_height"], 1.).max(0.1) * 1.2);
+        // CSS splits added leading around the glyph box; DrawingML places it
+        // before the baseline. Shift ink without adding paragraph flow height.
+        let baseline_shift = (configured_line - size * 1.2) / 2.;
+        result.push_str(&format!("<div style=\"position:relative;top:{baseline_shift}px;flex:0 0 auto;min-width:0;font-family:'{paragraph_font}',sans-serif;font-size:{}px;text-align:{alignment};line-height:{line_height};margin:{before}px 0 {after}px 0\">{}</div>",size.max(1.), if text.is_empty() { "<br/>" } else { &text }));
     }
     result.push_str("</div></foreignObject>");
     result
 }
 fn slide_chart_svg(element: &Value, x: f64, y: f64, width: f64, height: f64) -> String {
-    let datasets = element
-        .pointer("/data/datasets")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let labels = element
-        .pointer("/data/labels")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let values = |series: &Value| {
-        series["values"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
-            .map(|v| v.as_f64().filter(|n| n.is_finite()).unwrap_or(0.))
-            .collect::<Vec<_>>()
-    };
-    let palette = [
-        "#2563EB", "#EA580C", "#16A34A", "#9333EA", "#0891B2", "#DC2626",
-    ];
-    let color = |series: &Value, index: usize| {
-        svg_escape(
-            series["color"]
-                .as_str()
-                .unwrap_or(palette[index % palette.len()]),
-        )
-    };
-    let kind = element["chart_type"].as_str().unwrap_or("Bar");
-    let mut svg = String::new();
-    if matches!(kind, "Pie" | "Doughnut") {
-        let points = datasets.first().map(values).unwrap_or_default();
-        let total = points.iter().map(|n| n.max(0.)).sum::<f64>();
-        let radius = width.min(height) * 0.42;
-        let (cx, cy) = (x + width / 2., y + height / 2.);
-        let mut angle = -std::f64::consts::FRAC_PI_2;
-        for (index, value) in points.iter().enumerate().filter(|(_, n)| **n > 0.) {
-            let delta = value / total * std::f64::consts::TAU;
-            let next = angle + delta;
-            let (sx, sy) = (cx + radius * angle.cos(), cy + radius * angle.sin());
-            let (ex, ey) = (cx + radius * next.cos(), cy + radius * next.sin());
-            let fill = palette[index % palette.len()];
-            if delta >= std::f64::consts::TAU - 1e-9 {
-                svg.push_str(&format!(
-                    "<circle cx=\"{cx}\" cy=\"{cy}\" r=\"{radius}\" fill=\"{fill}\"/>"
-                ));
-            } else {
-                svg.push_str(&format!("<path d=\"M{cx},{cy} L{sx},{sy} A{radius},{radius} 0 {} 1 {ex},{ey} Z\" fill=\"{fill}\"/>",u8::from(delta>std::f64::consts::PI)));
-            }
-            angle = next;
-        }
-        if kind == "Doughnut" {
-            svg.push_str(&format!(
-                "<circle cx=\"{cx}\" cy=\"{cy}\" r=\"{}\" fill=\"white\"/>",
-                radius * 0.5
-            ));
-        }
-    } else {
-        let all = datasets.iter().flat_map(values).collect::<Vec<_>>();
-        let min = all.iter().copied().fold(0., f64::min);
-        let max = all.iter().copied().fold(1., f64::max);
-        let span = (max - min).max(1e-9);
-        let plot_height = (height - 32.).max(1.);
-        let baseline = y + plot_height - (0. - min) / span * plot_height;
-        let count = datasets
-            .iter()
-            .map(|s| values(s).len())
-            .max()
-            .unwrap_or(1)
-            .max(1);
-        svg.push_str(&format!(
-            "<path d=\"M{x},{y} V{} H{}\" fill=\"none\" stroke=\"#64748B\" stroke-width=\"1\"/>",
-            y + plot_height,
-            x + width
-        ));
-        let xs = labels
-            .iter()
-            .map(|v| {
-                v.as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .filter(|n| n.is_finite())
-            })
-            .collect::<Option<Vec<_>>>();
-        let xmin = xs
-            .as_ref()
-            .map(|s| s.iter().copied().fold(f64::INFINITY, f64::min))
-            .unwrap_or(0.);
-        let xmax = xs
-            .as_ref()
-            .map(|s| s.iter().copied().fold(f64::NEG_INFINITY, f64::max))
-            .unwrap_or(1.);
-        for (index, series) in datasets.iter().enumerate() {
-            let fill = color(series, index);
-            let nums = values(series);
-            let mut points = Vec::new();
-            for (column, value) in nums.iter().enumerate() {
-                let px = if kind == "Scatter" {
-                    xs.as_ref()
-                        .and_then(|s| s.get(column))
-                        .map(|v| x + (*v - xmin) / (xmax - xmin).max(1e-9) * width)
-                        .unwrap_or(
-                            x + column as f64 / count.max(2).saturating_sub(1) as f64 * width,
-                        )
-                } else {
-                    x + (column as f64 + 0.5) * width / count as f64
-                };
-                let py = y + plot_height - (*value - min) / span * plot_height;
-                if kind == "Bar" {
-                    let w = width / count as f64 / datasets.len().max(1) as f64 * 0.8;
-                    let bx = x + column as f64 * width / count as f64 + index as f64 * w;
-                    let by = py.min(baseline);
-                    let h = (baseline - py).abs();
-                    svg.push_str(&format!(
-                        "<rect x=\"{bx}\" y=\"{by}\" width=\"{w}\" height=\"{h}\" fill=\"{fill}\"/>"
-                    ));
-                } else if kind == "Scatter" {
-                    svg.push_str(&format!(
-                        "<circle cx=\"{px}\" cy=\"{py}\" r=\"4\" fill=\"{fill}\"/>"
-                    ));
-                }
-                points.push(format!("{px},{py}"));
-            }
-            if matches!(kind, "Line" | "Area") && !points.is_empty() {
-                if kind == "Area" {
-                    let left = x + 0.5 * width / count as f64;
-                    let right = x + (nums.len() as f64 - 0.5) * width / count as f64;
-                    svg.push_str(&format!("<polygon points=\"{left},{baseline} {} {right},{baseline}\" fill=\"{fill}\" fill-opacity=\"0.3\"/>",points.join(" ")));
-                }
-                svg.push_str(&format!(
-                    "<polyline points=\"{}\" fill=\"none\" stroke=\"{fill}\" stroke-width=\"2\"/>",
-                    points.join(" ")
-                ));
-            }
-        }
-        for (index, label) in labels.iter().take(count).enumerate() {
-            let px = x + (index as f64 + 0.5) * width / count as f64;
-            svg.push_str(&format!(
-                "<text x=\"{px}\" y=\"{}\" text-anchor=\"middle\" font-size=\"12\">{}</text>",
-                y + height - 6.,
-                svg_escape(label.as_str().unwrap_or_default())
-            ));
-        }
-    }
-    svg
+    syntra_doc_engine::chart_render::render_chart_svg(element, x, y, width, height)
 }
 fn slide_svg(content: &Value, index: usize) -> String {
     use base64::Engine;
@@ -858,15 +730,9 @@ fn slide_svg(content: &Value, index: usize) -> String {
                     let points = match kind {
                         "Triangle" => vec![(0.5, 0.), (1., 1.), (0., 1.)],
                         "Diamond" => vec![(0.5, 0.), (1., 0.5), (0.5, 1.), (0., 0.5)],
-                        "Arrow" => vec![
-                            (0., 0.25),
-                            (0.65, 0.25),
-                            (0.65, 0.),
-                            (1., 0.5),
-                            (0.65, 1.),
-                            (0.65, 0.75),
-                            (0., 0.75),
-                        ],
+                        "Arrow" => {
+                            syntra_doc_engine::slides::default_right_arrow_points(width, height)
+                        }
                         _ => {
                             let count = if kind == "Pentagon" {
                                 5
@@ -908,6 +774,12 @@ fn slide_svg(content: &Value, index: usize) -> String {
                         0.
                     };
                     svg.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"{width}\" height=\"{height}\" rx=\"{radius}\" {attrs}/>"));
+                }
+                if !element["cell_borders"].is_null() {
+                    svg.push_str(&format!(
+                        "<g transform=\"{transform}\">{}</g>",
+                        syntra_doc_engine::slides::table_borders_svg(element, x, y, width, height)
+                    ));
                 }
                 if let Some(runs) = element[if text_box { "content" } else { "text" }].as_array() {
                     svg.push_str(&slide_text_svg(
@@ -1445,7 +1317,10 @@ fn collect_slide_objects(elements: &[Value], prefix: &str, result: &mut Vec<(Str
                 .map(str::to_owned)
                 .unwrap_or_else(|| index.to_string())
         );
-        if element["type"] == "Group" {
+        if element["type"] == "Table" {
+            let cells = syntra_doc_engine::slides::table_render_cells(element);
+            collect_slide_objects(&cells, &key, result);
+        } else if element["type"] == "Group" {
             collect_slide_objects(
                 element["elements"]
                     .as_array()
@@ -1491,7 +1366,7 @@ mod external_render_tests {
         assert!(svg.contains("<foreignObject x=\"30\" y=\"40\" width=\"300\" height=\"240\""));
         assert!(svg.contains("white-space:pre-wrap") && svg.contains("overflow-wrap:break-word"));
         assert!(svg.contains("justify-content:center") && svg.contains("padding:4px 3px 5px 2px"));
-        assert!(svg.contains("text-align:right;line-height:1.25;margin:0px 0 16px 0"));
+        assert!(svg.contains("text-align:right;line-height:1.5;margin:0px 0 16px 0"));
         assert!(svg.contains("text-align:center") && svg.contains("font-size:26.666"));
         assert!(svg.contains("Wrapped &amp; styled text"));
         assert_eq!(

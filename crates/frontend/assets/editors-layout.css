@@ -64,9 +64,16 @@
 .writer-page .writer-body :is(ul, ol) :is(ul, ol) { margin-bottom: 0; }
 .writer-page .writer-body figure { margin: 0 0 8pt; }
 .writer-page .writer-body pre { white-space: pre-wrap; font-family: monospace; }
-.writer-page .writer-body .writer-page-break { min-height: 24px; break-after: page; }
+.writer-page { position: relative; }
+.writer-page .writer-body .writer-page-break { min-height: 0; margin: 0; break-after: page; }
+.writer-page .writer-body .writer-page-break + .writer-surface-block, .writer-page .writer-body .writer-page-break + [data-writer-decoration="gap"] + .writer-surface-block { margin-top: 0 !important; }
+.writer-page-furniture { position: absolute; inset: 0; pointer-events: none; color: #000; }
+.writer-physical-page { position: absolute; left: 0; right: 0; border-bottom: 1px solid #d1d5db; }
+.writer-page-header, .writer-page-footer { position: absolute; font: 9pt Arial, SimSun, serif; white-space: pre-wrap; }
+.writer-page-footer { text-align: right; }
 .writer-page .writer-body table { border-collapse: collapse; max-width: 100%; }
 .writer-page .writer-body :is(td, th) { border: 1px solid #aaa; padding: 4px 6px; vertical-align: top; }
+.writer-page .writer-body td > p:last-child { margin-bottom: 0 !important; }
 .writer-page .writer-body img { max-width: 100%; object-fit: contain; }
 .writer-page .writer-body a { color: #0563c1; }
 .writer-page textarea[aria-label="Document body (large document)"] { min-height: 1056px; border: 0 !important; padding: 72px !important; font: 16px/1.8 var(--font-sans) !important; }

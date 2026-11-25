@@ -84,7 +84,14 @@ fn docx_typography_defaults_layout_and_chinese_numbering_stay_in_document_order(
         .unwrap();
     assert_eq!(format.numbering_label.as_deref(), Some("二、"));
     let cancelled = paragraph(&imported.body[3]);
-    assert_eq!(cancelled.runs[0].text, "1. 自愿原则");
+    assert_eq!(
+        cancelled
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect::<String>(),
+        "1. 自愿原则"
+    );
     assert!(
         imported
             .professional
@@ -108,8 +115,8 @@ fn docx_style_inheritance_direct_false_character_styles_and_exact_layout_are_res
     </w:styles>"#;
     let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
       <w:p><w:pPr><w:pStyle w:val="Derived"/></w:pPr>
-      <w:r><w:t>Inherited</w:t></w:r>
-      <w:r><w:rPr><w:rStyle w:val="Emphasis"/><w:b w:val="0"/><w:i w:val="false"/><w:sz w:val="36"/></w:rPr><w:t>Direct override</w:t></w:r></w:p>
+      <w:r><w:t>Inherited继承中文</w:t></w:r>
+      <w:r><w:rPr><w:rStyle w:val="Emphasis"/><w:b w:val="0"/><w:i w:val="false"/><w:sz w:val="36"/></w:rPr><w:t>Direct override直接覆盖</w:t></w:r></w:p>
     </w:body></w:document>"#;
     let imported = docx_to_writer(&replace_parts(&[
         ("word/styles.xml", styles),
@@ -122,11 +129,28 @@ fn docx_style_inheritance_direct_false_character_styles_and_exact_layout_are_res
     assert_eq!(paragraph.spacing.after, 9.0);
     assert!(paragraph.runs[0].bold && paragraph.runs[0].italic);
     assert_eq!(paragraph.runs[0].font_size, Some(14.0));
-    assert_eq!(paragraph.runs[0].font_family.as_deref(), Some("FangSong"));
-    assert!(!paragraph.runs[1].bold && !paragraph.runs[1].italic);
-    assert!(paragraph.runs[1].underline);
-    assert_eq!(paragraph.runs[1].color.as_deref(), Some("#123456"));
-    assert_eq!(paragraph.runs[1].font_size, Some(18.0));
+    assert_eq!(paragraph.runs[0].text, "Inherited");
+    assert_eq!(
+        paragraph.runs[0].font_family.as_deref(),
+        Some("Times New Roman")
+    );
+    assert_eq!(paragraph.runs[1].text, "继承中文");
+    assert_eq!(paragraph.runs[1].font_family.as_deref(), Some("FangSong"));
+    assert!(paragraph.runs[1].bold && paragraph.runs[1].italic);
+    assert_eq!(paragraph.runs[1].font_size, Some(14.0));
+    assert_eq!(paragraph.runs[2].text, "Direct override");
+    assert_eq!(
+        paragraph.runs[2].font_family.as_deref(),
+        Some("Times New Roman")
+    );
+    assert_eq!(paragraph.runs[3].text, "直接覆盖");
+    assert_eq!(paragraph.runs[3].font_family.as_deref(), Some("FangSong"));
+    for run in &paragraph.runs[2..] {
+        assert!(!run.bold && !run.italic);
+        assert!(run.underline);
+        assert_eq!(run.color.as_deref(), Some("#123456"));
+        assert_eq!(run.font_size, Some(18.0));
+    }
     let format = &imported.professional.paragraph_formats[0];
     assert_eq!(format.left_indent_pt, Some(9.0));
     assert_eq!(format.right_indent_pt, Some(12.0));

@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[path = "calc_format.rs"]
+mod display_format;
+pub use display_format::{FormattedCell, format_cell_value, format_display_value};
+
 // ---------------------------------------------------------------------------
 // Workbook
 // ---------------------------------------------------------------------------
@@ -24,6 +28,8 @@ pub struct Workbook {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkbookMetadata {
     pub author: Option<String>,
+    #[serde(default)]
+    pub xlsx_import_revision: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub import_warnings: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -35,6 +41,7 @@ impl Default for WorkbookMetadata {
         let now = chrono::Utc::now();
         Self {
             author: None,
+            xlsx_import_revision: 0,
             import_warnings: Vec::new(),
             created_at: now,
             modified_at: now,
@@ -182,6 +189,8 @@ pub struct Sheet {
     pub data_validations: Vec<DataValidation>,
     #[serde(default)]
     pub charts: Vec<SheetChart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<SheetImage>,
 }
 
 /// JSON cannot encode struct-valued map keys. Use stable coordinate/cell pairs,
@@ -247,6 +256,7 @@ impl Sheet {
             conditional_formats: Vec::new(),
             data_validations: Vec::new(),
             charts: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -314,6 +324,58 @@ impl Sheet {
                 && rule.rule.matches(value))
             .then_some(&rule.format)
         })
+    }
+
+    /// Differential formats override only specified properties, retaining the
+    /// cell's number format, font and geometry for unspecified properties.
+    pub fn effective_format(&self, row: u32, col: u32) -> CellFormat {
+        let mut base = self
+            .get_cell(row, col)
+            .map(|c| c.format.clone())
+            .unwrap_or_default();
+        if let Some(range) = self
+            .merged_cells
+            .iter()
+            .find(|range| range.start.row == row && range.start.col == col)
+        {
+            base.borders = merged_cell_borders(range, base.borders, |row, col| {
+                self.get_cell(row, col)
+                    .map(|cell| cell.format.borders.clone())
+            });
+        }
+        if let Some(diff) = self.conditional_format_for(row, col) {
+            if diff.font_family.is_some() {
+                base.font_family = diff.font_family.clone();
+            }
+            if diff.font_size.is_some() {
+                base.font_size = diff.font_size;
+            }
+            if diff.text_color.is_some() {
+                base.text_color = diff.text_color.clone();
+            }
+            if diff.bg_color.is_some() {
+                base.bg_color = diff.bg_color.clone();
+            }
+            if diff.number_format.is_some() {
+                base.number_format = diff.number_format.clone();
+            }
+            base.bold |= diff.bold;
+            base.italic |= diff.italic;
+            base.underline |= diff.underline;
+            if diff.borders.top.is_some() {
+                base.borders.top = diff.borders.top.clone();
+            }
+            if diff.borders.right.is_some() {
+                base.borders.right = diff.borders.right.clone();
+            }
+            if diff.borders.bottom.is_some() {
+                base.borders.bottom = diff.borders.bottom.clone();
+            }
+            if diff.borders.left.is_some() {
+                base.borders.left = diff.borders.left.clone();
+            }
+        }
+        base
     }
 }
 
@@ -514,6 +576,39 @@ pub struct MergedRange {
     pub end: CellRef,
 }
 
+/// OOXML stores a merged area's four outside borders on its edge cells. A
+/// rendered spanning cell must read those edges without rewriting any cells.
+pub fn merged_cell_borders(
+    range: &MergedRange,
+    mut borders: CellBorders,
+    mut get: impl FnMut(u32, u32) -> Option<CellBorders>,
+) -> CellBorders {
+    if range.start.row > range.end.row
+        || range.start.col > range.end.col
+        || range.end.row - range.start.row > 10000
+        || range.end.col - range.start.col > 16384
+    {
+        return borders;
+    }
+    if borders.top.is_none() {
+        borders.top = (range.start.col..=range.end.col)
+            .find_map(|col| get(range.start.row, col).and_then(|b| b.top));
+    }
+    if borders.bottom.is_none() {
+        borders.bottom = (range.start.col..=range.end.col)
+            .find_map(|col| get(range.end.row, col).and_then(|b| b.bottom));
+    }
+    if borders.left.is_none() {
+        borders.left = (range.start.row..=range.end.row)
+            .find_map(|row| get(row, range.start.col).and_then(|b| b.left));
+    }
+    if borders.right.is_none() {
+        borders.right = (range.start.row..=range.end.row)
+            .find_map(|row| get(row, range.end.col).and_then(|b| b.right));
+    }
+    borders
+}
+
 /// A conditional formatting rule applied to a range.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConditionalFormat {
@@ -648,6 +743,251 @@ pub struct SheetChart {
     /// Same-sheet bindings refresh cached chart data when the source cells change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub series_sources: Vec<SheetChartSource>,
+    /// Pixel extents and within-cell offsets from a DrawingML anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<SheetDrawingPosition>,
+}
+
+impl SheetChart {
+    /// The persisted worksheet title is authoritative after a rename; cached
+    /// DrawingML presentation supplies only the remaining chart styling.
+    pub fn resolved_presentation(&self) -> crate::slides::ChartPresentation {
+        let mut presentation = self
+            .cached_data
+            .as_ref()
+            .and_then(|d| d.presentation.clone())
+            .unwrap_or_default();
+        presentation.title = (!self.title.is_empty()).then(|| self.title.clone());
+        presentation
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SheetDrawingPosition {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+pub const MAX_SHEET_DRAWINGS: usize = 1000;
+pub const MAX_WORKBOOK_DRAWINGS: usize = 5000;
+
+/// Prepared sparse prefix sums. Far-away anchors cost one binary search rather
+/// than scanning every intervening row, and all drawings share the same index.
+pub struct SheetDrawingLayout {
+    default_column_width: f64,
+    columns: Vec<(u32, f64)>,
+    rows: Vec<(u32, f64)>,
+}
+impl SheetDrawingLayout {
+    fn new(sheet: &Sheet) -> Self {
+        fn prefix(
+            values: &HashMap<u32, f32>,
+            default: f64,
+            maximum: u32,
+            limit: f64,
+        ) -> Vec<(u32, f64)> {
+            let mut out = values
+                .iter()
+                .filter(|(index, value)| **index < maximum && value.is_finite())
+                .map(|(index, value)| (*index, f64::from(*value).clamp(1., limit) - default))
+                .filter(|(_, delta)| *delta != 0.)
+                .collect::<Vec<_>>();
+            out.sort_by_key(|(index, _)| *index);
+            let mut sum = 0.;
+            for (_, delta) in &mut out {
+                sum += *delta;
+                *delta = sum;
+            }
+            out
+        }
+        let default_column_width = sheet.default_column_width_px();
+        Self {
+            default_column_width,
+            columns: prefix(&sheet.column_widths, default_column_width, 16384, 2048.),
+            rows: prefix(&sheet.row_heights, 24., 1048576, 1000.),
+        }
+    }
+    fn offset(entries: &[(u32, f64)], count: u32, default: f64) -> f64 {
+        let end = entries.partition_point(|(index, _)| *index < count);
+        f64::from(count) * default
+            + end
+                .checked_sub(1)
+                .map(|index| entries[index].1)
+                .unwrap_or(0.)
+    }
+    pub fn column_offset(&self, count: u32) -> f64 {
+        Self::offset(&self.columns, count.min(16384), self.default_column_width)
+    }
+    pub fn row_offset(&self, count: u32) -> f64 {
+        Self::offset(&self.rows, count.min(1048576), 24.)
+    }
+    pub fn drawing_bounds(
+        &self,
+        start: &CellRef,
+        position: &SheetDrawingPosition,
+    ) -> (f64, f64, f64, f64) {
+        let valid = |n: f32, fallback: f64| {
+            if n.is_finite() {
+                f64::from(n).clamp(0., 100000.)
+            } else {
+                fallback
+            }
+        };
+        (
+            self.column_offset(start.col) + valid(position.offset_x, 0.),
+            self.row_offset(start.row) + valid(position.offset_y, 0.),
+            valid(position.width, 320.).max(1.),
+            valid(position.height, 200.).max(1.),
+        )
+    }
+    pub fn chart_bounds(&self, chart: &SheetChart) -> (f64, f64, f64, f64) {
+        if let Some(drawing) = &chart.drawing {
+            return self.drawing_bounds(&chart.anchor_start, drawing);
+        }
+        let x = self.column_offset(chart.anchor_start.col);
+        let y = self.row_offset(chart.anchor_start.row);
+        (
+            x,
+            y,
+            (self.column_offset(chart.anchor_end.col) - x).max(1.),
+            (self.row_offset(chart.anchor_end.row) - y).max(1.),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SheetImage {
+    pub id: Uuid,
+    pub name: String,
+    pub data_url: String,
+    pub anchor_start: CellRef,
+    pub drawing: SheetDrawingPosition,
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(default)]
+    pub crop: [f32; 4],
+}
+
+impl Sheet {
+    pub fn drawing_layout(&self) -> SheetDrawingLayout {
+        SheetDrawingLayout::new(self)
+    }
+    fn default_column_width_px(&self) -> f64 {
+        self.default_column_width
+            .map(f64::from)
+            .filter(|value| value.is_finite())
+            .unwrap_or(80.)
+            .clamp(1., 2048.)
+    }
+
+    pub fn column_width_px(&self, column: u32) -> f64 {
+        self.column_widths
+            .get(&column)
+            .copied()
+            .map(f64::from)
+            .filter(|v| v.is_finite())
+            .unwrap_or_else(|| self.default_column_width_px())
+            .clamp(1., 2048.)
+    }
+    pub fn row_height_px(&self, row: u32) -> f64 {
+        self.row_heights
+            .get(&row)
+            .copied()
+            .map(f64::from)
+            .filter(|v| v.is_finite())
+            .unwrap_or(24.)
+            .clamp(1., 1000.)
+    }
+    pub fn drawing_bounds(
+        &self,
+        start: &CellRef,
+        position: &SheetDrawingPosition,
+    ) -> (f64, f64, f64, f64) {
+        self.drawing_layout().drawing_bounds(start, position)
+    }
+    pub fn chart_bounds(&self, chart: &SheetChart) -> (f64, f64, f64, f64) {
+        self.drawing_layout().chart_bounds(chart)
+    }
+    /// Refresh imported chart bindings using current calculated cell values.
+    pub fn chart_data(&self, chart: &SheetChart) -> crate::slides::ChartData {
+        use crate::slides::{ChartData, Dataset};
+        let mut data = chart.cached_data.clone().unwrap_or(ChartData {
+            labels: Vec::new(),
+            datasets: Vec::new(),
+            presentation: None,
+        });
+        let sources = if chart.series_sources.is_empty() && chart.cached_data.is_none() {
+            (chart.data_start.col.saturating_add(1)
+                ..=chart
+                    .data_end
+                    .col
+                    .min(chart.data_start.col.saturating_add(128)))
+                .map(|col| SheetChartSource {
+                    value_start: CellRef::new(chart.data_start.row.saturating_add(1), col),
+                    value_end: CellRef::new(chart.data_end.row, col),
+                    label_start: Some(CellRef::new(
+                        chart.data_start.row.saturating_add(1),
+                        chart.data_start.col,
+                    )),
+                    label_end: Some(CellRef::new(chart.data_end.row, chart.data_start.col)),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            chart.series_sources.clone()
+        };
+        for (i, source) in sources.iter().enumerate().take(128) {
+            let count = (u64::from(source.value_end.row.saturating_sub(source.value_start.row))
+                + 1)
+                * (u64::from(source.value_end.col.saturating_sub(source.value_start.col)) + 1);
+            if count > 10_000 {
+                continue;
+            }
+            let values = (source.value_start.row..=source.value_end.row)
+                .flat_map(|r| (source.value_start.col..=source.value_end.col).map(move |c| (r, c)))
+                .map(|(r, c)| match self.get_cell(r, c).map(|c| &c.value) {
+                    Some(CellValue::Number(n)) if n.is_finite() => *n,
+                    _ => 0.,
+                })
+                .collect();
+            if let Some(series) = data.datasets.get_mut(i) {
+                series.values = values
+            } else {
+                data.datasets.push(Dataset {
+                    name: format!("Series {}", i + 1),
+                    values,
+                    color: None,
+                })
+            }
+            if i == 0 {
+                if let Some((start, end)) =
+                    source.label_start.as_ref().zip(source.label_end.as_ref())
+                {
+                    let count = u64::from(end.row.saturating_sub(start.row) + 1)
+                        * u64::from(end.col.saturating_sub(start.col) + 1);
+                    if count <= 10_000 {
+                        data.labels = (start.row..=end.row)
+                            .flat_map(|r| (start.col..=end.col).map(move |c| (r, c)))
+                            .map(|(r, c)| {
+                                self.get_cell(r, c)
+                                    .map(|c| {
+                                        format_cell_value(
+                                            &c.value,
+                                            c.format.number_format.as_deref(),
+                                        )
+                                        .text
+                                    })
+                                    .unwrap_or_default()
+                            })
+                            .collect()
+                    }
+                }
+            }
+        }
+        data.presentation = Some(chart.resolved_presentation());
+        data
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -656,6 +996,43 @@ pub struct SheetChartSource {
     pub value_end: CellRef,
     pub label_start: Option<CellRef>,
     pub label_end: Option<CellRef>,
+}
+
+#[cfg(test)]
+mod drawing_layout_tests {
+    use super::*;
+    #[test]
+    fn sparse_far_anchors_share_prepared_offsets_without_expanding_empty_rows() {
+        let mut sheet = Sheet::new("Sparse".into());
+        sheet.row_heights.insert(0, 40.);
+        sheet.row_heights.insert(999999, 30.);
+        sheet.column_widths.insert(0, 120.);
+        sheet.column_widths.insert(16383, 90.);
+        let layout = sheet.drawing_layout();
+        let position = SheetDrawingPosition {
+            offset_x: 3.,
+            offset_y: 7.,
+            width: 260.,
+            height: 140.,
+        };
+        let anchor = CellRef::new(1_000_000, 16_383);
+        let bounds = layout.drawing_bounds(&anchor, &position);
+        assert_eq!(
+            bounds,
+            (
+                16_383. * 80. + 40. + 3.,
+                1_000_000. * 24. + 22. + 7.,
+                260.,
+                140.
+            )
+        );
+        assert_eq!(sheet.drawing_bounds(&anchor, &position), bounds);
+        assert_eq!((layout.rows.len(), layout.columns.len()), (2, 2));
+        for offset in 0..1000 {
+            let bounds = layout.drawing_bounds(&CellRef::new(1_000_000 - offset, 16383), &position);
+            assert!(bounds.1.is_finite() && bounds.1 > 20_000_000.);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

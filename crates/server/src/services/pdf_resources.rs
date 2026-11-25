@@ -22,6 +22,9 @@ pub async fn prepare_document(
         "slides" => {
             super::legacy_slides_layout::for_response(db, storage, file_id, version, content).await
         }
+        "calc" => {
+            super::legacy_calc_layout::for_response(db, storage, file_id, version, content).await
+        }
         _ => content,
     };
     inline_images(db, storage, user, &mut content).await?;

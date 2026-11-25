@@ -94,6 +94,7 @@ fn table(blocks: Vec<Block>) -> Block {
         column_widths: vec![120.0],
         rows: vec![TableRow {
             cells: vec![TableCell {
+                layout: None,
                 blocks,
                 col_span: 1,
                 row_span: 1,
@@ -150,11 +151,13 @@ fn docx_standard_hyperlink_relationships_roundtrip_through_nested_content() {
             id: Uuid::new_v4(),
             ordered: true,
             items: vec![ListItem {
+                layout: None,
                 runs: vec![linked(
                     "mail",
                     "mailto:person@example.org?subject=hello&body=world",
                 )],
                 children: vec![ListItem {
+                    layout: None,
                     runs: vec![linked("child", url)],
                     children: vec![],
                 }],
@@ -363,8 +366,10 @@ fn empty_paragraphs_and_lists_keep_their_positions_inside_nested_tables() {
                 id: Uuid::new_v4(),
                 ordered: false,
                 items: vec![ListItem {
+                    layout: None,
                     runs: vec![linked("list item", "https://example.org/list")],
                     children: vec![ListItem {
+                        layout: None,
                         runs: vec![TextRun::plain("child")],
                         children: vec![],
                     }],

@@ -11,6 +11,7 @@
 //! - **Whiteboard** — freeform drawing canvases
 
 pub mod calc;
+pub mod chart_render;
 pub mod slides;
 pub mod whiteboard;
 pub mod writer;

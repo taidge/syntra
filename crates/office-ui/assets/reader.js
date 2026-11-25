@@ -150,7 +150,7 @@ window.SyntraOffice.mountReader = ({ kind, width, zh, locale, menus, open, edit 
     resize();
   }
   function resize() {
-    const grid = kind === 'calc' && paper.querySelector('.sheet:not([hidden]) > table');
+    const grid = kind === 'calc' && paper.querySelector('.sheet:not([hidden]) .sheet-surface');
     const natural = grid?.offsetWidth || width;
     if (fit) scale = Math.min(1, Math.max(0.01, (stage.clientWidth - 24) / natural));
     paper.style.width = natural + 'px';
