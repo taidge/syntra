@@ -76,6 +76,8 @@ struct NativeSheet {
     id: uuid::Uuid,
     name: String,
     cells: Vec<(CellRef, Cell)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_column_width: Option<f32>,
     column_widths: HashMap<u32, f32>,
     row_heights: HashMap<u32, f32>,
     frozen_rows: u32,
@@ -111,6 +113,7 @@ impl NativeWorkbook {
                             (reference.clone(), cell.clone())
                         })
                         .collect(),
+                    default_column_width: sheet.default_column_width,
                     column_widths: sheet.column_widths.clone(),
                     row_heights: sheet.row_heights.clone(),
                     frozen_rows: sheet.frozen_rows,
@@ -140,6 +143,7 @@ impl From<NativeWorkbook> for Workbook {
                     id: sheet.id,
                     name: sheet.name,
                     cells: sheet.cells.into_iter().collect(),
+                    default_column_width: sheet.default_column_width,
                     column_widths: sheet.column_widths,
                     row_heights: sheet.row_heights,
                     frozen_rows: sheet.frozen_rows,
@@ -513,6 +517,15 @@ fn sheet_to_xml(
         ));
     }
     xml.push_str("</sheetView></sheetViews>");
+    if let Some(width) = sheet
+        .default_column_width
+        .filter(|w| w.is_finite() && *w >= 0.)
+    {
+        xml.push_str(&format!(
+            "<sheetFormatPr defaultRowHeight=\"15\" defaultColWidth=\"{}\"/>",
+            width / 7.
+        ));
+    }
     if !sheet.column_widths.is_empty() {
         xml.push_str("<cols>");
         let mut widths: Vec<_> = sheet.column_widths.iter().collect();

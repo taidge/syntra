@@ -1,5 +1,5 @@
 // Render Syntra's exported HTML as a paged or tabbed offline reader.
-window.SyntraOffice.mountReader = ({ kind, width, zh, menus, open, edit }) => {
+window.SyntraOffice.mountReader = ({ kind, width, zh, locale, menus, open, edit }) => {
   const label = (en, cn) => (zh ? cn : en);
   const make = (tag, className) => {
     const node = document.createElement(tag);
@@ -13,7 +13,8 @@ window.SyntraOffice.mountReader = ({ kind, width, zh, menus, open, edit }) => {
         .reader-stage{flex:1;min-height:0;overflow:auto;padding:12px;overscroll-behavior:contain}
         .reader-paper{background:white;margin-inline:auto;box-shadow:0 1px 5px #0003}
         .reader-paper[data-kind="writer"]{min-height:85vh;padding:clamp(20px,5vw,72px)}
-        .reader-paper[data-kind="calc"]{padding:12px}
+        .reader-paper[data-kind="calc"]{padding:0}
+        .reader-paper[data-kind="calc"] .sheet > h1{display:none}
         .reader-paper .writer-page-break{margin:18px 0;border-top:1px dashed #bcc3cd}
         .reader-paper [hidden]{display:none!important}
     `;
@@ -71,6 +72,14 @@ window.SyntraOffice.mountReader = ({ kind, width, zh, menus, open, edit }) => {
       groups.push({ name: label('Slide ', '幻灯片 ') + (groups.length + 1), nodes: [node] });
     }
   } else if (kind === 'calc') {
+    const shortDate = new Intl.DateTimeFormat(locale || undefined, {
+      year: 'numeric', month: 'numeric', day: 'numeric', timeZone: 'UTC'
+    });
+    for (const cell of paper.querySelectorAll('td[data-short-date]')) {
+      const iso = cell.textContent.split('T')[0];
+      const date = new Date(iso + 'T00:00:00Z');
+      if (Number.isFinite(date.valueOf())) cell.textContent = shortDate.format(date);
+    }
     for (const node of paper.children) {
       const name = node.getAttribute('aria-label') ?? node.querySelector('h1')?.textContent;
       if (node.matches('.sheet') && (!groups.length || groups.at(-1).name !== name)) {
@@ -105,7 +114,7 @@ window.SyntraOffice.mountReader = ({ kind, width, zh, menus, open, edit }) => {
       index = i;
       for (const el of groups[index].nodes) el.hidden = false;
       picker.selectedIndex = index;
-      bar?.refresh();
+      if (bar) resize();
       bar?.refreshFind();
       stage.scrollTo(0, 0);
     }
@@ -141,8 +150,10 @@ window.SyntraOffice.mountReader = ({ kind, width, zh, menus, open, edit }) => {
     resize();
   }
   function resize() {
-    if (fit) scale = Math.min(1, Math.max(0.01, (stage.clientWidth - 24) / width));
-    paper.style.width = width + 'px';
+    const grid = kind === 'calc' && paper.querySelector('.sheet:not([hidden]) > table');
+    const natural = grid?.offsetWidth || width;
+    if (fit) scale = Math.min(1, Math.max(0.01, (stage.clientWidth - 24) / natural));
+    paper.style.width = natural + 'px';
     paper.style.zoom = String(scale);
     status.value = Math.round(scale * 100) + '%';
     bar.refresh();

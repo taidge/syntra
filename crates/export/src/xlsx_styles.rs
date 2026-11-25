@@ -43,6 +43,7 @@ impl Styles {
         let numbered: Vec<_> = formats
             .iter()
             .enumerate()
+            .filter(|(_, f)| !f.localized_short_date)
             .filter_map(|(i, f)| f.number_format.as_ref().map(|code| (i, code)))
             .collect();
         xml.push_str(&format!("<numFmts count=\"{}\">", numbered.len()));
@@ -112,7 +113,9 @@ impl Styles {
                 VAlign::Middle => "center",
                 VAlign::Bottom => "bottom",
             };
-            let num_fmt = if f.number_format.is_some() {
+            let num_fmt = if f.localized_short_date {
+                14
+            } else if f.number_format.is_some() {
                 164 + i
             } else {
                 0

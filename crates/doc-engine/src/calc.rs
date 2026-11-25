@@ -170,6 +170,8 @@ pub struct Sheet {
     pub name: String,
     #[serde(default, with = "cell_map")]
     pub cells: HashMap<CellRef, Cell>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_column_width: Option<f32>,
     pub column_widths: HashMap<u32, f32>,
     pub row_heights: HashMap<u32, f32>,
     pub frozen_rows: u32,
@@ -236,6 +238,7 @@ impl Sheet {
             id: Uuid::new_v4(),
             name,
             cells: HashMap::new(),
+            default_column_width: None,
             column_widths: HashMap::new(),
             row_heights: HashMap::new(),
             frozen_rows: 0,
@@ -426,6 +429,9 @@ pub struct CellFormat {
     pub horizontal_align: HAlign,
     pub vertical_align: VAlign,
     pub number_format: Option<String>,
+    /// XLSX built-in format 14 follows the host's regional short date.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub localized_short_date: bool,
     pub borders: CellBorders,
     pub wrap_text: bool,
 }
@@ -443,6 +449,7 @@ impl Default for CellFormat {
             horizontal_align: HAlign::Left,
             vertical_align: VAlign::Bottom,
             number_format: None,
+            localized_short_date: false,
             borders: CellBorders::default(),
             wrap_text: false,
         }

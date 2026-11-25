@@ -5,6 +5,7 @@ use syntra_doc_engine::calc::*;
 #[derive(Default)]
 struct Styles {
     formats: Vec<CellFormat>,
+    digit_width: Option<f64>,
     differential: Vec<CellFormat>,
     colors: Vec<String>,
     date_formats: BTreeSet<usize>,
@@ -299,6 +300,36 @@ fn styles(
         .child("fonts")
         .map(|n| n.children.as_slice())
         .unwrap_or(&[]);
+    // SpreadsheetML column widths use the largest digit of the Normal style.
+    // SimSun's Latin digits occupy half an em, rounded to whole device pixels.
+    let normal_xf = root
+        .child("cellStyles")
+        .and_then(|styles| {
+            styles
+                .children
+                .iter()
+                .find(|n| n.attr("builtinId") == Some("0"))
+        })
+        .and_then(|n| n.attr("xfId")?.parse::<usize>().ok())
+        .unwrap_or(0);
+    let normal_font = root
+        .child("cellStyleXfs")
+        .and_then(|xfs| xfs.children.get(normal_xf))
+        .and_then(|xf| xf.attr("fontId")?.parse::<usize>().ok())
+        .unwrap_or(0);
+    if let Some(font) = fonts.get(normal_font)
+        && font
+            .child("name")
+            .and_then(|n| n.attr("val"))
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("SimSun")
+                    || name.eq_ignore_ascii_case("NSimSun")
+                    || matches!(name, "宋体" | "新宋体")
+            })
+        && let Some(points) = font.child("sz").and_then(|n| n.num("val"))
+    {
+        result.digit_width = Some(((points * 96. / 72.).round() / 2.).round().max(1.));
+    }
     let fills = root
         .child("fills")
         .map(|n| n.children.as_slice())
@@ -340,6 +371,7 @@ fn styles(
                 alignment(&mut format, node, warnings);
             }
             let id = integer("numFmtId") as u32;
+            format.localized_short_date = id == 14 && !numbers.contains_key(&id);
             format.number_format = numbers
                 .get(&id)
                 .cloned()
@@ -977,6 +1009,7 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
         let Some(sheet) = workbook.sheets.iter_mut().find(|s| &s.name == name) else {
             continue;
         };
+        let digit_width = styles.digit_width.unwrap_or(7.);
         let mut expanded = 0usize;
         let mut column_styles = BTreeMap::new();
         let mut row_styles = BTreeMap::new();
@@ -997,7 +1030,9 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
             }
             if let Some(width) = checked_metric(column, "width", 0.0, 100_000.0)? {
                 for col in min - 1..max {
-                    sheet.column_widths.insert(col, (width * 7.0) as f32);
+                    sheet
+                        .column_widths
+                        .insert(col, (width * digit_width) as f32);
                 }
             }
             if column.flag("hidden") == Some(true) {
@@ -1006,6 +1041,11 @@ pub(super) fn enrich(bytes: &[u8], workbook: &mut Workbook) -> Result<(), String
                     "Hidden worksheet columns are retained in the original; hidden-column state is not represented in Calc.",
                 );
             }
+        }
+        if let Some(props) = root.child("sheetFormatPr")
+            && let Some(default) = checked_metric(props, "defaultColWidth", 0., 100_000.)?
+        {
+            sheet.default_column_width = Some((default * digit_width) as f32);
         }
         for row in root.descendants("row") {
             if let (Some(index), Some(style)) = (

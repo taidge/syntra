@@ -2,7 +2,7 @@ use super::*;
 use syntra_doc_engine::calc::*;
 use syntra_doc_engine::slides::{ChartData, Dataset};
 
-pub(super) fn render(content: &Value) -> Result<PrintDocument, String> {
+pub(super) fn render(content: &Value, reader: bool) -> Result<PrintDocument, String> {
     let mut workbook: Workbook = serde_json::from_value(content.clone())
         .map_err(|error| format!("Cannot render Calc PDF: {error}"))?;
     if workbook.sheets.len() > 100 {
@@ -52,19 +52,26 @@ pub(super) fn render(content: &Value) -> Result<PrintDocument, String> {
         let widths = (0..columns)
             .map(|column| {
                 finite(
-                    f64::from(*sheet.column_widths.get(&column).unwrap_or(&10.)),
-                    10.,
+                    f64::from(
+                        sheet
+                            .column_widths
+                            .get(&column)
+                            .copied()
+                            .or(sheet.default_column_width)
+                            .unwrap_or(75.),
+                    ),
+                    75.,
                     1.,
-                    100.,
-                ) * 7.
-                    + 5.
+                    2048.,
+                )
             })
             .collect::<Vec<_>>();
         let mut start = 0;
         while start < columns {
             let mut end = start;
             let mut width = 32.;
-            while end < columns && (end == start || width + widths[end as usize] <= 1000.) {
+            while end < columns && (reader || end == start || width + widths[end as usize] <= 1000.)
+            {
                 width += widths[end as usize];
                 end += 1;
             }
@@ -80,8 +87,9 @@ pub(super) fn render(content: &Value) -> Result<PrintDocument, String> {
                 }
                 end = range.end.col + 1;
             }
+            let grid_width = 28. + widths[start as usize..end as usize].iter().sum::<f64>();
             body.push_str(&format!(
-                "<section class=\"sheet\"><h1>{}</h1><table><colgroup><col style=\"width:28px\">",
+                "<section class=\"sheet\"><h1>{}</h1><table style=\"width:{grid_width}px\"><colgroup><col style=\"width:28px\">",
                 escape(&sheet.name)
             ));
             for column in start..end {
@@ -134,9 +142,35 @@ pub(super) fn render(content: &Value) -> Result<PrintDocument, String> {
                     let style = sheet
                         .conditional_format_for(row, column)
                         .or_else(|| cell.map(|cell| &cell.format));
+                    let css = if let Some(range) = merged {
+                        let mut style = style.cloned().unwrap_or_default();
+                        if let Some(edge) = sheet
+                            .get_cell(range.end.row, column)
+                            .and_then(|c| c.format.borders.bottom.as_ref())
+                        {
+                            style.borders.bottom = Some(edge.clone());
+                        }
+                        if let Some(edge) = sheet
+                            .get_cell(row, range.end.col)
+                            .and_then(|c| c.format.borders.right.as_ref())
+                        {
+                            style.borders.right = Some(edge.clone());
+                        }
+                        cell_style(&style)
+                    } else {
+                        style.map(cell_style).unwrap_or_default()
+                    };
+                    let short_date = if reader
+                        && cell.is_some_and(|c| {
+                            c.format.localized_short_date && matches!(c.value, CellValue::Date(_))
+                        }) {
+                        " data-short-date"
+                    } else {
+                        ""
+                    };
                     body.push_str(&format!(
-                        "<td{spans} style=\"{}\">{}</td>",
-                        style.map(cell_style).unwrap_or_default(),
+                        "<td{spans}{short_date} style=\"{}\">{}</td>",
+                        css,
                         cell.map(display)
                             .map(|text| escape(&text))
                             .unwrap_or_default()
@@ -159,7 +193,7 @@ pub(super) fn render(content: &Value) -> Result<PrintDocument, String> {
     if workbook.sheets.is_empty() {
         body.push_str("<section class=\"sheet\"><p>&#160;</p></section>");
     }
-    let css = "@page{size:297mm 210mm;margin:10mm}h1{font-size:15pt;margin:0 0 8pt}h2{font-size:13pt}table{border-collapse:collapse;table-layout:fixed;width:100%;font-size:10pt}thead{display:table-header-group}tr{break-inside:avoid}td,th{border:0.5pt solid #cbd5e1;padding:3pt;overflow-wrap:anywhere;white-space:pre-wrap}th{background:#f1f5f9;color:#475569;font-weight:normal;text-align:center;font-size:9pt}td{vertical-align:bottom}.sheet{break-before:page}.sheet:first-child{break-before:auto}.sheet-chart{break-inside:avoid;margin-top:12pt}svg text{font-family:Arial,'Office CJK',sans-serif}";
+    let css = "@page{size:297mm 210mm;margin:10mm}h1{font-size:15pt;margin:0 0 8pt}h2{font-size:13pt}table{border-collapse:collapse;table-layout:fixed;width:100%;font-size:10pt}thead{display:table-header-group}tr{break-inside:avoid}td,th{border:0.5pt solid #cbd5e1;padding:0 2px;overflow-wrap:anywhere;white-space:pre-wrap}th{background:#f1f5f9;color:#475569;font-weight:normal;text-align:center;font-size:9pt}td{vertical-align:bottom;overflow:hidden}.sheet{break-before:page}.sheet:first-child{break-before:auto}.sheet-chart{break-inside:avoid;margin-top:12pt}svg text{font-family:Arial,'Office CJK',sans-serif}";
     Ok(html(&workbook.title, css, &body, 297., 210.))
 }
 
@@ -192,11 +226,7 @@ fn cell_style(format: &CellFormat) -> String {
         } else {
             "none"
         },
-        if format.wrap_text {
-            "pre-wrap"
-        } else {
-            "pre-wrap"
-        }
+        if format.wrap_text { "pre-wrap" } else { "pre" }
     );
     for (edge, border) in [
         ("top", &format.borders.top),
@@ -401,7 +431,7 @@ mod tests {
             start: CellRef::new(0, 1),
             end: CellRef::new(0, 2),
         });
-        let printed = render(&serde_json::to_value(workbook).unwrap()).unwrap();
+        let printed = render(&serde_json::to_value(workbook).unwrap(), false).unwrap();
         assert!(printed.html.contains("25.00"));
         assert!(printed.html.contains("colspan=\"2\""));
         assert!(printed.html.contains("@page{size:297mm 210mm"));
@@ -454,7 +484,7 @@ mod tests {
             5_000
         ];
         assert!(
-            render(&serde_json::to_value(workbook).unwrap())
+            render(&serde_json::to_value(workbook).unwrap(), false)
                 .unwrap_err()
                 .contains("layout-work budget")
         );

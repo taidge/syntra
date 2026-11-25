@@ -664,3 +664,48 @@ fn standard_pptx_export_rejects_invalid_page_size_instead_of_writing_null_or_sat
         );
     }
 }
+
+#[test]
+fn calc_reader_preserves_excel_column_widths_merges_and_short_dates() {
+    let fixture = include_bytes!("fixtures/external-rich.xlsx");
+    let workbook = replace(
+        fixture,
+        "xl/styles.xml",
+        r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <fonts count="1"><font><sz val="11"/><name val="SimSun"/></font></fonts>
+      <cellStyleXfs count="1"><xf fontId="0"/></cellStyleXfs>
+      <cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs>
+      <cellStyles count="1"><cellStyle name="Normal" builtinId="0" xfId="0"/></cellStyles></styleSheet>"#,
+    );
+    let workbook = replace(
+        &workbook,
+        "xl/worksheets/sheet1.xml",
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <dimension ref="A1:F4"/><sheetFormatPr defaultColWidth="9" defaultRowHeight="18"/>
+      <cols><col min="1" max="1" width="17.125"/><col min="2" max="2" width="50.625"/>
+      <col min="6" max="6" width="120"/></cols>
+      <sheetData><row r="1" ht="48" customHeight="1"><c r="A1" t="inlineStr"><is><t>Title</t></is></c></row>
+      <row r="2"><c r="A2" s="1"><v>46266</v></c><c r="C2"><v>42</v></c><c r="F2"><v>6</v></c></row></sheetData>
+      <mergeCells count="2"><mergeCell ref="A1:C1"/><mergeCell ref="A2:A4"/></mergeCells></worksheet>"#,
+    );
+    let book = syntra_export::xlsx::xlsx_to_workbook(&workbook).unwrap();
+    let content = serde_json::to_value(&book).unwrap();
+    let html = syntra_export::pdf::document_to_reader_html(&content, "calc")
+        .unwrap()
+        .html;
+    for expected in [
+        "<col style=\"width:137px\">",
+        "<col style=\"width:405px\">",
+        "<col style=\"width:72px\">",
+        "height:64px",
+        "rowspan=\"1\" colspan=\"3\"",
+        "rowspan=\"3\" colspan=\"1\" data-short-date",
+        ">2026-09-01</td>",
+    ] {
+        assert!(html.contains(expected), "Missing {expected}");
+    }
+    let sheets = book.sheets.len();
+    assert_eq!(html.matches("<section class=\"sheet\">").count(), sheets);
+    let print = syntra_export::pdf::document_to_print_html(&content, "calc").unwrap();
+    assert!(print.html.matches("<section class=\"sheet\">").count() > sheets);
+}

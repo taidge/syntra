@@ -28,7 +28,7 @@ pub struct PrintDocument {
 pub fn document_to_print_html(content: &Value, kind: &str) -> Result<PrintDocument, String> {
     let document = match kind {
         "writer" => writer::render(content),
-        "calc" => calc::render(content),
+        "calc" => calc::render(content, false),
         "slides" | "presentation" => canvas::slides(content),
         "whiteboard" => canvas::whiteboard(content),
         _ => Err(format!(
@@ -37,6 +37,18 @@ pub fn document_to_print_html(content: &Value, kind: &str) -> Result<PrintDocume
     }?;
     if document.html.len() > MAX_HTML_BYTES {
         return Err("PDF print layout exceeds the rendering budget".into());
+    }
+    Ok(document)
+}
+
+/// Build HTML for the embedded reader. A worksheet stays a single scrollable grid.
+pub fn document_to_reader_html(content: &Value, kind: &str) -> Result<PrintDocument, String> {
+    if kind != "calc" {
+        return document_to_print_html(content, kind);
+    }
+    let document = calc::render(content, true)?;
+    if document.html.len() > MAX_HTML_BYTES {
+        return Err("Worksheet exceeds the rendering budget".into());
     }
     Ok(document)
 }
