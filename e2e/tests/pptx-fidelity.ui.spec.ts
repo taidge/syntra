@@ -23,7 +23,7 @@ test('PPTX import retains large reused backgrounds and wrapped text @ui', async 
   expect(upload.import_warnings.join(' ')).not.toMatch(/media.*budget|unsupported or missing/i);
   const document = (await (await request.get(`/api/v1/documents/${upload.document_id}`, { headers })).json()).data;
   expect(document.version).toBe(1);
-  expect(document.content.metadata.pptx_import_revision).toBe(2);
+  expect(document.content.metadata.pptx_import_revision).toBe(3);
   expect(document.content.slides).toHaveLength(20);
   expect(Buffer.byteLength(JSON.stringify(document.content))).toBeLessThan(20 * 1024 * 1024);
   for (const slide of document.content.slides) {
@@ -32,6 +32,7 @@ test('PPTX import retains large reused backgrounds and wrapped text @ui', async 
 
   await page.getByRole('link', { name: 'reused-large-background.pptx', exact: true }).click();
   await expect(page).toHaveURL(/\/slides\//);
+  await page.locator('.slide-canvas').waitFor({ timeout: 30_000 });
   await expect(page.locator('.slide-thumbnail')).toHaveCount(20);
   for (const viewport of [{ width: 1280, height: 720 }, { width: 900, height: 700 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
