@@ -12,7 +12,7 @@ window.SyntraOffice.mountReader = ({ kind, width, zh, locale, menus, open, edit 
         body{display:flex;flex-direction:column;background:#e8eaee;margin:0}
         .reader-stage{flex:1;min-height:0;overflow:auto;padding:12px;overscroll-behavior:contain}
         .reader-paper{background:white;margin-inline:auto;box-shadow:0 1px 5px #0003}
-        .reader-paper[data-kind="writer"]{min-height:85vh;padding:clamp(20px,5vw,72px)}
+        @media screen{.reader-paper[data-kind="writer"]{min-height:85vh;padding:var(--writer-page-margins,25.4mm)}}
         .reader-paper[data-kind="calc"]{padding:0}
         .reader-paper[data-kind="calc"] .sheet > h1{display:none}
         .reader-paper .writer-page-break{margin:18px 0;border-top:1px dashed #bcc3cd}

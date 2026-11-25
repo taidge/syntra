@@ -629,7 +629,14 @@ fn paragraph_properties_xml(
         ));
     }
     let (line, rule) = match format.and_then(|f| f.line_height_pt) {
-        Some(value) => ((value * 20.0).round() as u32, "exact"),
+        Some(value) => {
+            let rule = if format.is_some_and(|f| f.line_height_at_least) {
+                "atLeast"
+            } else {
+                "exact"
+            };
+            ((value * 20.0).round() as u32, rule)
+        }
         None => ((spacing.line_height * 240.0).round() as u32, "auto"),
     };
     format!(
@@ -2242,6 +2249,8 @@ impl ParagraphProperties {
             first_line_indent_chars: self.first_line_indent_chars,
             left_indent_pt: self.left_indent_pt,
             right_indent_pt: self.right_indent_pt,
+            line_height_at_least: self.line.is_some()
+                && self.line_rule.as_deref() == Some("atLeast"),
             line_height_pt: self
                 .line
                 .filter(|_| self.line_rule.as_deref().is_some_and(|rule| rule != "auto"))

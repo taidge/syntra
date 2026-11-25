@@ -103,6 +103,11 @@ function renderBlock(block, formats, depth = 0, index = null) {
       element = document.createElement(block.type === 'Heading' ? `h${finite(block.level, 1, 1, 6)}` : 'p');
       blockStyle(element, block, formats);
       appendRuns(element, block.runs);
+      if (formats.get(String(block.id))?.line_height_at_least) {
+        // A minimum is the paragraph strut; each run also contributes its natural line box.
+        for (const run of element.children) run.style.lineHeight = 'normal';
+        element.style.lineHeight = `max(1em, ${element.style.lineHeight})`;
+      }
       break;
     }
     case 'List':

@@ -257,6 +257,8 @@ pub struct ParagraphFormat {
     pub left_indent_pt: Option<f32>,
     pub right_indent_pt: Option<f32>,
     pub line_height_pt: Option<f32>,
+    /// DOCX atLeast spacing allows each line to expand for the text it contains.
+    pub line_height_at_least: bool,
     pub numbering_label: Option<String>,
     pub alignment: Option<Alignment>,
 }

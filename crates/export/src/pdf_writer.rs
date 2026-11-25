@@ -12,7 +12,12 @@ pub(super) fn render(content: &Value) -> Result<PrintDocument, String> {
         &document.professional.footer,
         document.professional.page_numbers,
     )?;
-    css.push_str("body{line-height:1.15}.writer-section{page:writer_base}p{margin:0 0 8pt;min-height:1em;white-space:pre-wrap;overflow-wrap:anywhere;orphans:2;widows:2}h1,h2,h3,h4,h5,h6{margin:12pt 0 8pt;break-after:avoid;white-space:pre-wrap}h1{font-size:24pt}h2{font-size:20pt}h3{font-size:18pt}h4{font-size:16pt}h5{font-size:14pt}h6{font-size:12pt}table{border-collapse:collapse;width:100%;table-layout:fixed;margin:8pt 0}td{border:1px solid #9ca3af;padding:5pt;vertical-align:top;overflow-wrap:anywhere}td p:last-child{margin-bottom:0}tr{break-inside:avoid}pre{font-family:monospace,'Office CJK',sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f4f6;padding:8pt;font-size:10pt}blockquote{border-left:3pt solid #9ca3af;margin:8pt 0;padding-left:12pt}figure{margin:8pt 0;break-inside:avoid}figure img{max-width:100%;object-fit:contain}li{white-space:pre-wrap}li p{margin:0}.writer-page-break{break-after:page;height:0}a{color:inherit}ul,ol{padding-left:24pt}");
+    let page = &document.page_settings;
+    css.push_str(&format!(
+        ":root{{--writer-page-margins:{}mm {}mm {}mm {}mm}}",
+        page.margin_top, page.margin_right, page.margin_bottom, page.margin_left
+    ));
+    css.push_str("body{line-height:1.15}.writer-minimum-line>span{line-height:normal}.writer-section{page:writer_base}p{margin:0 0 8pt;min-height:1em;white-space:pre-wrap;overflow-wrap:anywhere;orphans:2;widows:2}h1,h2,h3,h4,h5,h6{margin:12pt 0 8pt;break-after:avoid;white-space:pre-wrap}h1{font-size:24pt}h2{font-size:20pt}h3{font-size:18pt}h4{font-size:16pt}h5{font-size:14pt}h6{font-size:12pt}table{border-collapse:collapse;width:100%;table-layout:fixed;margin:8pt 0}td{border:1px solid #9ca3af;padding:5pt;vertical-align:top;overflow-wrap:anywhere}td p:last-child{margin-bottom:0}tr{break-inside:avoid}pre{font-family:monospace,'Office CJK',sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f4f6;padding:8pt;font-size:10pt}blockquote{border-left:3pt solid #9ca3af;margin:8pt 0;padding-left:12pt}figure{margin:8pt 0;break-inside:avoid}figure img{max-width:100%;object-fit:contain}li{white-space:pre-wrap}li p{margin:0}.writer-page-break{break-after:page;height:0}a{color:inherit}ul,ol{padding-left:24pt}");
     if document.professional.different_first_page {
         css.push_str("@page:first{@top-center{content:none}@bottom-center{content:none}}");
     }
@@ -170,6 +175,14 @@ fn alignment(value: Alignment) -> &'static str {
     }
 }
 
+fn minimum_line_class(format: Option<&ParagraphFormat>) -> &'static str {
+    if format.is_some_and(|f| f.line_height_at_least && f.line_height_pt.is_some()) {
+        " class=\"writer-minimum-line\""
+    } else {
+        ""
+    }
+}
+
 impl WriterState<'_> {
     fn block(&mut self, block: &Block, out: &mut String, depth: usize) -> Result<(), String> {
         budget(&mut self.remaining)?;
@@ -185,7 +198,8 @@ impl WriterState<'_> {
                     paragraph.spacing,
                     paragraph.indent_level,
                 );
-                out.push_str(&format!("<p style=\"{style}\">"));
+                let class = minimum_line_class(format);
+                out.push_str(&format!("<p{class} style=\"{style}\">"));
                 self.numbering(format, out);
                 runs(&paragraph.runs, out);
                 if paragraph.runs.iter().all(|run| run.text.is_empty()) {
@@ -206,7 +220,8 @@ impl WriterState<'_> {
                     },
                     0,
                 );
-                out.push_str(&format!("<h{level} style=\"{style}\">"));
+                let class = minimum_line_class(format);
+                out.push_str(&format!("<h{level}{class} style=\"{style}\">"));
                 self.numbering(format, out);
                 runs(&heading.runs, out);
                 out.push_str(&format!("</h{level}>"));
@@ -301,7 +316,14 @@ impl WriterState<'_> {
             .unwrap_or(0.);
         let line = format
             .and_then(|f| f.line_height_pt)
-            .map(|value| format!("{}pt", finite(f64::from(value), 14., 1., 1000.)))
+            .map(|value| {
+                let points = finite(f64::from(value), 14., 1., 1000.);
+                if format.is_some_and(|f| f.line_height_at_least) {
+                    format!("max(1em,{points}pt)")
+                } else {
+                    format!("{points}pt")
+                }
+            })
             .unwrap_or_else(|| finite(f64::from(spacing.line_height), 1.15, 0.5, 10.).to_string());
         let first = if let Some(value) = format.and_then(|f| f.first_line_indent_chars) {
             format!("{}em", finite(f64::from(value), 0., -100., 100.))

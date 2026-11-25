@@ -146,6 +146,27 @@ fn docx_style_inheritance_direct_false_character_styles_and_exact_layout_are_res
 }
 
 #[test]
+fn minimum_line_spacing_survives_rendering_and_docx_round_trip() {
+    let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:pPr><w:spacing w:line="17" w:lineRule="atLeast"/></w:pPr>
+        <w:r><w:rPr><w:sz w:val="27"/></w:rPr><w:t>Title</w:t></w:r></w:p>
+        <w:p><w:r><w:t>First paragraph</w:t></w:r></w:p>
+        </w:body></w:document>"#;
+    let model = docx_to_writer(&replace_parts(&[("word/document.xml", document)])).unwrap();
+    let format = &model.professional.paragraph_formats[0];
+    assert!(format.line_height_at_least);
+    assert_eq!(format.line_height_pt, Some(0.85));
+    let preview = syntra_export::pdf::document_to_reader_html(
+        &serde_json::to_value(&model).unwrap(),
+        "writer",
+    )
+    .unwrap();
+    assert!(preview.html.contains(r#"class="writer-minimum-line""#));
+    let xml = part(&writer_to_docx(&model).unwrap(), "word/document.xml");
+    assert!(xml.contains(r#"w:line="17" w:lineRule="atLeast""#));
+}
+
+#[test]
 fn docx_theme_east_asia_font_and_continued_chinese_start_are_preserved() {
     let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="SimSun"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Normal" w:default="1"><w:rPr><w:rFonts w:eastAsiaTheme="minorEastAsia"/></w:rPr></w:style></w:styles>"#;
     let theme = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Test"><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:font script="Hans" typeface="宋体"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#;
