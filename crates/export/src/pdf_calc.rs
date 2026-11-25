@@ -193,7 +193,8 @@ pub(super) fn render(content: &Value, reader: bool) -> Result<PrintDocument, Str
     if workbook.sheets.is_empty() {
         body.push_str("<section class=\"sheet\"><p>&#160;</p></section>");
     }
-    let css = "@page{size:297mm 210mm;margin:10mm}h1{font-size:15pt;margin:0 0 8pt}h2{font-size:13pt}table{border-collapse:collapse;table-layout:fixed;width:100%;font-size:10pt}thead{display:table-header-group}tr{break-inside:avoid}td,th{border:0.5pt solid #cbd5e1;padding:0 2px;overflow-wrap:anywhere;white-space:pre-wrap}th{background:#f1f5f9;color:#475569;font-weight:normal;text-align:center;font-size:9pt}td{vertical-align:bottom;overflow:hidden}.sheet{break-before:page}.sheet:first-child{break-before:auto}.sheet-chart{break-inside:avoid;margin-top:12pt}svg text{font-family:Arial,'Office CJK',sans-serif}";
+    // Put fallback gridlines on grid tracks so explicit cell borders win collapsed-border ties.
+    let css = "@page{size:297mm 210mm;margin:10mm}h1{font-size:15pt;margin:0 0 8pt}h2{font-size:13pt}table{border-collapse:collapse;table-layout:fixed;width:100%;font-size:10pt}thead{display:table-header-group}tr{break-inside:avoid}tr,col{border:0.5pt solid #cbd5e1}td,th{padding:0 2px;overflow-wrap:anywhere;white-space:pre-wrap}th{background:#f1f5f9;color:#475569;font-weight:normal;text-align:center;font-size:9pt}td{vertical-align:bottom;overflow:hidden}.sheet{break-before:page}.sheet:first-child{break-before:auto}.sheet-chart{break-inside:avoid;margin-top:12pt}svg text{font-family:Arial,'Office CJK',sans-serif}";
     Ok(html(&workbook.title, css, &body, 297., 210.))
 }
 
